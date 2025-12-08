@@ -1,0 +1,13 @@
+{
+  "name": "example-app",
+  "main": "src/worker.ts",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Durable Objects will be auto-added by the plugin
+  "durable_objects": {
+    "bindings": []
+  },
+
+  "migrations": []
+}

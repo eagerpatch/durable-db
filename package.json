@@ -1,0 +1,11 @@
+{
+  "name": "shoplayer-database-monorepo",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

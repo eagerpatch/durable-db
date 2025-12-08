@@ -140,21 +140,3 @@ export const listUsers = action({
       .execute();
   },
 });
-
-// Example of cross-DO call (commented out - would need analytics DB)
-// export const createUserWithAnalytics = action({
-//   args: {
-//     name: 'string',
-//     email: 'string.email',
-//   },
-//   handler: async (db, args, ctx) => {
-//     const user = await createUser({ name: args.name, email: args.email });
-//
-//     // Cross-DO call to analytics database
-//     const analyticsId = ctx.env.ANALYTICS_DATABASE_DO.idFromName('global');
-//     const analytics = ctx.env.ANALYTICS_DATABASE_DO.get(analyticsId);
-//     await analytics.logEvent({ type: 'user_created', userId: user.id });
-//
-//     return user;
-//   },
-// });

@@ -164,6 +164,8 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         databasesDir,
       });
 
+      console.log('discoveredFiles', discoveredFiles);
+
       if (discoveredFiles.length === 0) {
         return;
       }

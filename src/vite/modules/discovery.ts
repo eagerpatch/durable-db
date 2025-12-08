@@ -35,7 +35,10 @@ export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile
   const { projectRoot, databasesDir } = options;
   const absoluteDir = path.join(projectRoot, databasesDir);
 
+  console.log('absoluteDir', absoluteDir);
+
   if (!fs.existsSync(absoluteDir)) {
+    console.log('nope');
     return [];
   }
 
@@ -44,20 +47,22 @@ export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile
 
   for (const file of files) {
     // Skip non-TypeScript files
-    if (!file.endsWith('.js')) continue;
+    if (!file.endsWith('.ts')) continue;
 
     // Skip declaration files
-    if (file.endsWith('.d.js')) continue;
+    if (file.endsWith('.d.ts')) continue;
 
     // Skip schema-only files
-    if (file === 'schema.js') continue;
+    if (file === 'schema.ts') continue;
 
     // Skip private helper files
     if (file.startsWith('_')) continue;
 
     const absolutePath = path.join(absoluteDir, file);
     const relativePath = path.join(databasesDir, file);
-    const name = path.basename(file, '.js');
+    const name = path.basename(file, '.ts');
+
+    console.log('found database file:', absolutePath);
 
     results.push({
       absolutePath,

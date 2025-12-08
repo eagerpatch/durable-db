@@ -9,7 +9,7 @@ export default defineConfig({
       // Use the built-in context module
       contextImport: '@shoplayer/database/context',
       // Where to find database definitions
-      databasesDir: 'src/databases',
+      databasesDir: './src/databases',
       // How to get the shop ID from context (for per-shop databases)
       shopIdPath: 'session.shop',
     }),

@@ -2,12 +2,23 @@
   "name": "example-app",
   "main": "src/worker.ts",
   "compatibility_date": "2024-12-01",
-  "compatibility_flags": ["nodejs_compat"],
-
-  // Durable Objects will be auto-added by the plugin
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "durable_objects": {
-    "bindings": []
+    "bindings": [
+      {
+        "name": "MAIN.TS_DATABASE_DO",
+        "class_name": "Main.tsDatabaseDO"
+      }
+    ]
   },
-
-  "migrations": []
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Main.tsDatabaseDO"
+      ]
+    }
+  ]
 }

@@ -1,12 +1,14 @@
 import type { Kysely } from 'kysely';
 import type { Kyselify } from 'drizzle-orm/kysely';
-import type { SQLiteTableWithColumns, SQLiteColumn } from 'drizzle-orm/sqlite-core';
-import type { type as arkType } from 'arktype';
+import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
+import { type as arkType } from 'arktype';
 
 /**
  * Configuration for defineDatabase
  */
-export interface DatabaseConfig<TSchema extends Record<string, SQLiteTableWithColumns<any>>> {
+export interface DatabaseConfig<
+  TSchema extends Record<string, SQLiteTableWithColumns<any>>,
+> {
   /** Path to migrations directory, relative to the database file */
   migrationsDir: string;
   /** Drizzle schema tables */
@@ -17,107 +19,64 @@ export interface DatabaseConfig<TSchema extends Record<string, SQLiteTableWithCo
 
 /**
  * Convert a Drizzle schema to Kysely database types using drizzle-kysely
- * 
- * @example
- * ```ts
- * import { users, posts } from './schema';
- * 
- * type DB = DrizzleToKysely<{ users: typeof users; posts: typeof posts }>;
- * // DB = { users: Kyselify<typeof users>; posts: Kyselify<typeof posts> }
- * ```
  */
-export type DrizzleToKysely<TSchema extends Record<string, SQLiteTableWithColumns<any>>> = {
+export type DrizzleToKysely<
+  TSchema extends Record<string, SQLiteTableWithColumns<any>>,
+> = {
   [K in keyof TSchema]: TSchema[K] extends SQLiteTableWithColumns<any>
     ? Kyselify<TSchema[K]>
     : never;
 };
 
 /**
- * ArkType schema for action args
- * Can be an object of type definitions or an ArkType type instance
+ * ArkType helpers – mirror Ark's own API:
+ *   - arkType.validate<Def>  → definition shape with DSL validation/autocomplete
+ *   - arkType.infer<Def>     → inferred output type
  */
-export type ArgsSchema = Record<string, unknown> | ReturnType<typeof arkType>;
-
-/**
- * Infer the validated type from an ArkType schema
- * ArkType handles the actual inference, this is a simplified representation
- */
-export type InferArgs<T> = T extends ReturnType<typeof arkType<infer U>> 
-  ? U 
-  : T extends Record<string, unknown>
-    ? InferArgsFromObject<T>
-    : never;
-
-/**
- * Infer types from a plain object schema
- */
-type InferArgsFromObject<T extends Record<string, unknown>> = {
-  [K in keyof T]: InferArgType<T[K]>;
-};
-
-/**
- * Infer a single arg type from an ArkType definition string
- */
-type InferArgType<T> = 
-  T extends 'string' ? string :
-  T extends 'number' ? number :
-  T extends 'boolean' ? boolean :
-  T extends 'string?' ? string | undefined :
-  T extends 'number?' ? number | undefined :
-  T extends 'boolean?' ? boolean | undefined :
-  T extends 'string.email' ? string :
-  T extends 'string.uuid' ? string :
-  T extends 'string.url' ? string :
-  T extends 'string.date' ? string :
-  T extends `number > ${number}` ? number :
-  T extends `number >= ${number}` ? number :
-  T extends `number < ${number}` ? number :
-  T extends `number <= ${number}` ? number :
-  T extends `'${infer L}' | '${infer R}'` ? L | R :
-  T extends `'${infer L}'` ? L :
-  T extends { type: infer U } ? InferArgType<U> :
-  unknown;
+export type ArkDef<Def> = arkType.validate<Def>;
+export type InferArgs<Def> = arkType.infer<Def>;
 
 /**
  * Context passed to action handlers
- * Provides access to environment bindings for cross-DO calls
  */
 export interface ActionContext<TEnv = unknown> {
   /** Environment bindings (DO bindings, KV, etc.) */
   env: TEnv;
-  /** 
+  /**
    * The instance key used to address this Durable Object.
    * For per-shop databases, this is the shop ID.
    * For global databases, this is 'global'.
-   * Used internally for cross-database RPC calls.
    */
   instanceKey: string;
 }
 
 /**
  * Configuration for an action
+ *
+ * `Def` is "the ArkType definition" – whatever you'd normally pass to `type(...)`:
+ *   { name: "string", email: "string.email" }
+ *   unions, tuples, ranges, etc. all work.
  */
 export interface ActionConfig<
-  TArgs extends ArgsSchema,
+  Def,
   TResult,
   TSchema extends Record<string, SQLiteTableWithColumns<any>>,
   TEnv = unknown,
 > {
-  /** 
-   * ArkType schema for args validation
-   * Can be a plain object with string type definitions or an ArkType type instance
+  /**
+   * ArkType definition for args.
+   * Typed as `arkType.validate<Def>` so you get the SAME DSL autocomplete
+   * as when you do `type(Def)` directly.
    */
-  args: TArgs;
-  /** 
-   * The action handler - receives Kysely db instance typed from your Drizzle schema
-   * @param db - Kysely database instance
-   * @param args - Validated arguments
-   * @param ctx - Context with env bindings (for cross-DO calls)
+  args: ArkDef<Def>;
+
+  /**
+   * The action handler
    */
   handler: (
-    db: Kysely<DrizzleToKysely<TSchema>>, 
-    args: InferArgs<TArgs>,
-    ctx: ActionContext<TEnv>
+    db: Kysely<DrizzleToKysely<TSchema>>,
+    args: InferArgs<Def>,
+    ctx: ActionContext<TEnv>,
   ) => Promise<TResult>;
 }
 
@@ -129,13 +88,19 @@ export type Action<TArgs, TResult> = (args: TArgs) => Promise<TResult>;
 /**
  * Return type of defineDatabase
  */
-export interface DatabaseDefinition<TSchema extends Record<string, SQLiteTableWithColumns<any>>> {
+export interface DatabaseDefinition<
+  TSchema extends Record<string, SQLiteTableWithColumns<any>>,
+> {
   /**
    * Define an action that runs within the database context
+   *
+   * NOTE: the `const Def` *here* is crucial – it matches ArkType's own
+   * `<const def>(def: type.validate<def>)` pattern and is what makes
+   * `"string.email"` etc. behave properly.
    */
-  action: <TArgs extends ArgsSchema, TResult>(
-    config: ActionConfig<TArgs, TResult, TSchema>
-  ) => Action<InferArgs<TArgs>, TResult>;
+  action: <const Def, TResult, TEnv = unknown>(
+    config: ActionConfig<Def, TResult, TSchema, TEnv>,
+  ) => Action<InferArgs<Def>, TResult>;
 }
 
 /**

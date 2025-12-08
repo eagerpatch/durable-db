@@ -55,11 +55,14 @@ export const getUserByEmail = action({
   },
 });
 
+
+
 // Create a user only if they don't exist (demonstrates internal DO call)
 export const createUserIfNotExists = action({
   args: {
     name: 'string',
-    email: 'string.email',
+    email: 'string',
+    lol: 'true',
   },
   handler: async (db, args, _ctx) => {
     // This calls getUserByEmail internally - will be transformed to this.getUserByEmail()

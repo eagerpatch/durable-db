@@ -1,4 +1,4 @@
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '../../../src/db';
 import { users, posts } from './schema';
 
 export const { action } = defineDatabase({
@@ -146,12 +146,12 @@ export const listUsers = action({
 //   },
 //   handler: async (db, args, ctx) => {
 //     const user = await createUser({ name: args.name, email: args.email });
-//     
+//
 //     // Cross-DO call to analytics database
 //     const analyticsId = ctx.env.ANALYTICS_DATABASE_DO.idFromName('global');
 //     const analytics = ctx.env.ANALYTICS_DATABASE_DO.get(analyticsId);
 //     await analytics.logEvent({ type: 'user_created', userId: user.id });
-//     
+//
 //     return user;
 //   },
 // });

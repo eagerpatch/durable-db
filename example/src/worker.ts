@@ -1,4 +1,4 @@
-import { runWithContext } from '@shoplayer/database/context';
+import { runWithContext } from '../../src/context';
 import { createUser, getUser, listUsers, getUserWithPosts } from './databases/main';
 
 // Export Durable Object classes - the plugin generates these

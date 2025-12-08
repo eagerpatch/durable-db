@@ -19,19 +19,19 @@ import { DateSerializePlugin, createDrizzlePlugins } from './plugins.js';
 export type SqlExecutor = (sql: string) => void;
 
 /**
- * Migration definition
- *
- * Migrations can use either:
- * 1. Kysely schema builder: `up(db) { await db.schema.createTable(...).execute(); }`
- * 2. Raw SQL via executor: `up(db, exec) { exec('CREATE TABLE ...'); }`
+ * Migration definition - SQL statements with optional breakpoints
+ * 
+ * Each migration is an array of "chunks" - groups of statements separated by breakpoints.
+ * Each chunk is executed as a unit. This allows long migrations to be split into
+ * smaller pieces that can survive DO restarts.
  */
 export interface Migration {
-  up: (db: Kysely<any>, exec: SqlExecutor) => Promise<void>;
-  down?: (db: Kysely<any>, exec: SqlExecutor) => Promise<void>;
+  /** SQL statement chunks (split by breakpoints) */
+  chunks: string[][];
 }
 
 /**
- * Migrations object - keys are migration names (should sort alphabetically)
+ * Migrations object - keys are migration names (should sort alphabetically by timestamp)
  */
 export type Migrations = Record<string, Migration>;
 
@@ -198,6 +198,9 @@ export function createKyselyFromSql<T>(
  *
  * Extend this class and set the `migrations` property to define your schema.
  * Migrations run automatically when the DO is first accessed.
+ * 
+ * Migrations are SQL-based with breakpoint support for long-running migrations.
+ * Breakpoints allow migrations to be resumed if the DO restarts mid-migration.
  *
  * @example
  * ```ts
@@ -205,17 +208,13 @@ export function createKyselyFromSql<T>(
  *
  * export class MyDatabaseDO extends SqliteDurableObject {
  *   migrations = {
- *     '001_initial': {
- *       async up(db) {
- *         await db.schema
- *           .createTable('users')
- *           .addColumn('id', 'text', col => col.primaryKey())
- *           .addColumn('name', 'text', col => col.notNull())
- *           .execute();
- *       },
- *       async down(db) {
- *         await db.schema.dropTable('users').ifExists().execute();
- *       }
+ *     '20240101000000_initial': {
+ *       chunks: [
+ *         // First chunk - create users table
+ *         ['CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL)'],
+ *         // Second chunk (after breakpoint) - create posts table
+ *         ['CREATE TABLE posts (id TEXT PRIMARY KEY, author_id TEXT REFERENCES users(id))'],
+ *       ]
  *     }
  *   };
  * }
@@ -273,59 +272,66 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   private async runMigrations(): Promise<void> {
     // Create migrations tracking table if it doesn't exist
-    await this.db.schema
-      .createTable('__migrations')
-      .ifNotExists()
-      .addColumn('name', 'text', col => col.primaryKey())
-      .addColumn('applied_at', 'text', col => col.notNull())
-      .execute();
+    // Tracks both the migration name and the chunk index for resumability
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS __migrations (
+        name TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        applied_at TEXT NOT NULL,
+        PRIMARY KEY (name, chunk_index)
+      )
+    `);
 
-    // Get already applied migrations
-    const applied = await this.db
-      .selectFrom('__migrations' as any)
-      .select('name')
-      .execute();
+    // Get already applied migrations and their chunks
+    const applied = this.sql.exec('SELECT name, chunk_index FROM __migrations').toArray() as Array<{ name: string; chunk_index: number }>;
+    
+    // Build a map of migration -> set of applied chunk indices
+    const appliedMap = new Map<string, Set<number>>();
+    for (const row of applied) {
+      if (!appliedMap.has(row.name)) {
+        appliedMap.set(row.name, new Set());
+      }
+      appliedMap.get(row.name)!.add(row.chunk_index);
+    }
 
-    const appliedSet = new Set(applied.map(m => m.name));
-
-    // Get pending migrations (sorted by name)
+    // Get pending migrations (sorted by name - should be timestamp-prefixed)
     const migrationNames = Object.keys(this.migrations).sort();
-    const pending = migrationNames.filter(name => !appliedSet.has(name));
 
-    // Create SQL executor bound to this instance
-    const exec = (sql: string) => this.execSql(sql);
-
-    // Apply each pending migration
-    for (const name of pending) {
+    // Apply each migration
+    for (const name of migrationNames) {
       const migration = this.migrations[name];
+      const appliedChunks = appliedMap.get(name) ?? new Set<number>();
 
-      try {
-        await migration.up(this.db, exec);
-
-        // Record successful migration
-        await this.db
-          .insertInto('__migrations' as any)
-          .values({
-            name,
-            applied_at: new Date().toISOString(),
-          })
-          .execute();
-
-        console.log(`[database] Migration applied: ${name}`);
-      } catch (error) {
-        console.error(`[database] Migration failed: ${name}`, error);
-
-        // Try to rollback if down() is defined
-        if (migration.down) {
-          try {
-            await migration.down(this.db, exec);
-            console.log(`[database] Migration rolled back: ${name}`);
-          } catch (rollbackError) {
-            console.error(`[database] Rollback failed: ${name}`, rollbackError);
-          }
+      // Apply each chunk that hasn't been applied yet
+      for (let chunkIndex = 0; chunkIndex < migration.chunks.length; chunkIndex++) {
+        if (appliedChunks.has(chunkIndex)) {
+          continue; // Already applied
         }
 
-        throw error;
+        const chunk = migration.chunks[chunkIndex];
+        
+        try {
+          // Execute each statement in the chunk
+          for (const statement of chunk) {
+            if (statement.trim()) {
+              this.sql.exec(statement);
+            }
+          }
+
+          // Record successful chunk application
+          this.sql.exec(
+            'INSERT INTO __migrations (name, chunk_index, applied_at) VALUES (?, ?, ?)',
+            name,
+            chunkIndex,
+            new Date().toISOString()
+          );
+
+          console.log(`[database] Migration chunk applied: ${name}[${chunkIndex}]`);
+        } catch (error) {
+          console.error(`[database] Migration chunk failed: ${name}[${chunkIndex}]`, error);
+          // Forward-only: no rollback, just fail
+          throw error;
+        }
       }
     }
   }

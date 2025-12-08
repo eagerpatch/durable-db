@@ -151,24 +151,30 @@ export class ${database.className} extends SqliteDurableObject {
 
 /**
  * Generate the migrations object code from loaded migrations
+ * Migrations are now chunk-based for breakpoint support
  */
-function generateMigrationsCode(migrations?: Map<string, string[]>): string {
+function generateMigrationsCode(migrations?: Map<string, string[][]>): string {
   if (!migrations || migrations.size === 0) {
     return '{}';
   }
 
   const entries = Array.from(migrations.entries())
     .sort(([a], [b]) => a.localeCompare(b)) // Sort by migration name
-    .map(([name, statements]) => {
-      // Generate the up function that executes all statements using the exec helper
-      const statementsCode = statements
-        .map(s => `      exec(${JSON.stringify(s)});`)
-        .join('\n');
+    .map(([name, chunks]) => {
+      // Generate chunks as arrays of statement arrays
+      const chunksCode = chunks
+        .map(chunk => {
+          const statementsCode = chunk
+            .map(s => JSON.stringify(s))
+            .join(',\n          ');
+          return `[\n          ${statementsCode}\n        ]`;
+        })
+        .join(',\n        ');
 
       return `    '${name}': {
-      async up(db, exec) {
-${statementsCode}
-      }
+      chunks: [
+        ${chunksCode}
+      ]
     }`;
     });
 

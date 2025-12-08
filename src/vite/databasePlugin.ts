@@ -1,10 +1,10 @@
 import * as path from 'node:path';
 import { transform as esbuildTransform } from 'esbuild';
 import type { Plugin, ResolvedConfig } from 'vite';
-import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../db/types.js';
-import { discoverDatabaseFiles, readFile, resolveImportPath, fileExists } from './modules/discovery.js';
+import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../db';
+import { discoverDatabaseFiles, readFile, resolveImportPath, fileExists } from './modules';
 import { parseDatabaseFile, resolveInternalActionCalls } from './modules';
-import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from './modules/generator.js';
+import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from './modules';
 import { patchWranglerConfig } from './modules';
 import {
   loadMigrationFiles,

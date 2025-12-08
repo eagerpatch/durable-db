@@ -163,11 +163,53 @@ export async function generateMigration(
 }
 
 /**
- * Load all migration SQL files from a directory
- * Returns migrations sorted by name (timestamp order)
+ * Breakpoint marker in SQL files
+ * Use: --> breakpoint
  */
-export function loadMigrationFiles(migrationsDir: string): Map<string, string[]> {
-  const migrations = new Map<string, string[]>();
+const BREAKPOINT_MARKER = /^-->\s*breakpoint\s*$/im;
+
+/**
+ * Parse SQL content into chunks (split by breakpoints) and statements
+ * 
+ * @param content - Raw SQL file content
+ * @returns Array of chunks, where each chunk is an array of SQL statements
+ */
+export function parseSqlMigration(content: string): string[][] {
+  // Split by breakpoint markers
+  const chunks = content.split(BREAKPOINT_MARKER);
+  
+  return chunks.map(chunk => {
+    // Remove comment lines
+    const withoutComments = chunk
+      .split('\n')
+      .filter(line => !line.trim().startsWith('--'))
+      .join('\n');
+
+    // Split into individual statements
+    // Handle both ";\n" and just ";" at end of file
+    const statements = withoutComments
+      .split(/;(?:\s*\n|\s*$)/)
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+
+    return statements;
+  }).filter(chunk => chunk.length > 0); // Remove empty chunks
+}
+
+/**
+ * Migration data structure for embedding in generated code
+ */
+export interface MigrationData {
+  name: string;
+  chunks: string[][];
+}
+
+/**
+ * Load all migration SQL files from a directory
+ * Returns migrations sorted by name (timestamp order) with breakpoint parsing
+ */
+export function loadMigrationFiles(migrationsDir: string): Map<string, string[][]> {
+  const migrations = new Map<string, string[][]>();
 
   if (!fs.existsSync(migrationsDir)) {
     return migrations;
@@ -180,22 +222,10 @@ export function loadMigrationFiles(migrationsDir: string): Map<string, string[]>
   for (const file of files) {
     const name = file.replace('.sql', '');
     const content = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
-
-    // Remove comment lines first
-    const withoutComments = content
-      .split('\n')
-      .filter(line => !line.trim().startsWith('--'))
-      .join('\n');
-
-    // Split into individual statements
-    // Handle both ";\n" and just ";" at end of file
-    const statements = withoutComments
-      .split(/;(?:\s*\n|\s*$)/)
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
-
-    if (statements.length > 0) {
-      migrations.set(name, statements);
+    const chunks = parseSqlMigration(content);
+    
+    if (chunks.length > 0) {
+      migrations.set(name, chunks);
     }
   }
 

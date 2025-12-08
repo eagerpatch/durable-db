@@ -4,7 +4,7 @@ import _generate from '@babel/generator';
 import * as t from '@babel/types';
 import type { NodePath } from '@babel/traverse';
 import * as path from 'node:path';
-import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../../db';
+import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../../db/types.js';
 
 // Handle both ESM and CJS module formats for Babel
 const traverse = typeof _traverse === 'function' ? _traverse : (_traverse as any).default;

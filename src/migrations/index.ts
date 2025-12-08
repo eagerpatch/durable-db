@@ -13,6 +13,7 @@ export {
 export {
   type MigrationResult,
   type GenerateMigrationOptions,
+  type MigrationData,
   generateMigration,
   generateMigrationName,
   loadSnapshot,
@@ -21,4 +22,5 @@ export {
   loadSchemaModule,
   buildAndLoadSchema,
   generateCreateTableSQL,
+  parseSqlMigration,
 } from './generator.js';

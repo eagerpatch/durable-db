@@ -129,8 +129,8 @@ export interface DatabaseInfo {
   schemaImport: string | null;
   /** Names of schema tables */
   schemaTableNames: string[];
-  /** Loaded migrations - Map of name -> SQL statements */
-  migrations?: Map<string, string[]>;
+  /** Loaded migrations - Map of name -> chunks (each chunk is array of SQL statements) */
+  migrations?: Map<string, string[][]>;
 }
 
 /**

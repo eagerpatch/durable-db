@@ -4,7 +4,7 @@ import _generate from '@babel/generator';
 import * as t from '@babel/types';
 import type { NodePath } from '@babel/traverse';
 import * as path from 'node:path';
-import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../../db/types.js';
+import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../../db';
 
 // Handle both ESM and CJS module formats for Babel
 const traverse = typeof _traverse === 'function' ? _traverse : (_traverse as any).default;
@@ -275,7 +275,7 @@ export function parseDatabaseFile(filePath: string, code: string): ParsedDatabas
 
   // Track what variable name 'action' is bound to (from destructuring defineDatabase)
   let actionFnName: string | null = null;
-  let currentDatabaseName = path.basename(filePath, '.js');
+  let currentDatabaseName = path.basename(filePath).replace(/\.(ts|js)$/, '');
 
   traverse(ast, {
     // Track imports for dependency resolution

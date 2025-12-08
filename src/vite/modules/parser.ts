@@ -433,7 +433,7 @@ function extractDatabaseInfo(
     }
   }
 
-  const name = path.basename(filePath, '.js');
+  const name = path.basename(filePath).replace(/\.(ts|js)$/, '');
 
   return {
     filePath,

@@ -3,7 +3,7 @@ import { createUser, getUser, listUsers, getUserWithPosts } from './databases/ma
 
 // Export Durable Object classes - the plugin generates these
 // @ts-ignore
-// export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
+export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any): Promise<Response> {

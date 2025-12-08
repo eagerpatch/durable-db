@@ -14,6 +14,10 @@ export default defineConfig({
       shopIdPath: 'session.shop',
     }),
     // Cloudflare's Vite plugin for Workers
-    cloudflare(),
+    cloudflare({
+      viteEnvironment: {
+        name: 'worker',
+      },
+    }),
   ],
 });

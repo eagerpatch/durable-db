@@ -4,6 +4,12 @@ import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { type as arkType } from 'arktype';
 
 /**
+ * Base type for ArkType schema definitions.
+ * This represents any valid arktype definition object.
+ */
+export type ArgsSchema = Record<string, unknown>;
+
+/**
  * Configuration for defineDatabase
  */
 export interface DatabaseConfig<

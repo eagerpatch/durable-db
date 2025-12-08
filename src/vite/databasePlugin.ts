@@ -72,18 +72,21 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
   let projectRoot: string;
   let config: ResolvedConfig;
+  let initialized = false;
+  let initPromise: Promise<void> | null = null;
 
   /**
    * Parse a file and recursively parse its local dependencies
    */
   async function parseFileWithDependencies(filePath: string): Promise<void> {
-    if (parsedFiles.has(filePath)) {
+    const normalizedPath = path.normalize(filePath);
+    if (parsedFiles.has(normalizedPath)) {
       return;
     }
 
     const code = readFile(filePath);
-    const parsed = parseDatabaseFile(filePath, code);
-    parsedFiles.set(filePath, parsed);
+    const parsed = parseDatabaseFile(normalizedPath, code);
+    parsedFiles.set(normalizedPath, parsed);
 
     // Recursively parse local imports
     for (const [, importInfo] of parsed.localImports) {
@@ -144,15 +147,16 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     }
   }
 
-  return {
-    name: 'shoplayer-database',
+  /**
+   * Initialize the plugin state (lazy, called on demand)
+   */
+  async function initialize(): Promise<void> {
+    if (initialized) return;
+    if (initPromise) return initPromise;
 
-    configResolved(resolvedConfig) {
-      config = resolvedConfig;
-      projectRoot = config.root;
-    },
-
-    async buildStart() {
+    initPromise = (async () => {
+      console.log('[shoplayer-database] Initializing...');
+      
       // Clear previous state
       databases.clear();
       actions.clear();
@@ -164,9 +168,10 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         databasesDir,
       });
 
-      console.log('discoveredFiles', discoveredFiles);
+      console.log('[shoplayer-database] discoveredFiles', discoveredFiles);
 
       if (discoveredFiles.length === 0) {
+        initialized = true;
         return;
       }
 
@@ -213,29 +218,67 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       if (databases.size > 0) {
         patchWranglerConfig(projectRoot, Array.from(databases.values()));
       }
+      
+      // Debug: Log all registered files and their info
+      console.log('[shoplayer-database] Registered parsedFiles keys:', Array.from(parsedFiles.keys()));
+      console.log('[shoplayer-database] Registered databases:', Array.from(databases.keys()));
+      console.log('[shoplayer-database] Registered actions:', Array.from(actions.keys()));
+      
+      initialized = true;
+    })();
+
+    return initPromise;
+  }
+
+  return {
+    name: 'shoplayer-database',
+    
+    // Ensure plugin runs before vite:esbuild so our transform is applied first
+    enforce: 'pre',
+
+    configResolved(resolvedConfig) {
+      config = resolvedConfig;
+      projectRoot = config.root;
     },
 
-    resolveId(id) {
+    async buildStart() {
+      // Initialize on build start
+      await initialize();
+    },
+
+    async resolveId(id) {
+      // Ensure initialized before resolving
+      await initialize();
+      
       // Handle: virtual:shoplayer/databases/__durableObjects
       if (id === `virtual:${VIRTUAL_DO_ID}` || id === VIRTUAL_DO_ID) {
-        return VIRTUAL_PREFIX + '__durableObjects';
+        return VIRTUAL_PREFIX + '__durableObjects.ts';
       }
 
       // Handle: shoplayer/databases/xxx or virtual:shoplayer/databases/xxx
       const dbNameMatch = id.match(/^(?:virtual:)?shoplayer\/databases\/(.+)$/);
       if (dbNameMatch) {
-        const dbName = dbNameMatch[1];
-        if (dbName !== '__durableObjects') {
-          return VIRTUAL_PREFIX + dbName;
+        let dbName = dbNameMatch[1];
+        // Skip the durable objects module
+        if (dbName === '__durableObjects' || dbName === '__durableObjects.ts') {
+          return null;
         }
+        // Strip .ts if already present to avoid double extension
+        if (dbName.endsWith('.ts')) {
+          dbName = dbName.slice(0, -3);
+        }
+        return VIRTUAL_PREFIX + dbName + '.ts';
       }
 
       return null;
     },
 
-    load(id) {
+    async load(id) {
+      // Ensure initialized before loading
+      await initialize();
+      
       // Generate Durable Objects module
-      if (id === VIRTUAL_PREFIX + '__durableObjects') {
+      if (id === VIRTUAL_PREFIX + '__durableObjects.ts') {
         const actionsByDatabase = new Map<string, ActionInfo[]>();
         for (const action of actions.values()) {
           const dbActions = actionsByDatabase.get(action.databaseName) ?? [];
@@ -251,8 +294,8 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       }
 
       // Generate RPC stubs for a specific database
-      if (id.startsWith(VIRTUAL_PREFIX)) {
-        const dbName = id.slice(VIRTUAL_PREFIX.length);
+      if (id.startsWith(VIRTUAL_PREFIX) && id.endsWith('.ts')) {
+        const dbName = id.slice(VIRTUAL_PREFIX.length, -3); // Remove prefix and .ts
         const database = databases.get(dbName);
 
         if (!database) {
@@ -268,15 +311,36 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       return null;
     },
 
-    transform(code, id) {
+    async transform(code, id) {
+      // Ensure initialized before transforming
+      await initialize();
+      
       // Transform database files to re-export from virtual modules
-      const parsed = parsedFiles.get(id);
+      // Normalize the path for consistent lookup
+      const normalizedId = path.normalize(id);
+      const parsed = parsedFiles.get(normalizedId);
+      
+      // Debug: log when we're checking a databases file
+      if (id.includes('databases/')) {
+        console.log(`[shoplayer-database] transform check: ${id}`);
+        console.log(`[shoplayer-database] normalized: ${normalizedId}`);
+        console.log(`[shoplayer-database] found in parsedFiles: ${!!parsed}`);
+        console.log(`[shoplayer-database] has database: ${!!parsed?.database}`);
+        if (parsed?.database) {
+          const dbActions = Array.from(actions.values())
+            .filter(a => a.databaseName === parsed.database!.name);
+          console.log(`[shoplayer-database] actions for ${parsed.database.name}: ${dbActions.length}`);
+        }
+      }
+      
       if (parsed?.database) {
         const dbActions = Array.from(actions.values())
           .filter(a => a.databaseName === parsed.database!.name);
 
         if (dbActions.length > 0) {
-          return generateReExportModule(parsed.database.name, dbActions);
+          const result = generateReExportModule(parsed.database.name, dbActions);
+          console.log(`[shoplayer-database] transforming ${id} to:`, result);
+          return result;
         }
       }
 

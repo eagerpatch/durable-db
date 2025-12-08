@@ -4,6 +4,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": true,
+    "noEmit": true,
     "declaration": true,
     "declarationMap": true,
     "outDir": "./dist",

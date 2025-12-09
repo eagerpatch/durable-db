@@ -35,10 +35,7 @@ export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile
   const { projectRoot, databasesDir } = options;
   const absoluteDir = path.join(projectRoot, databasesDir);
 
-  console.log('absoluteDir', absoluteDir);
-
   if (!fs.existsSync(absoluteDir)) {
-    console.log('nope');
     return [];
   }
 
@@ -61,8 +58,6 @@ export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile
     const absolutePath = path.join(absoluteDir, file);
     const relativePath = path.join(databasesDir, file);
     const name = path.basename(file, '.ts');
-
-    console.log('found database file:', absolutePath);
 
     results.push({
       absolutePath,

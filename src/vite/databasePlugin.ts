@@ -1,16 +1,17 @@
 import * as path from 'node:path';
 import { transform as esbuildTransform } from 'esbuild';
 import type { Plugin, ResolvedConfig } from 'vite';
-import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../db';
-import { discoverDatabaseFiles, readFile, resolveImportPath, fileExists } from './modules';
-import { parseDatabaseFile, resolveInternalActionCalls } from './modules';
-import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from './modules';
-import { patchWranglerConfig } from './modules';
+import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../db/types.js';
+import { discoverDatabaseFiles, readFile, resolveImportPath, fileExists } from './modules/discovery.js';
+import { parseDatabaseFile, resolveInternalActionCalls } from './modules/parser.js';
+import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from './modules/generator.js';
+import { patchWranglerConfig } from './modules/wrangler.js';
 import {
   loadMigrationFiles,
+  loadSnapshot,
   generateMigration,
   buildAndLoadSchema,
-} from '../migrations';
+} from '../migrations/index.js';
 
 /**
  * Transpile TypeScript code to JavaScript using esbuild
@@ -168,8 +169,6 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     if (initPromise) return initPromise;
 
     initPromise = (async () => {
-      console.log('[shoplayer-database] Initializing...');
-
       // Clear previous state
       databases.clear();
       actions.clear();
@@ -180,8 +179,6 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         projectRoot,
         databasesDir,
       });
-
-      console.log('[shoplayer-database] discoveredFiles', discoveredFiles);
 
       if (discoveredFiles.length === 0) {
         initialized = true;
@@ -217,12 +214,11 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         resolveInternalActionCalls(dbActions, allActionsList);
       }
 
-      // Log info about cross-DB calls (now properly handled)
+      // Log info about cross-DB calls
       for (const action of actions.values()) {
         if (action.crossDbActionCalls.length > 0) {
           console.log(
-            `[shoplayer-database] Action "${action.exportName}" in database "${action.databaseName}" ` +
-            `has cross-DB calls: ${action.crossDbActionCalls.join(', ')} (will be transformed to RPC)`
+            `[shoplayer-database] Action "${action.exportName}" has cross-DB calls: ${action.crossDbActionCalls.join(', ')}`
           );
         }
       }
@@ -230,13 +226,11 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       // Patch wrangler config
       if (databases.size > 0) {
         patchWranglerConfig(projectRoot, Array.from(databases.values()));
+        console.log(
+          `[shoplayer-database] Found ${databases.size} database(s), ${actions.size} action(s)`
+        );
       }
-
-      // Debug: Log all registered files and their info
-      console.log('[shoplayer-database] Registered parsedFiles keys:', Array.from(parsedFiles.keys()));
-      console.log('[shoplayer-database] Registered databases:', Array.from(databases.keys()));
-      console.log('[shoplayer-database] Registered actions:', Array.from(actions.keys()));
-
+      
       initialized = true;
     })();
 
@@ -245,17 +239,16 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
   return {
     name: 'shoplayer-database',
-
+    
     // Ensure plugin runs before vite:esbuild so our transform is applied first
     enforce: 'pre',
-
+    
     // Apply to both serve and build modes
     apply: undefined, // undefined means apply to all
 
     configResolved(resolvedConfig) {
       config = resolvedConfig;
       projectRoot = config.root;
-      console.log(`[shoplayer-database] Config resolved. Root: ${projectRoot}, SSR: ${config.ssr}, Command: ${config.command}`);
     },
 
     async buildStart() {
@@ -263,18 +256,12 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       await initialize();
     },
 
-    async resolveId(id) {
+    async resolveId(id, importer) {
       // Ensure initialized before resolving
       await initialize();
-
-      // Log all resolve attempts for our modules
-      if (id.includes('shoplayer') || id.includes('databases')) {
-        console.log(`[shoplayer-database] resolveId: ${id}`);
-      }
-
+      
       // Handle: virtual:shoplayer/databases/__durableObjects
       if (id === `virtual:${VIRTUAL_DO_ID}` || id === VIRTUAL_DO_ID) {
-        console.log(`[shoplayer-database] Resolving DO module`);
         return VIRTUAL_PREFIX + '__durableObjects.ts';
       }
 
@@ -288,10 +275,8 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         }
         // Handle the durable objects module specially
         if (dbName === '__durableObjects') {
-          console.log(`[shoplayer-database] Resolving DO module from pattern match`);
           return VIRTUAL_PREFIX + '__durableObjects.ts';
         }
-        console.log(`[shoplayer-database] Resolving database module: ${dbName}`);
         return VIRTUAL_PREFIX + dbName + '.ts';
       }
 
@@ -301,9 +286,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     async load(id) {
       // Ensure initialized before loading
       await initialize();
-
-      console.log(`[shoplayer-database] load: ${id}`);
-
+      
       // Generate Durable Objects module
       if (id === VIRTUAL_PREFIX + '__durableObjects.ts') {
         const actionsByDatabase = new Map<string, ActionInfo[]>();
@@ -318,8 +301,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
           actionsByDatabase,
           Array.from(actions.values())
         );
-        console.log(`[shoplayer-database] Generated DO module, transpiling...`);
-
+        
         // Transpile TypeScript to JavaScript
         const jsCode = await transpileTS(tsCode, 'durableObjects.ts');
         return jsCode;
@@ -338,8 +320,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
           .filter(a => a.databaseName === dbName);
 
         const tsCode = generateRpcStubs(database, dbActions, { contextImport, shopIdPath });
-        console.log(`[shoplayer-database] Generated RPC stubs for ${dbName}, transpiling...`);
-
+        
         // Transpile TypeScript to JavaScript
         const jsCode = await transpileTS(tsCode, `${dbName}.ts`);
         return jsCode;
@@ -349,67 +330,42 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     },
 
     async transform(code, id) {
-      console.log(`[shoplayer-database] transform called: ${id.substring(0, 100)}`);
-
       // Ensure initialized before transforming
       await initialize();
-
+      
       // Skip virtual modules and node_modules
       if (id.startsWith('\0') || id.includes('node_modules')) {
         return null;
       }
-
-      // Debug: log transform calls for project files
-      if (id.includes('/src/') || id.includes('\\src\\')) {
-        console.log(`[shoplayer-database] transform: ${id}`);
-      }
-
+      
       // Clean the ID - remove query params and normalize
       const cleanId = id.split('?')[0];
       const normalizedId = path.normalize(cleanId);
-
+      
       // Try multiple matching strategies
       let parsed: ParsedDatabaseFile | undefined;
-
+      
       // Strategy 1: Direct match
       parsed = parsedFiles.get(normalizedId) ?? parsedFiles.get(cleanId) ?? parsedFiles.get(id);
-
+      
       // Strategy 2: Check if any parsedFile path ends with the same relative path
       if (!parsed) {
         for (const [filePath, fileData] of parsedFiles) {
-          // Check if the paths have the same basename and parent directory
-          if (normalizedId.endsWith(path.basename(filePath)) &&
+          if (normalizedId.endsWith(path.basename(filePath)) && 
               normalizedId.includes('databases/')) {
-            console.log(`[shoplayer-database] Matched by basename: ${filePath} -> ${normalizedId}`);
             parsed = fileData;
             break;
           }
         }
       }
-
-      // Debug: log when we're checking a databases file
-      if (id.includes('databases/') || id.includes('databases\\')) {
-        console.log(`[shoplayer-database] databases file check:`);
-        console.log(`  cleanId: ${cleanId}`);
-        console.log(`  normalizedId: ${normalizedId}`);
-        console.log(`  found: ${!!parsed}`);
-        console.log(`  has database: ${!!parsed?.database}`);
-        console.log(`  parsedFiles keys:`, Array.from(parsedFiles.keys()));
-        if (parsed?.database) {
-          const dbActions = Array.from(actions.values())
-            .filter(a => a.databaseName === parsed!.database!.name);
-          console.log(`  actions for ${parsed.database.name}: ${dbActions.length}`);
-        }
-      }
-
+      
+      // Transform database files to re-export from virtual modules
       if (parsed?.database) {
         const dbActions = Array.from(actions.values())
           .filter(a => a.databaseName === parsed!.database!.name);
 
         if (dbActions.length > 0) {
-          const result = generateReExportModule(parsed.database.name, dbActions);
-          console.log(`[shoplayer-database] TRANSFORMING ${id} to:`, result);
-          return result;
+          return generateReExportModule(parsed.database.name, dbActions);
         }
       }
 

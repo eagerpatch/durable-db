@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from '../generator';
-import type { DatabaseInfo, ActionInfo } from '../../../db';
+import type { DatabaseInfo, ActionInfo } from '../../../db/types';
 
 describe('generator', () => {
   const mockDatabase: DatabaseInfo = {

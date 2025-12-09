@@ -7,6 +7,20 @@ export const { action } = defineDatabase({
   // instance: 'per-shop' is the default
 });
 
+// Get a user by email
+export const getUserByEmail = action({
+  args: {
+    email: 'string.email',
+  },
+  handler: async (db, args, _ctx) => {
+    return db
+    .selectFrom('users')
+    .where('email', '=', args.email)
+    .selectAll()
+    .executeTakeFirst();
+  },
+});
+
 // Create a new user
 export const createUser = action({
   args: {
@@ -14,6 +28,12 @@ export const createUser = action({
     email: 'string.email',
   },
   handler: async (db, args, _ctx) => {
+    const hasUser = await getUserByEmail({ email: args.email });
+
+    if (hasUser?.id) {
+      throw new Error('User with this email already exists');
+    }
+
     return db
       .insertInto('users')
       .values({
@@ -40,22 +60,6 @@ export const getUser = action({
       .executeTakeFirst();
   },
 });
-
-// Get a user by email
-export const getUserByEmail = action({
-  args: {
-    email: 'string.email',
-  },
-  handler: async (db, args, _ctx) => {
-    return db
-      .selectFrom('users')
-      .where('email', '=', args.email)
-      .selectAll()
-      .executeTakeFirst();
-  },
-});
-
-
 
 // Create a user only if they don't exist (demonstrates internal DO call)
 export const createUserIfNotExists = action({

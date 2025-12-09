@@ -8,7 +8,6 @@ import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule 
 import { patchWranglerConfig } from './modules';
 import {
   loadMigrationFiles,
-  loadSnapshot,
   generateMigration,
   buildAndLoadSchema,
 } from '../migrations';
@@ -350,6 +349,8 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     },
 
     async transform(code, id) {
+      console.log(`[shoplayer-database] transform called: ${id.substring(0, 100)}`);
+
       // Ensure initialized before transforming
       await initialize();
 

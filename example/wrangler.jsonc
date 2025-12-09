@@ -8,22 +8,12 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "MAIN.TS_DATABASE_DO",
-        "class_name": "Main.tsDatabaseDO"
-      },
-      {
         "name": "MAIN_DATABASE_DO",
         "class_name": "MainDatabaseDO"
       }
     ]
   },
   "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": [
-        "Main.tsDatabaseDO"
-      ]
-    },
     {
       "tag": "v2",
       "new_sqlite_classes": [

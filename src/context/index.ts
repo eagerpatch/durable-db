@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { env } from 'cloudflare:workers';
 
 /**
  * The context object available during request handling
@@ -20,13 +19,13 @@ const contextStorage = new AsyncLocalStorage<RequestContext<any, any>>();
 
 /**
  * Get the current request context
- *
+ * 
  * @throws Error if called outside of a runWithContext() block
- *
+ * 
  * @example
  * ```ts
  * import { getContext } from '@shoplayer/database/context';
- *
+ * 
  * async function myHandler() {
  *   const ctx = getContext();
  *   const shop = ctx.session.shop;
@@ -35,25 +34,27 @@ const contextStorage = new AsyncLocalStorage<RequestContext<any, any>>();
  * ```
  */
 export function getContext<TEnv = unknown, TSession = unknown>(): RequestContext<TEnv, TSession> {
-  return {
-    // @ts-ignore
-    session: {
-      shop: 'my-shop.myshopify.com',
-    },
-    // @ts-ignore
-    env,
+  const ctx = contextStorage.getStore();
+  
+  if (!ctx) {
+    throw new Error(
+      'getContext() called outside of request context. ' +
+      'Make sure you are calling actions within a runWithContext() block.'
+    );
   }
+  
+  return ctx as RequestContext<TEnv, TSession>;
 }
 
 /**
  * Run a function with the given request context
- *
+ * 
  * All database actions called within the callback will have access to this context.
- *
+ * 
  * @example
  * ```ts
  * import { runWithContext } from '@shoplayer/database/context';
- *
+ * 
  * export default {
  *   async fetch(request: Request, env: Env) {
  *     return runWithContext(

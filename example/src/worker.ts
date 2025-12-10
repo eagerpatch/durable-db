@@ -1,5 +1,8 @@
 import { runWithContext } from '../../src/context';
-import { createUser, getUser, listUsers, getUserWithPosts } from './databases/main';
+import { createUser } from './databases/actions/createUser';
+import { listUsers } from './databases/actions/listUsers';
+import { getUserWithPosts } from './databases/actions/getUsersWithPosts';
+import { getUser } from './databases/actions/getUser';
 
 // Export Durable Object classes - the plugin generates these
 // @ts-ignore

@@ -1,17 +1,12 @@
 import * as path from 'node:path';
 import { transform as esbuildTransform } from 'esbuild';
 import type { Plugin, ResolvedConfig } from 'vite';
-import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../db/types.js';
-import { discoverDatabaseFiles, readFile, resolveImportPath, fileExists } from './modules/discovery.js';
-import { parseDatabaseFile, resolveInternalActionCalls } from './modules/parser.js';
-import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from './modules/generator.js';
-import { patchWranglerConfig } from './modules/wrangler.js';
-import {
-  loadMigrationFiles,
-  loadSnapshot,
-  generateMigration,
-  buildAndLoadSchema,
-} from '../migrations/index.js';
+import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../db';
+import { discoverDatabaseFiles, readFile, resolveImportPath } from './modules';
+import { parseDatabaseFile, resolveInternalActionCalls } from './modules';
+import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from './modules';
+import { patchWranglerConfig } from './modules';
+import { loadMigrationFiles, generateMigration, buildAndLoadSchema } from '../migrations';
 
 /**
  * Transpile TypeScript code to JavaScript using esbuild
@@ -230,7 +225,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
           `[shoplayer-database] Found ${databases.size} database(s), ${actions.size} action(s)`
         );
       }
-      
+
       initialized = true;
     })();
 
@@ -239,10 +234,10 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
   return {
     name: 'shoplayer-database',
-    
+
     // Ensure plugin runs before vite:esbuild so our transform is applied first
     enforce: 'pre',
-    
+
     // Apply to both serve and build modes
     apply: undefined, // undefined means apply to all
 
@@ -259,7 +254,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     async resolveId(id, importer) {
       // Ensure initialized before resolving
       await initialize();
-      
+
       // Handle: virtual:shoplayer/databases/__durableObjects
       if (id === `virtual:${VIRTUAL_DO_ID}` || id === VIRTUAL_DO_ID) {
         return VIRTUAL_PREFIX + '__durableObjects.ts';
@@ -286,7 +281,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     async load(id) {
       // Ensure initialized before loading
       await initialize();
-      
+
       // Generate Durable Objects module
       if (id === VIRTUAL_PREFIX + '__durableObjects.ts') {
         const actionsByDatabase = new Map<string, ActionInfo[]>();
@@ -301,7 +296,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
           actionsByDatabase,
           Array.from(actions.values())
         );
-        
+
         // Transpile TypeScript to JavaScript
         const jsCode = await transpileTS(tsCode, 'durableObjects.ts');
         return jsCode;
@@ -320,7 +315,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
           .filter(a => a.databaseName === dbName);
 
         const tsCode = generateRpcStubs(database, dbActions, { contextImport, shopIdPath });
-        
+
         // Transpile TypeScript to JavaScript
         const jsCode = await transpileTS(tsCode, `${dbName}.ts`);
         return jsCode;
@@ -332,33 +327,33 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     async transform(code, id) {
       // Ensure initialized before transforming
       await initialize();
-      
+
       // Skip virtual modules and node_modules
       if (id.startsWith('\0') || id.includes('node_modules')) {
         return null;
       }
-      
+
       // Clean the ID - remove query params and normalize
       const cleanId = id.split('?')[0];
       const normalizedId = path.normalize(cleanId);
-      
+
       // Try multiple matching strategies
       let parsed: ParsedDatabaseFile | undefined;
-      
+
       // Strategy 1: Direct match
       parsed = parsedFiles.get(normalizedId) ?? parsedFiles.get(cleanId) ?? parsedFiles.get(id);
-      
+
       // Strategy 2: Check if any parsedFile path ends with the same relative path
       if (!parsed) {
         for (const [filePath, fileData] of parsedFiles) {
-          if (normalizedId.endsWith(path.basename(filePath)) && 
+          if (normalizedId.endsWith(path.basename(filePath)) &&
               normalizedId.includes('databases/')) {
             parsed = fileData;
             break;
           }
         }
       }
-      
+
       // Transform database files to re-export from virtual modules
       if (parsed?.database) {
         const dbActions = Array.from(actions.values())

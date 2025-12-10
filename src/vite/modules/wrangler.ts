@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { DatabaseInfo } from '../../db/types.js';
+import type { DatabaseInfo } from '../../db';
 
 /**
  * Result of wrangler config patching

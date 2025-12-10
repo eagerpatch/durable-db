@@ -1,14 +1,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { Snapshot } from './snapshot.js';
+import type { Snapshot } from './snapshot';
 import {
   createEmptySnapshot,
   generateSnapshotFromSchema,
   generateMigrationStatements,
   generateSnapshotId,
   snapshotsEqual,
-} from './snapshot.js';
+} from './snapshot';
 
 /**
  * Result of migration generation
@@ -170,14 +170,14 @@ const BREAKPOINT_MARKER = /^-->\s*breakpoint\s*$/im;
 
 /**
  * Parse SQL content into chunks (split by breakpoints) and statements
- * 
+ *
  * @param content - Raw SQL file content
  * @returns Array of chunks, where each chunk is an array of SQL statements
  */
 export function parseSqlMigration(content: string): string[][] {
   // Split by breakpoint markers
   const chunks = content.split(BREAKPOINT_MARKER);
-  
+
   return chunks.map(chunk => {
     // Remove comment lines
     const withoutComments = chunk
@@ -223,7 +223,7 @@ export function loadMigrationFiles(migrationsDir: string): Map<string, string[][
     const name = file.replace('.sql', '');
     const content = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
     const chunks = parseSqlMigration(content);
-    
+
     if (chunks.length > 0) {
       migrations.set(name, chunks);
     }

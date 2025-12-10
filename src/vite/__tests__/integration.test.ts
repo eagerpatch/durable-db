@@ -6,7 +6,7 @@ import { discoverDatabaseFiles, readFile } from '../modules/discovery';
 import { parseDatabaseFile, resolveInternalActionCalls } from '../modules/parser';
 import { generateRpcStubs, generateDurableObjectsModule } from '../modules/generator';
 import { generateRequiredConfig } from '../modules/wrangler';
-import type { DatabaseInfo, ActionInfo } from '../../db/types';
+import type { DatabaseInfo, ActionInfo } from '../../db';
 
 describe('plugin integration', () => {
   let tempDir: string;

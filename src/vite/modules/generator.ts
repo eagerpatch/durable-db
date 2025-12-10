@@ -1,5 +1,5 @@
-import type { DatabaseInfo, ActionInfo } from '../../db/types.js';
-import { transformHandlerForDO, transformCrossDbCalls } from './parser.js';
+import type { DatabaseInfo, ActionInfo } from '../../db';
+import { transformHandlerForDO, transformCrossDbCalls } from './parser';
 
 /**
  * Options for code generation

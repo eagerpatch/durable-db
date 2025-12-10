@@ -7,7 +7,7 @@ import type {
   Action,
   ArgsSchema,
   InferArgs
-} from './types.js';
+} from './types';
 
 /**
  * Define a database with its schema and migrations.
@@ -74,5 +74,5 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
     return actionFn;
   };
 
-  return { action } as DatabaseDefinition<TSchema>;
+  return { action } as unknown as DatabaseDefinition<TSchema>;
 }

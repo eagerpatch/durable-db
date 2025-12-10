@@ -1,7 +1,6 @@
-// Core database functionality
-export { defineDatabase } from './defineDatabase.js';
-export { SqliteDurableObject, createKyselyFromSql } from './SqliteDurableObject.js';
-export type { Migration, Migrations, CreateKyselyOptions, SqlExecutor } from './SqliteDurableObject.js';
+export { defineDatabase } from './defineDatabase';
+export { SqliteDurableObject, createKyselyFromSql } from './SqliteDurableObject';
+export type { Migration, Migrations, CreateKyselyOptions, SqlExecutor } from './SqliteDurableObject';
 
 // Plugins
 export {
@@ -9,7 +8,7 @@ export {
   DateSerializePlugin,
   dateSerializers,
   createDrizzlePlugins
-} from './plugins.js';
+} from './plugins';
 
 // Types
 export type {

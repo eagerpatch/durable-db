@@ -7,7 +7,7 @@ export {
   generateSnapshotId,
   snapshotsEqual,
   hashSnapshot,
-} from './snapshot.js';
+} from './snapshot';
 
 // Migration generation
 export {
@@ -23,4 +23,4 @@ export {
   buildAndLoadSchema,
   generateCreateTableSQL,
   parseSqlMigration,
-} from './generator.js';
+} from './generator';

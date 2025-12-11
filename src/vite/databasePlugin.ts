@@ -33,7 +33,7 @@ async function transpileTS(
     sourcemap: 'external',
     sourcesContent: true,
   });
-  
+
   // If we have an original source, update the sourcemap to include it
   let map = result.map;
   if (map && originalSource) {
@@ -45,7 +45,7 @@ async function transpileTS(
       // Keep original map if parsing fails
     }
   }
-  
+
   return {
     code: result.code,
     map,
@@ -84,19 +84,24 @@ export interface DatabasePluginOptions {
   autoMigrations?: boolean | 'development';
 }
 
-// Virtual module prefix - only used for Durable Objects module
-const VIRTUAL_PREFIX = '\0virtual:shoplayer/databases/';
+// Virtual module prefixes
+const VIRTUAL_DB_PREFIX = '\0virtual:shoplayer/databases/';
 const VIRTUAL_DO_ID = 'shoplayer/databases/__durableObjects';
+const VIRTUAL_DO_MODULE_ID = VIRTUAL_DB_PREFIX + '__durableObjects.ts';
+
+// One virtual module per action
+const VIRTUAL_ACTION_PREFIX = '\0virtual:shoplayer/actions/';
 
 /**
  * Shoplayer Database Vite Plugin
  *
  * This plugin:
  * 1. Discovers database files in src/databases/ at build start
- * 2. Dynamically discovers actions as Vite transforms files that are actually used
- * 3. Transforms action files inline with RPC stub code
- * 4. Generates Durable Object classes with action handlers (virtual module)
- * 5. Patches wrangler.jsonc with DO bindings
+ * 2. Discovers actions lazily via transform() when action files are actually imported
+ * 3. Rewrites action files to re-export from per-action virtual modules
+ * 4. Each per-action virtual module generates the RPC stub for that action
+ * 5. Generates Durable Object classes with action handlers (virtual module)
+ * 6. Patches wrangler.jsonc with DO bindings
  */
 export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Plugin {
   const {
@@ -108,12 +113,14 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
   // State
   const databases = new Map<string, DatabaseInfo>();
+
+  // Map key is `${databaseName}:${actionName}` → ActionInfo
   const actions = new Map<string, ActionInfo>();
-  
+
   // Map of normalized file path -> database name (for files that define databases)
   const databaseFileToName = new Map<string, string>();
-  
-  // Track which files have been processed
+
+  // Track which files we've seen (only for diagnostics / future use)
   const processedFiles = new Set<string>();
 
   let projectRoot: string;
@@ -121,15 +128,59 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
   let databasesInitialized = false;
 
   /**
+   * Normalize a filesystem path consistently.
+   */
+  const normalizeFsPath = (p: string): string => path.normalize(p);
+
+  /**
+   * Register a database file in the lookup map under multiple key forms.
+   */
+  const registerDatabaseFile = (filePath: string, dbName: string): void => {
+    const abs = normalizeFsPath(filePath);
+    databaseFileToName.set(abs, dbName);
+
+    if (projectRoot) {
+      const relFromRoot = normalizeFsPath(path.relative(projectRoot, abs));
+      databaseFileToName.set(relFromRoot, dbName);
+
+      if (abs.startsWith(projectRoot + path.sep)) {
+        const stripped = normalizeFsPath(abs.slice(projectRoot.length + 1));
+        databaseFileToName.set(stripped, dbName);
+      }
+    }
+  };
+
+  /**
+   * Given any path coming from Vite (absolute, relative to root, with odd prefixes),
+   * try to resolve it to a known database name.
+   */
+  const getDatabaseNameForPath = (filePath: string): string | undefined => {
+    const normalized = normalizeFsPath(filePath);
+
+    let name = databaseFileToName.get(normalized);
+    if (name) return name;
+
+    if (projectRoot) {
+      const relFromRoot = normalizeFsPath(path.relative(projectRoot, normalized));
+      name = databaseFileToName.get(relFromRoot);
+      if (name) return name;
+
+      if (path.isAbsolute(normalized) && normalized.startsWith(projectRoot + path.sep)) {
+        const stripped = normalizeFsPath(normalized.slice(projectRoot.length + 1));
+        name = databaseFileToName.get(stripped);
+        if (name) return name;
+      }
+    }
+
+    return undefined;
+  };
+
+  /**
    * Load or generate migrations for a database
    */
   async function loadDatabaseMigrations(db: DatabaseInfo): Promise<void> {
     const migrationsDir = path.resolve(path.dirname(db.filePath), db.migrationsDir);
 
-    // Determine if we should run auto-migrations
-    // - 'development': only in dev mode (config.command === 'serve')
-    // - true: always run
-    // - false: never run
     const isDev = config.command === 'serve';
     const shouldAutoMigrate = autoMigrations === true || (autoMigrations === 'development' && isDev);
 
@@ -172,6 +223,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
   /**
    * Initialize databases - discovers database definitions only (not actions)
+   * Actions remain lazy via transform()
    */
   async function initializeDatabases(): Promise<void> {
     if (databasesInitialized) return;
@@ -187,21 +239,24 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
       if (parsed.database) {
         databases.set(parsed.database.name, parsed.database);
-        databaseFileToName.set(path.normalize(file.absolutePath), parsed.database.name);
-        
+        registerDatabaseFile(file.absolutePath, parsed.database.name);
+
         await loadDatabaseMigrations(parsed.database);
       }
     }
 
     if (databases.size > 0) {
       console.log(`[shoplayer-database] Found ${databases.size} database(s)`);
-      
+
       // Patch wrangler config when databases are discovered
       patchWranglerConfig(projectRoot, Array.from(databases.values()));
     }
 
     databasesInitialized = true;
   }
+
+  // Store dev server reference for invalidating virtual modules
+  let devServer: import('vite').ViteDevServer | null = null;
 
   return {
     name: 'shoplayer-database',
@@ -214,13 +269,32 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     },
 
     // configureServer is called for dev mode
-    configureServer() {
+    configureServer(server) {
+      devServer = server;
+
       // Reset state for dev server
       databases.clear();
       actions.clear();
       databaseFileToName.clear();
       processedFiles.clear();
       databasesInitialized = false;
+
+      // Watch for changes in databases directory and invalidate DO virtual module
+      const absoluteDbDir = path.join(projectRoot, databasesDir);
+
+      server.watcher.on('change', (file) => {
+        const normalizedFile = normalizeFsPath(file);
+
+        if (normalizedFile.startsWith(absoluteDbDir) && normalizedFile.endsWith('.ts')) {
+          processedFiles.delete(normalizedFile);
+
+          // Invalidate DO virtual module so it gets regenerated with new actions
+          const doMod = server.moduleGraph.getModuleById(VIRTUAL_DO_MODULE_ID);
+          if (doMod) {
+            server.moduleGraph.invalidateModule(doMod);
+          }
+        }
+      });
     },
 
     // buildStart is called for production builds
@@ -234,22 +308,16 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     },
 
     async resolveId(id) {
-      // Handle: virtual:shoplayer/databases/__durableObjects
+      // Durable Objects module: virtual:shoplayer/databases/__durableObjects
       if (id === `virtual:${VIRTUAL_DO_ID}` || id === VIRTUAL_DO_ID) {
-        return VIRTUAL_PREFIX + '__durableObjects.ts';
+        return VIRTUAL_DO_MODULE_ID;
       }
 
-      // Handle: shoplayer/databases/xxx
-      const dbNameMatch = id.match(/^(?:virtual:)?shoplayer\/databases\/(.+)$/);
-      if (dbNameMatch) {
-        let dbName = dbNameMatch[1];
-        if (dbName.endsWith('.ts')) {
-          dbName = dbName.slice(0, -3);
-        }
-        if (dbName === '__durableObjects') {
-          return VIRTUAL_PREFIX + '__durableObjects.ts';
-        }
-        return VIRTUAL_PREFIX + dbName + '.ts';
+      // Per-action RPC module: shoplayer/actions/<db>/<action>
+      const actionMatch = id.match(/^(?:virtual:)?shoplayer\/actions\/([^/]+)\/([^/]+)$/);
+      if (actionMatch) {
+        const [, dbName, actionName] = actionMatch;
+        return `${VIRTUAL_ACTION_PREFIX}${dbName}/${actionName}.ts`;
       }
 
       return null;
@@ -261,25 +329,34 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         await initializeDatabases();
       }
 
-      // Generate Durable Objects module
-      if (id === VIRTUAL_PREFIX + '__durableObjects.ts') {
-        // Wait for transforms to settle by checking if action count stabilizes
-        // This handles the case where load() is called before all transforms complete
-        let stableCount = 0;
-        let lastCount = -1;
-        
-        while (stableCount < 3) {
-          await new Promise(resolve => setTimeout(resolve, 5));
-          if (actions.size === lastCount) {
-            stableCount++;
-          } else {
-            stableCount = 0;
-            lastCount = actions.size;
+      // Generate Durable Objects module (aggregates all known actions)
+      if (id === VIRTUAL_DO_MODULE_ID) {
+        const isDev = config.command === 'serve';
+
+        if (!isDev) {
+          // In build mode, wait for transforms to settle
+          let stableCount = 0;
+          let lastCount = -1;
+
+          while (stableCount < 3) {
+            await new Promise(resolve => setTimeout(resolve, 5));
+            if (actions.size === lastCount) {
+              stableCount++;
+            } else {
+              stableCount = 0;
+              lastCount = actions.size;
+            }
+            if (stableCount > 50) break;
           }
-          // Safety limit
-          if (stableCount > 50) break;
         }
-        
+
+        // Add watch files for all known action source files (for HMR)
+        for (const action of actions.values()) {
+          if (action.sourceFile) {
+            this.addWatchFile(path.join(projectRoot, action.sourceFile));
+          }
+        }
+
         // Resolve cross-references now that we know all used actions
         const allActionsList = Array.from(actions.values());
         for (const [dbName] of databases) {
@@ -289,9 +366,9 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
         const actionsByDatabase = new Map<string, ActionInfo[]>();
         for (const action of actions.values()) {
-          const dbActions = actionsByDatabase.get(action.databaseName) ?? [];
-          dbActions.push(action);
-          actionsByDatabase.set(action.databaseName, dbActions);
+          const list = actionsByDatabase.get(action.databaseName) ?? [];
+          list.push(action);
+          actionsByDatabase.set(action.databaseName, list);
         }
 
         const tsCode = generateDurableObjectsModule(
@@ -300,47 +377,50 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
           Array.from(actions.values())
         );
 
-        const result = await transpileTS(tsCode, 'shoplayer/databases/__durableObjects.ts', tsCode);
+        const result = await transpileTS(
+          tsCode,
+          'shoplayer/databases/__durableObjects.ts',
+          tsCode
+        );
+
         return {
           code: result.code,
           map: result.map,
         };
       }
 
-      // Generate RPC stubs for a specific database
-      if (id.startsWith(VIRTUAL_PREFIX) && id.endsWith('.ts')) {
-        const dbName = id.slice(VIRTUAL_PREFIX.length, -3);
-        const database = databases.get(dbName);
+      // Generate RPC stub for a specific action:
+      //   VIRTUAL_ACTION_PREFIX + '<db>/<action>.ts'
+      if (id.startsWith(VIRTUAL_ACTION_PREFIX) && id.endsWith('.ts')) {
+        const actionId = id.slice(VIRTUAL_ACTION_PREFIX.length, -3); // 'dbName/actionName'
+        const [dbName, actionName] = actionId.split('/');
 
+        const database = databases.get(dbName);
         if (!database) {
           throw new Error(`[shoplayer-database] Database "${dbName}" not found`);
         }
 
-        // Wait for transforms to settle
-        let stableCount = 0;
-        let lastCount = -1;
-        
-        while (stableCount < 3) {
-          await new Promise(resolve => setTimeout(resolve, 5));
-          if (actions.size === lastCount) {
-            stableCount++;
-          } else {
-            stableCount = 0;
-            lastCount = actions.size;
-          }
-          if (stableCount > 50) break;
+        const actionKey = `${dbName}:${actionName}`;
+        const actionInfo = actions.get(actionKey);
+        if (!actionInfo) {
+          throw new Error(
+            `[shoplayer-database] Action "${actionName}" for database "${dbName}" not registered. ` +
+            `Make sure the action file that exports "${actionName}" and imports "action" from ` +
+            `that database has been imported somewhere.`
+          );
         }
 
-        // Resolve cross-references
-        const allActionsList = Array.from(actions.values());
-        for (const [name] of databases) {
-          const dbActions = allActionsList.filter(a => a.databaseName === name);
-          resolveInternalActionCalls(dbActions, allActionsList);
-        }
+        const tsCode = generateRpcStubs(database, [actionInfo], {
+          contextImport,
+          shopIdPath,
+        });
 
-        const dbActions = allActionsList.filter(a => a.databaseName === dbName);
-        const tsCode = generateRpcStubs(database, dbActions, { contextImport, shopIdPath });
-        const result = await transpileTS(tsCode, `shoplayer/databases/${dbName}.ts`, tsCode);
+        const result = await transpileTS(
+          tsCode,
+          `shoplayer/actions/${dbName}/${actionName}.ts`,
+          tsCode
+        );
+
         return {
           code: result.code,
           map: result.map,
@@ -366,17 +446,12 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         await initializeDatabases();
       }
 
-      const cleanId = id.split('?')[0];
-      const normalizedId = path.normalize(cleanId);
+      const cleanId = id.split('?', 1)[0];
+      const normalizedId = normalizeFsPath(cleanId);
 
-      // Skip if already processed
-      if (processedFiles.has(normalizedId)) {
-        return null;
-      }
-
-      // Check if this is a database definition file - DON'T transform these
-      // They stay as-is so that `action` can be imported from them
-      if (databaseFileToName.has(normalizedId)) {
+      // Skip if this is a database definition file - DON'T transform these
+      const dbNameForThisFile = getDatabaseNameForPath(normalizedId);
+      if (dbNameForThisFile) {
         processedFiles.add(normalizedId);
         return null;
       }
@@ -386,7 +461,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
       // Check if this file imports 'action' from a database file
       let importedDatabaseName: string | null = null;
-      
+
       for (const [, importInfo] of parsed.localImports) {
         if (importInfo.imported !== 'action') {
           continue;
@@ -394,10 +469,15 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
         // Use Vite's resolver to handle aliases
         const resolved = await this.resolve(importInfo.source, normalizedId);
-        
+
         if (resolved) {
-          const resolvedPath = path.normalize(resolved.id);
-          const dbName = databaseFileToName.get(resolvedPath);
+          // Strip virtual prefix and query/hash so it matches our keys
+          const cleanResolvedId = resolved.id
+          .replace(/^\0+/, '')
+          .split('?', 1)[0];
+
+          const resolvedPath = normalizeFsPath(cleanResolvedId);
+          const dbName = getDatabaseNameForPath(resolvedPath);
           if (dbName) {
             importedDatabaseName = dbName;
             break;
@@ -409,16 +489,25 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       if (importedDatabaseName && parsed.actions.length > 0) {
         processedFiles.add(normalizedId);
 
-        // Register each action
+        // Register each action under "<dbName>:<exportName>"
         for (const action of parsed.actions) {
           action.databaseName = importedDatabaseName;
-          // Store the original file path for sourcemap reference (relative to project root)
           action.sourceFile = path.relative(projectRoot, normalizedId);
-          actions.set(action.exportName, action);
+
+          const key = `${importedDatabaseName}:${action.exportName}`;
+          actions.set(key, action);
         }
-        
+
+        // In dev mode, invalidate DO module so it regenerates with new actions
+        if (devServer) {
+          const doMod = devServer.moduleGraph.getModuleById(VIRTUAL_DO_MODULE_ID);
+          if (doMod) {
+            console.log('[shoplayer-database] Invalidating DO module', VIRTUAL_DO_MODULE_ID);
+            devServer.moduleGraph.invalidateModule(doMod);
+          }
+        }
+
         // Collect other imports that we need to keep as side-effect imports
-        // These ensure Vite processes those files (which might be other action files)
         const sideEffectImports: string[] = [];
         for (const [, importInfo] of parsed.localImports) {
           // Skip the action import from the database file
@@ -431,19 +520,21 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
           }
         }
 
-        // Re-export actions from virtual module
-        // The virtual module is generated in load() after all actions are discovered
-        const actionNames = parsed.actions.map(a => a.exportName);
-        const reExport = `export { ${actionNames.join(', ')} } from 'shoplayer/databases/${importedDatabaseName}';`;
-        
-        const transformedCode = [...sideEffectImports, reExport].join('\n');
-        
+        // Re-export each action from its own per-action virtual module
+        const reExports: string[] = [];
+        for (const action of parsed.actions) {
+          const exportName = action.exportName;
+          reExports.push(
+            `export { ${exportName} } from 'shoplayer/actions/${importedDatabaseName}/${exportName}';`
+          );
+        }
+
+        const transformedCode = [...sideEffectImports, ...reExports].join('\n');
+
         // Generate sourcemap pointing back to the original file
-        // Since we're completely replacing the code, we map each line to line 1 of the original
-        // This helps debuggers at least point to the right file
         const lines = transformedCode.split('\n');
         const mappings = lines.map(() => 'AAAA').join(';');
-        
+
         return {
           code: transformedCode,
           map: {
@@ -460,9 +551,10 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     },
 
     buildEnd() {
-      // Log summary for production builds
       if (actions.size > 0) {
-        console.log(`[shoplayer-database] Discovered ${actions.size} action(s) (only those actually used)`);
+        console.log(
+          `[shoplayer-database] Discovered ${actions.size} action(s) (lazy via imports only)`
+        );
       }
     },
   };

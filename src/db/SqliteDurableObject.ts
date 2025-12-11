@@ -11,7 +11,7 @@ import {
   type KyselyPlugin
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
-import { DateSerializePlugin, createDrizzlePlugins } from './plugins.js';
+import { DateSerializePlugin, createDrizzlePlugins } from './plugins';
 
 /**
  * SQL executor function type
@@ -20,7 +20,7 @@ export type SqlExecutor = (sql: string) => void;
 
 /**
  * Migration definition - SQL statements with optional breakpoints
- * 
+ *
  * Each migration is an array of "chunks" - groups of statements separated by breakpoints.
  * Each chunk is executed as a unit. This allows long migrations to be split into
  * smaller pieces that can survive DO restarts.
@@ -198,7 +198,7 @@ export function createKyselyFromSql<T>(
  *
  * Extend this class and set the `migrations` property to define your schema.
  * Migrations run automatically when the DO is first accessed.
- * 
+ *
  * Migrations are SQL-based with breakpoint support for long-running migrations.
  * Breakpoints allow migrations to be resumed if the DO restarts mid-migration.
  *
@@ -284,7 +284,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
     // Get already applied migrations and their chunks
     const applied = this.sql.exec('SELECT name, chunk_index FROM __migrations').toArray() as Array<{ name: string; chunk_index: number }>;
-    
+
     // Build a map of migration -> set of applied chunk indices
     const appliedMap = new Map<string, Set<number>>();
     for (const row of applied) {
@@ -309,7 +309,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
         }
 
         const chunk = migration.chunks[chunkIndex];
-        
+
         try {
           // Execute each statement in the chunk
           for (const statement of chunk) {

@@ -26,9 +26,9 @@ export interface DiscoveredFile {
 /**
  * Discover database files in the configured directory
  *
- * Looks for .js files in the databases directory, excluding:
- * - .d.js files
- * - schema.js (schema-only files)
+ * Looks for .ts files in the databases directory, excluding:
+ * - .d.ts files
+ * - schema.ts (schema-only files)
  * - Files starting with _ (private helpers)
  */
 export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile[] {
@@ -92,7 +92,7 @@ export function resolveImportPath(
   }
 
   // Try common extensions
-  const extensions = ['.js', '.jsx', '.js', '.jsx'];
+  const extensions = ['.ts', '.tsx', '.js', '.jsx'];
   for (const ext of extensions) {
     const withExt = resolved + ext;
     if (fs.existsSync(withExt)) {
@@ -101,7 +101,7 @@ export function resolveImportPath(
   }
 
   // Try index files (for directory imports)
-  const indexFiles = ['index.js', 'index.jsx', 'index.js', 'index.jsx'];
+  const indexFiles = ['index.ts', 'index.tsx', 'index.js', 'index.jsx'];
   for (const indexFile of indexFiles) {
     const indexPath = path.join(resolved, indexFile);
     if (fs.existsSync(indexPath)) {

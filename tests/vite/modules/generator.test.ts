@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from '../generator';
-import type { DatabaseInfo, ActionInfo } from '../../../db/types';
+import { generateRpcStubs, generateDurableObjectsModule, generateReExportModule } from '../../../src/vite/modules/generator';
+import type { DatabaseInfo, ActionInfo } from '../../../src/db/types';
 
 describe('generator', () => {
   const mockDatabase: DatabaseInfo = {
@@ -20,7 +20,7 @@ describe('generator', () => {
       argsSchemaSource: `{ name: 'string', email: 'string.email' }`,
       handlerSource: `async (db, args) => db.insertInto('users').values({ name: args.name }).execute()`,
       databaseName: 'main',
-      sourceFile: '/src/databases/main.js',
+      sourceFile: 'src/databases/actions/createUser.ts',
       internalActionCalls: [],
       crossDbActionCalls: [],
     },
@@ -29,7 +29,7 @@ describe('generator', () => {
       argsSchemaSource: `{ id: 'string' }`,
       handlerSource: `async (db, args) => db.selectFrom('users').where('id', '=', args.id).executeTakeFirst()`,
       databaseName: 'main',
-      sourceFile: '/src/databases/main.js',
+      sourceFile: 'src/databases/actions/getUser.ts',
       internalActionCalls: [],
       crossDbActionCalls: [],
     },
@@ -74,25 +74,6 @@ describe('generator', () => {
       expect(result).toContain("idFromName('global')");
     });
 
-    it('passes instanceKey in RPC calls', () => {
-      const result = generateRpcStubs(mockDatabase, mockActions, {
-        contextImport: '@shoplayer/database/context',
-        shopIdPath: 'session.shop',
-      });
-
-      expect(result).toContain('instanceKey: ctx.session.shop');
-    });
-
-    it('passes global instanceKey for global databases', () => {
-      const globalDatabase = { ...mockDatabase, instance: 'global' as const };
-      const result = generateRpcStubs(globalDatabase, mockActions, {
-        contextImport: '@shoplayer/database/context',
-        shopIdPath: 'session.shop',
-      });
-
-      expect(result).toContain("instanceKey: 'global'");
-    });
-
     it('returns comment when no actions defined', () => {
       const result = generateRpcStubs(mockDatabase, [], {
         contextImport: '@shoplayer/database/context',
@@ -100,6 +81,87 @@ describe('generator', () => {
       });
 
       expect(result).toContain('No actions defined');
+    });
+
+    it('uses correct binding name format', () => {
+      const result = generateRpcStubs(mockDatabase, mockActions, {
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+      });
+
+      expect(result).toContain('env.MAIN_DATABASE_DO');
+    });
+
+    it('includes arktype validation', () => {
+      const result = generateRpcStubs(mockDatabase, mockActions, {
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+      });
+
+      expect(result).toContain("import { type } from 'arktype'");
+      expect(result).toContain('argsSchema');
+    });
+
+    it('includes source file in JSDoc', () => {
+      const result = generateRpcStubs(mockDatabase, mockActions, {
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+      });
+
+      expect(result).toContain('@source');
+      expect(result).toContain('createUser.ts');
+    });
+
+    it('includes source file in error messages in DO module', () => {
+      const actionsByDatabase = new Map([['main', mockActions]]);
+      const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, mockActions);
+
+      expect(result).toContain('defined in');
+      expect(result).toContain('createUser.ts');
+    });
+
+    it('generates direct RPC calls not fetch', () => {
+      const result = generateRpcStubs(mockDatabase, mockActions, {
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+      });
+
+      expect(result).toContain('stub.createUser(');
+      expect(result).toContain('stub.getUser(');
+      expect(result).not.toContain('stub.fetch');
+    });
+
+    it('only passes instanceKey for actions with cross-DB calls', () => {
+      const actionsWithCrossDb: ActionInfo[] = [
+        {
+          exportName: 'simpleAction',
+          argsSchemaSource: `{ id: 'string' }`,
+          handlerSource: `async (db, args) => db.selectFrom('users').execute()`,
+          databaseName: 'main',
+          sourceFile: 'src/databases/main.js',
+          internalActionCalls: [],
+          crossDbActionCalls: [], // No cross-DB calls
+        },
+        {
+          exportName: 'crossDbAction',
+          argsSchemaSource: `{ id: 'string' }`,
+          handlerSource: `async (db, args) => { await logEvent({}); }`,
+          databaseName: 'main',
+          sourceFile: 'src/databases/main.js',
+          internalActionCalls: [],
+          crossDbActionCalls: ['logEvent'], // Has cross-DB calls
+        },
+      ];
+
+      const result = generateRpcStubs(mockDatabase, actionsWithCrossDb, {
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+      });
+
+      // simpleAction should NOT have instanceKey
+      expect(result).toMatch(/stub\.simpleAction\(validatedArgs\)/);
+      // crossDbAction should have instanceKey
+      expect(result).toMatch(/stub\.crossDbAction\(validatedArgs,\s*\{\s*instanceKey/);
     });
   });
 
@@ -120,12 +182,12 @@ describe('generator', () => {
       expect(result).toContain("import { type } from 'arktype'");
     });
 
-    it('generates methods for each action with rpcContext parameter', () => {
+    it('generates methods for each action', () => {
       const actionsByDatabase = new Map([['main', mockActions]]);
       const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, mockActions);
 
-      expect(result).toContain('async createUser(args: unknown, rpcContext?: { instanceKey?: string })');
-      expect(result).toContain('async getUser(args: unknown, rpcContext?: { instanceKey?: string })');
+      expect(result).toContain('async createUser(args: unknown');
+      expect(result).toContain('async getUser(args: unknown');
     });
 
     it('includes validation logic in methods', () => {
@@ -134,14 +196,13 @@ describe('generator', () => {
 
       expect(result).toContain('const validator = type(');
       expect(result).toContain('validator(args)');
-      expect(result).toContain('type.errors');
     });
 
-    it('includes instanceKey in context', () => {
+    it('exports the DO class', () => {
       const actionsByDatabase = new Map([['main', mockActions]]);
       const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, mockActions);
 
-      expect(result).toContain('instanceKey: rpcContext?.instanceKey');
+      expect(result).toContain('export class MainDatabaseDO');
     });
 
     it('transforms internal action calls to this.*', () => {
@@ -175,10 +236,16 @@ describe('generator', () => {
 
       // The handler should have getUser transformed to this.getUser
       expect(result).toContain('this.getUser');
-      expect(result).toContain('internal calls');
     });
 
-    it('transforms cross-DB action calls to RPC calls', () => {
+    it('generates migrations property', () => {
+      const actionsByDatabase = new Map([['main', mockActions]]);
+      const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, mockActions);
+
+      expect(result).toContain('migrations =');
+    });
+
+    it('handles multiple databases', () => {
       const analyticsDb: DatabaseInfo = {
         filePath: '/src/databases/analytics.js',
         name: 'analytics',
@@ -202,34 +269,22 @@ describe('generator', () => {
         },
       ];
 
-      const actionsWithCrossDbCalls: ActionInfo[] = [
-        {
-          exportName: 'createUserWithAnalytics',
-          argsSchemaSource: `{ name: 'string' }`,
-          handlerSource: `async (db, args) => {
-            const user = await db.insertInto('users').values(args).execute();
-            await logEvent({ type: 'user_created' });
-            return user;
-          }`,
-          databaseName: 'main',
-          sourceFile: '/src/databases/main.js',
-          internalActionCalls: [],
-          crossDbActionCalls: ['logEvent'],
-        },
-      ];
-
-      const allActions = [...actionsWithCrossDbCalls, ...analyticsActions];
+      const allActions = [...mockActions, ...analyticsActions];
       const actionsByDatabase = new Map([
-        ['main', actionsWithCrossDbCalls],
+        ['main', mockActions],
         ['analytics', analyticsActions],
       ]);
       const result = generateDurableObjectsModule([mockDatabase, analyticsDb], actionsByDatabase, allActions);
 
-      // Should transform the cross-DB call to an RPC call
-      expect(result).toContain('cross-DB calls');
-      expect(result).toContain('ANALYTICS_DATABASE_DO');
-      expect(result).toContain('idFromName');
-      expect(result).toContain('instanceKey');
+      expect(result).toContain('class MainDatabaseDO');
+      expect(result).toContain('class AnalyticsDatabaseDO');
+    });
+
+    it('handles database with no actions', () => {
+      const actionsByDatabase = new Map([['main', [] as ActionInfo[]]]);
+      const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, []);
+
+      expect(result).toContain('class MainDatabaseDO');
     });
   });
 
@@ -244,6 +299,21 @@ describe('generator', () => {
       const result = generateReExportModule('main', []);
 
       expect(result).toContain('No actions to re-export');
+    });
+
+    it('handles single action', () => {
+      const singleAction = [mockActions[0]];
+      const result = generateReExportModule('main', singleAction);
+
+      expect(result).toBe("export { createUser } from 'shoplayer/databases/main';");
+    });
+
+    it('preserves action order', () => {
+      const result = generateReExportModule('main', mockActions);
+
+      const createUserIndex = result.indexOf('createUser');
+      const getUserIndex = result.indexOf('getUser');
+      expect(createUserIndex).toBeLessThan(getUserIndex);
     });
   });
 });

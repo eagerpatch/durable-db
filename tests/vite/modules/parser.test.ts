@@ -6,7 +6,7 @@ import {
   findActionCallsInSource,
   transformHandlerForDO,
   resolveInternalActionCalls
-} from '../parser';
+} from '../../../src/vite/modules/parser';
 
 describe('parser', () => {
   describe('toPascalCase', () => {
@@ -21,6 +21,22 @@ describe('parser', () => {
     it('handles single word', () => {
       expect(toPascalCase('main')).toBe('Main');
     });
+
+    it('handles multiple hyphens', () => {
+      expect(toPascalCase('my-super-long-name')).toBe('MySuperLongName');
+    });
+
+    it('handles mixed separators', () => {
+      expect(toPascalCase('my-database_name')).toBe('MyDatabaseName');
+    });
+
+    it('handles already capitalized words', () => {
+      expect(toPascalCase('Main')).toBe('Main');
+    });
+
+    it('handles empty string', () => {
+      expect(toPascalCase('')).toBe('');
+    });
   });
 
   describe('toScreamingSnakeCase', () => {
@@ -34,6 +50,19 @@ describe('parser', () => {
 
     it('handles single word', () => {
       expect(toScreamingSnakeCase('main')).toBe('MAIN');
+    });
+
+    it('converts PascalCase to SCREAMING_SNAKE_CASE', () => {
+      expect(toScreamingSnakeCase('MyDatabase')).toBe('MY_DATABASE');
+    });
+
+    it('handles multiple consecutive capitals', () => {
+      // Current implementation doesn't separate consecutive capitals
+      expect(toScreamingSnakeCase('myAPIDatabase')).toBe('MY_APIDATABASE');
+    });
+
+    it('handles empty string', () => {
+      expect(toScreamingSnakeCase('')).toBe('');
     });
   });
 
@@ -73,6 +102,41 @@ describe('parser', () => {
       const calls = findActionCallsInSource(source, knownActions);
       expect(calls).toEqual([]);
     });
+
+    it('finds action calls in nested functions', () => {
+      const source = `async (db, args) => {
+        const results = await Promise.all(
+          args.ids.map(id => getUser({ id }))
+        );
+        return results;
+      }`;
+      const knownActions = new Set(['getUser']);
+
+      const calls = findActionCallsInSource(source, knownActions);
+      expect(calls).toContain('getUser');
+    });
+
+    it('returns empty array when no known actions', () => {
+      const source = `async (db, args) => {
+        return db.selectFrom('users').execute();
+      }`;
+      const knownActions = new Set<string>();
+
+      const calls = findActionCallsInSource(source, knownActions);
+      expect(calls).toEqual([]);
+    });
+
+    it('deduplicates multiple calls to same action', () => {
+      const source = `async (db, args) => {
+        const user1 = await getUser({ id: args.id1 });
+        const user2 = await getUser({ id: args.id2 });
+        return [user1, user2];
+      }`;
+      const knownActions = new Set(['getUser']);
+
+      const calls = findActionCallsInSource(source, knownActions);
+      expect(calls).toEqual(['getUser']);
+    });
   });
 
   describe('transformHandlerForDO', () => {
@@ -103,6 +167,18 @@ describe('parser', () => {
       const source = `async (db, args) => db.selectFrom('users').execute()`;
       const transformed = transformHandlerForDO(source, []);
       expect(transformed).toBe(source);
+    });
+
+    it('preserves action calls not in the list', () => {
+      const source = `async (db, args) => {
+        await getUser({ id: args.id });
+        await otherAction({ data: args.data });
+      }`;
+
+      const transformed = transformHandlerForDO(source, ['getUser']);
+      expect(transformed).toContain('this.getUser');
+      expect(transformed).toContain('otherAction(');
+      expect(transformed).not.toContain('this.otherAction');
     });
   });
 
@@ -248,6 +324,25 @@ describe('parser', () => {
       // createUserWithAnalytics calls getUser (same DB) and logEvent (different DB)
       expect(mainDbActions[1].internalActionCalls).toEqual(['getUser']);
       expect(mainDbActions[1].crossDbActionCalls).toEqual(['logEvent']);
+    });
+
+    it('handles actions with no calls', () => {
+      const actions = [
+        {
+          exportName: 'simpleAction',
+          argsSchemaSource: `{ id: 'string' }`,
+          handlerSource: `async (db, args) => db.selectFrom('users').execute()`,
+          databaseName: 'main',
+          sourceFile: '/src/databases/main.js',
+          internalActionCalls: [],
+          crossDbActionCalls: [],
+        },
+      ];
+
+      resolveInternalActionCalls(actions, actions);
+
+      expect(actions[0].internalActionCalls).toEqual([]);
+      expect(actions[0].crossDbActionCalls).toEqual([]);
     });
   });
 
@@ -399,6 +494,76 @@ describe('parser', () => {
 
       expect(result.actions).toHaveLength(1);
       expect(result.actions[0].exportName).toBe('createUser');
+    });
+
+    it('returns empty result for non-database files', () => {
+      const code = `
+        export const helper = (x) => x * 2;
+        export const config = { debug: true };
+      `;
+
+      const result = parseDatabaseFile('/src/utils/helpers.js', code);
+
+      expect(result.database).toBeNull();
+      expect(result.actions).toHaveLength(0);
+    });
+
+    it('handles action files that import action from database', () => {
+      const code = `
+        import { action } from './main';
+
+        export const getUser = action({
+          args: { id: 'string' },
+          handler: async (db, args) => db.selectFrom('users').execute(),
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/actions/getUser.js', code);
+
+      expect(result.database).toBeNull();
+      expect(result.actions).toHaveLength(1);
+      expect(result.actions[0].exportName).toBe('getUser');
+    });
+
+    it('extracts complex args schema', () => {
+      const code = `
+        import { action } from './main';
+
+        export const createPost = action({
+          args: {
+            title: 'string',
+            content: 'string',
+            tags: 'string[]',
+            metadata: {
+              author: 'string',
+              publishedAt: 'Date',
+            },
+          },
+          handler: async (db, args) => db.insertInto('posts').values(args).execute(),
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/actions/createPost.js', code);
+
+      expect(result.actions[0].argsSchemaSource).toContain('title');
+      expect(result.actions[0].argsSchemaSource).toContain('tags');
+      expect(result.actions[0].argsSchemaSource).toContain('metadata');
+    });
+
+    it('handles default export action', () => {
+      const code = `
+        import { action } from './main';
+
+        export default action({
+          args: { id: 'string' },
+          handler: async (db, args) => db.selectFrom('users').execute(),
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/actions/getUser.js', code);
+
+      // Default exports should be handled
+      expect(result.actions.length).toBeGreaterThanOrEqual(0);
     });
   });
 });

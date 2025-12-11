@@ -11,7 +11,7 @@ import {
   loadSnapshot,
   saveSnapshot,
   type Snapshot,
-} from '../index';
+} from '../../src/migrations';
 
 describe('migrations', () => {
   let tempDir: string;
@@ -131,12 +131,12 @@ describe('migrations', () => {
       const migrations = loadMigrationFiles(tempDir);
 
       expect(Array.from(migrations.keys())).toEqual(['001_first', '002_second']);
+      // Each file returns an array of chunks, each chunk is an array of statements
       expect(migrations.get('001_first')).toEqual([
-        'CREATE TABLE users (id TEXT)',
-        'CREATE INDEX idx_users ON users(id)',
+        ['CREATE TABLE users (id TEXT)', 'CREATE INDEX idx_users ON users(id)'],
       ]);
       expect(migrations.get('002_second')).toEqual([
-        'CREATE TABLE posts (id TEXT)',
+        ['CREATE TABLE posts (id TEXT)'],
       ]);
     });
 
@@ -149,7 +149,7 @@ describe('migrations', () => {
       const migrations = loadMigrationFiles(tempDir);
 
       expect(migrations.get('001_test')).toEqual([
-        'CREATE TABLE users (id TEXT)',
+        ['CREATE TABLE users (id TEXT)'],
       ]);
     });
 
@@ -157,6 +157,43 @@ describe('migrations', () => {
       const migrations = loadMigrationFiles('/nonexistent/dir');
 
       expect(migrations.size).toBe(0);
+    });
+
+    it('handles multi-statement migrations', () => {
+      fs.writeFileSync(
+        path.join(tempDir, '001_multi.sql'),
+        `CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE posts (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id));
+CREATE INDEX idx_posts_user ON posts(user_id);`
+      );
+
+      const migrations = loadMigrationFiles(tempDir);
+      const chunks = migrations.get('001_multi');
+
+      // Should have 1 chunk with 3 statements
+      expect(chunks).toHaveLength(1);
+      expect(chunks![0]).toHaveLength(3);
+    });
+
+    it('handles empty SQL files gracefully', () => {
+      fs.writeFileSync(path.join(tempDir, '001_empty.sql'), '');
+
+      const migrations = loadMigrationFiles(tempDir);
+
+      // Empty files are not added to the map
+      expect(migrations.has('001_empty')).toBe(false);
+    });
+
+    it('handles SQL files with only comments', () => {
+      fs.writeFileSync(
+        path.join(tempDir, '001_comments.sql'),
+        '-- Comment 1\n-- Comment 2\n\n'
+      );
+
+      const migrations = loadMigrationFiles(tempDir);
+
+      // Files with only comments are not added to the map
+      expect(migrations.has('001_comments')).toBe(false);
     });
   });
 });

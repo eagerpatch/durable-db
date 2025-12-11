@@ -12,6 +12,8 @@ export default defineConfig({
       databasesDir: './src/databases',
       // How to get the shop ID from context (for per-shop databases)
       shopIdPath: 'session.shop',
+
+      autoMigrations: false,
     }),
     // Cloudflare's Vite plugin for Workers
     cloudflare({

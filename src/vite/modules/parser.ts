@@ -273,7 +273,7 @@ export function parseDatabaseFile(filePath: string, code: string): ParsedDatabas
     localImports: new Map(),
   };
 
-  // Track what variable name 'action' is bound to (from destructuring defineDatabase)
+  // Track what variable name 'action' is bound to (from destructuring defineDatabase or import)
   let actionFnName: string | null = null;
   let currentDatabaseName = path.basename(filePath).replace(/\.(ts|js)$/, '');
 
@@ -287,7 +287,16 @@ export function parseDatabaseFile(filePath: string, code: string): ParsedDatabas
           const imported = t.isIdentifier(specifier.imported)
             ? specifier.imported.name
             : specifier.imported.value;
-          result.localImports.set(specifier.local.name, { source, imported });
+          const localName = specifier.local.name;
+          
+          result.localImports.set(localName, { source, imported });
+          
+          // If importing 'action' from a relative path, track it as the action factory
+          // This handles: import { action } from '../main'
+          // or: import { action as myAction } from '../database'
+          if (imported === 'action' && source.startsWith('.')) {
+            actionFnName = localName;
+          }
         } else if (t.isImportDefaultSpecifier(specifier)) {
           result.localImports.set(specifier.local.name, { source, imported: 'default' });
         } else if (t.isImportNamespaceSpecifier(specifier)) {
@@ -297,6 +306,7 @@ export function parseDatabaseFile(filePath: string, code: string): ParsedDatabas
     },
 
     // Find: const { action } = defineDatabase({ ... })
+    // Or: export const myAction = action({ ... })
     VariableDeclarator(nodePath: NodePath<t.VariableDeclarator>) {
       const init = nodePath.node.init;
       const id = nodePath.node.id;
@@ -315,7 +325,7 @@ export function parseDatabaseFile(filePath: string, code: string): ParsedDatabas
         }
       }
 
-      // Check if this is an action() call
+      // Check if this is an action() call - either from defineDatabase or from import
       if (actionFnName && isActionCall(init, actionFnName)) {
         const actionInfo = extractActionInfo(nodePath, init, currentDatabaseName, filePath);
         if (actionInfo) {

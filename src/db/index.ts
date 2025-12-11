@@ -28,7 +28,7 @@ export type {
   DatabaseInfo,
   ActionInfo,
   ParsedDatabaseFile,
-} from './types.js';
+} from './types';
 
 // Re-export Kysely types users will need
 export type { Kysely, CompiledQuery, QueryResult, KyselyPlugin } from 'kysely';

@@ -1,244 +1,420 @@
 import type { DatabaseInfo, ActionInfo } from '../../db';
 import { transformHandlerForDO, transformCrossDbCalls } from './parser';
+import * as t from '@babel/types';
+import _generate from '@babel/generator';
+import { parse } from '@babel/parser';
 
-/**
- * Options for code generation
- */
+// Handle both ESM and CJS module formats
+const generate = typeof _generate === 'function'
+  ? _generate
+  : (_generate as unknown as { default: typeof _generate }).default;
+
+// ============================================================================
+// Types
+// ============================================================================
+
 export interface GeneratorOptions {
-  /** Import path for the context module */
   contextImport: string;
-  /** Property path to get shop ID from context */
   shopIdPath: string;
 }
 
-/**
- * Context for cross-DB call transformation
- */
 export interface CrossDbContext {
-  /** Map of action name -> database info */
   actionToDatabase: Map<string, DatabaseInfo>;
 }
 
-/**
- * Generate RPC stub code for a database's actions
- *
- * This generates the code that users import and call.
- * Each action becomes an async function that:
- * 1. Validates args using arktype (fail fast before RPC)
- * 2. Gets context from AsyncLocalStorage
- * 3. Creates a DO stub using the appropriate ID strategy
- * 4. Calls the action method on the DO via RPC, passing instanceKey for cross-DB calls
- */
-export function generateRpcStubs(
-  database: DatabaseInfo,
-  actions: ActionInfo[],
-  options: GeneratorOptions
-): string {
-  const { contextImport, shopIdPath } = options;
+export interface StubConfig {
+  action: ActionInfo;
+  database: DatabaseInfo;
+  shopIdPath: string;
+}
 
-  if (actions.length === 0) {
-    return `// No actions defined for ${database.name}`;
+export interface MethodConfig {
+  action: ActionInfo;
+  crossDbContext: CrossDbContext;
+}
+
+// ============================================================================
+// AST Utilities
+// ============================================================================
+
+/** Parse a code snippet into an expression */
+export function parseExpression(code: string): t.Expression {
+  // Wrap in parens to handle object literals and other edge cases
+  const wrapped = `(${code})`;
+  const ast = parse(wrapped, { sourceType: 'module' });
+  const stmt = ast.program.body[0];
+  if (t.isExpressionStatement(stmt)) {
+    return stmt.expression;
+  }
+  throw new Error(`Expected expression, got ${stmt.type}`);
+}
+
+/** Parse a property path like "session.shop" into a member expression chain with a base */
+export function parseMemberPath(base: t.Expression, path: string): t.Expression {
+  const parts = path.split('.');
+  return parts.reduce<t.Expression>(
+    (obj, prop) => t.memberExpression(obj, t.identifier(prop)),
+    base
+  );
+}
+
+/** Create an import declaration: import { specifiers } from source */
+export function createNamedImport(names: string[], source: string): t.ImportDeclaration {
+  const specifiers = names.map(name =>
+    t.importSpecifier(t.identifier(name), t.identifier(name))
+  );
+  return t.importDeclaration(specifiers, t.stringLiteral(source));
+}
+
+/** Create a named export from source: export { names } from source */
+export function createReExport(names: string[], source: string): t.ExportNamedDeclaration {
+  const specifiers = names.map(name =>
+    t.exportSpecifier(t.identifier(name), t.identifier(name))
+  );
+  return t.exportNamedDeclaration(null, specifiers, t.stringLiteral(source));
+}
+
+/** Generate code from statements */
+export function generateFromStatements(statements: t.Statement[]): string {
+  const file = t.file(t.program(statements));
+  return generate(file, { comments: true }).code;
+}
+
+// ============================================================================
+// RPC Stub Builders
+// ============================================================================
+
+/** Build the ID strategy expression */
+export function buildIdStrategy(database: DatabaseInfo, shopIdPath: string): t.CallExpression {
+  const binding = t.memberExpression(
+    t.identifier('env'),
+    t.identifier(database.bindingName)
+  );
+  const idFromName = t.memberExpression(binding, t.identifier('idFromName'));
+
+  const key = database.instance === 'global'
+    ? t.stringLiteral('global')
+    : parseMemberPath(t.identifier('ctx'), shopIdPath);
+
+  return t.callExpression(idFromName, [key]);
+}
+
+/** Build the RPC call expression */
+export function buildRpcCall(config: StubConfig): t.CallExpression {
+  const { action, database, shopIdPath } = config;
+  const hasCrossDbCalls = action.crossDbActionCalls.length > 0;
+
+  const methodCall = t.memberExpression(
+    t.identifier('stub'),
+    t.identifier(action.exportName)
+  );
+
+  if (!hasCrossDbCalls) {
+    return t.callExpression(methodCall, [t.identifier('validatedArgs')]);
   }
 
-  const stubs = actions.map(action => {
-    const idStrategy = database.instance === 'global'
-      ? `env.${database.bindingName}.idFromName('global')`
-      : `env.${database.bindingName}.idFromName(ctx.${shopIdPath})`;
+  const instanceKey = database.instance === 'global'
+    ? t.stringLiteral('global')
+    : parseMemberPath(t.identifier('ctx'), shopIdPath);
 
-    // Only pass instanceKey if the action has cross-DB calls
-    const hasCrossDbCalls = action.crossDbActionCalls.length > 0;
-    let rpcCall: string;
-    
-    if (hasCrossDbCalls) {
-      const instanceKey = database.instance === 'global'
-        ? `'global'`
-        : `ctx.${shopIdPath}`;
-      rpcCall = `stub.${action.exportName}(validatedArgs, { instanceKey: ${instanceKey} })`;
-    } else {
-      rpcCall = `stub.${action.exportName}(validatedArgs)`;
-    }
+  const optionsObj = t.objectExpression([
+    t.objectProperty(t.identifier('instanceKey'), instanceKey)
+  ]);
 
-    // Include source file reference for debugging
-    const sourceComment = action.sourceFile 
-      ? `\n * @source ${action.sourceFile}`
-      : '';
-
-    // Inline the validator inside the function to prevent code separation during bundling
-    // Use unknown input type - runtime validation ensures correctness
-    return `/**
- * ${action.exportName} action
- * @generated by @shoplayer/database${sourceComment}
- */
-export async function ${action.exportName}(args: unknown) {
-  const argsSchema = type(${action.argsSchemaSource});
-  const validatedArgs = argsSchema.assert(args);
-  const ctx = getContext();
-  const env = ctx.env;
-  const id = ${idStrategy};
-  const stub = env.${database.bindingName}.get(id);
-  return ${rpcCall};
-}`;
-  }).join('\n\n');
-
-  return `import { getContext } from '${contextImport}';
-import { type } from 'arktype';
-
-${stubs}
-`;
+  return t.callExpression(methodCall, [t.identifier('validatedArgs'), optionsObj]);
 }
 
-/**
- * Generate the Durable Object class for a database
- *
- * Creates a class that:
- * 1. Extends SqliteDurableObject
- * 2. Has migrations from the configured directory
- * 3. Has a method for each action that validates args and runs the handler
- * 4. Transforms internal action calls to this.actionName()
- * 5. Transforms cross-DB calls to proper RPC calls using ctx.env
- * 6. Receives instanceKey from RPC caller for cross-DB call key derivation
- */
-export function generateDurableObjectClass(
-  database: DatabaseInfo,
-  actions: ActionInfo[],
-  crossDbContext: CrossDbContext
-): string {
-  const methods = actions.map(action => {
-    // Transform internal calls (same DB) to this.actionName()
-    let transformedHandler = action.internalActionCalls.length > 0
-      ? transformHandlerForDO(action.handlerSource, action.internalActionCalls)
-      : action.handlerSource;
+/** Build a stub function body as statements */
+export function buildStubBodyStatements(config: StubConfig): t.Statement[] {
+  const { action, database, shopIdPath } = config;
 
-    // Transform cross-DB calls to proper RPC calls
-    if (action.crossDbActionCalls.length > 0) {
-      transformedHandler = transformCrossDbCalls(
-        transformedHandler,
-        action.crossDbActionCalls,
-        crossDbContext.actionToDatabase
-      );
-    }
-
-    const hasInternalCalls = action.internalActionCalls.length > 0;
-    const hasCrossDbCalls = action.crossDbActionCalls.length > 0;
-    // Only cross-DB calls need ctx (for ctx.env to access other DOs)
-    // Internal calls are transformed to this.* and don't need ctx
-    const needsCtx = hasCrossDbCalls;
-
-    const commentSuffix = (hasInternalCalls || hasCrossDbCalls)
-      ? ` (${[
-          hasInternalCalls ? 'internal calls → this.*' : '',
-          hasCrossDbCalls ? 'cross-DB calls → RPC' : ''
-        ].filter(Boolean).join(', ')})`
-      : '';
-
-    // Only add rpcContext parameter if we need it for cross-DB calls
-    const rpcContextParam = hasCrossDbCalls ? ', rpcContext?: { instanceKey?: string }' : '';
-    
-    // Only create ctx object if handler needs it (has internal or cross-DB calls)
-    const ctxCode = needsCtx
-      ? `
-    // Create context for handler
-    // - env: for cross-DO calls via ctx.env
-    // - instanceKey: the key used to address this DO (for cross-DB per-shop calls)
-    const ctx = { 
-      env: this.env,
-      instanceKey: rpcContext?.instanceKey ?? 'global'
-    };`
-      : '';
-    
-    // Pass ctx or undefined based on whether handler needs it
-    const ctxArg = needsCtx ? 'ctx' : 'undefined';
-
-    // Include source file reference for debugging
-    const sourceComment = action.sourceFile 
-      ? `\n   * @source ${action.sourceFile}`
-      : '';
-
-    // Create a helpful error message that includes the source file
-    const sourceHint = action.sourceFile 
-      ? ` (defined in ${action.sourceFile})`
-      : '';
-
-    return `
-  /**
-   * ${action.exportName} action handler${sourceComment}
-   */
-  async ${action.exportName}(args: unknown${rpcContextParam}) {
-    await this.ensureMigrations();
-    
-    // Validate args with ArkType
-    const validator = type(${action.argsSchemaSource});
-    const validated = validator(args);
-    if (validated instanceof type.errors) {
-      throw new Error(\`Invalid args for ${action.exportName}${sourceHint}: \${validated.summary}\`);
-    }
-    ${ctxCode}
-    // Execute handler${commentSuffix}
-    const handler = ${transformedHandler};
-    return handler(this.db, validated, ${ctxArg});
-  }`;
-  }).join('\n');
-
-  // Generate migrations object
-  const migrationsCode = generateMigrationsCode(database.migrations);
-
-  return `
-/**
- * ${database.className}
- * @generated by @shoplayer/database
- */
-export class ${database.className} extends SqliteDurableObject {
-  migrations = ${migrationsCode};
-  ${methods}
-}`;
+  return [
+    // const argsSchema = type({...});
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('argsSchema'),
+        t.callExpression(t.identifier('type'), [parseExpression(action.argsSchemaSource)])
+      )
+    ]),
+    // const validatedArgs = argsSchema.assert(args);
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('validatedArgs'),
+        t.callExpression(
+          t.memberExpression(t.identifier('argsSchema'), t.identifier('assert')),
+          [t.identifier('args')]
+        )
+      )
+    ]),
+    // const ctx = getContext();
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('ctx'),
+        t.callExpression(t.identifier('getContext'), [])
+      )
+    ]),
+    // const env = ctx.env;
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('env'),
+        t.memberExpression(t.identifier('ctx'), t.identifier('env'))
+      )
+    ]),
+    // const id = env.BINDING.idFromName(...);
+    t.variableDeclaration('const', [
+      t.variableDeclarator(t.identifier('id'), buildIdStrategy(database, shopIdPath))
+    ]),
+    // const stub = env.BINDING.get(id);
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('stub'),
+        t.callExpression(
+          t.memberExpression(
+            t.memberExpression(t.identifier('env'), t.identifier(database.bindingName)),
+            t.identifier('get')
+          ),
+          [t.identifier('id')]
+        )
+      )
+    ]),
+    // return stub.actionName(validatedArgs, ...);
+    t.returnStatement(buildRpcCall(config))
+  ];
 }
 
-/**
- * Generate the migrations object code from loaded migrations
- * Migrations are now chunk-based for breakpoint support
- */
-function generateMigrationsCode(migrations?: Map<string, string[][]>): string {
+/** Build a complete stub function declaration */
+export function buildStubFunction(config: StubConfig): t.ExportNamedDeclaration {
+  const { action } = config;
+
+  const funcDecl = t.functionDeclaration(
+    t.identifier(action.exportName),
+    [t.identifier('args')],
+    t.blockStatement(buildStubBodyStatements(config)),
+    false,
+    true
+  );
+
+  return t.exportNamedDeclaration(funcDecl);
+}
+
+// ============================================================================
+// Durable Object Builders
+// ============================================================================
+
+/** Transform the handler source for DO context */
+export function transformHandler(action: ActionInfo, crossDbContext: CrossDbContext): string {
+  let handler = action.handlerSource;
+
+  if (action.internalActionCalls.length > 0) {
+    handler = transformHandlerForDO(handler, action.internalActionCalls);
+  }
+
+  if (action.crossDbActionCalls.length > 0) {
+    handler = transformCrossDbCalls(
+      handler,
+      action.crossDbActionCalls,
+      crossDbContext.actionToDatabase
+    );
+  }
+
+  return handler;
+}
+
+/** Build the context setup statement for a DO method */
+export function buildMethodContextStatement(action: ActionInfo): t.Statement | null {
+  if (action.crossDbActionCalls.length === 0) {
+    return null;
+  }
+
+  const ctxDecl = t.variableDeclaration('const', [
+    t.variableDeclarator(
+      t.identifier('ctx'),
+      t.objectExpression([
+        t.objectProperty(
+          t.identifier('env'),
+          t.memberExpression(t.thisExpression(), t.identifier('env'))
+        ),
+        t.objectProperty(
+          t.identifier('instanceKey'),
+          t.logicalExpression(
+            '??',
+            t.optionalMemberExpression(
+              t.identifier('rpcContext'),
+              t.identifier('instanceKey'),
+              false,
+              true
+            ),
+            t.stringLiteral('global')
+          )
+        )
+      ])
+    )
+  ]);
+
+  return ctxDecl;
+}
+
+/** Build a DO method */
+export function buildDOMethod(config: MethodConfig): t.ClassMethod {
+  const { action, crossDbContext } = config;
+  const hasCrossDbCalls = action.crossDbActionCalls.length > 0;
+
+  const sourceHint = action.sourceFile ? ` (defined in ${action.sourceFile})` : '';
+  const transformedHandler = transformHandler(action, crossDbContext);
+
+  // Parameters: args, and optionally rpcContext
+  const params: t.Identifier[] = [t.identifier('args')];
+  if (hasCrossDbCalls) {
+    params.push(t.identifier('rpcContext'));
+  }
+
+  // Build body
+  const bodyStatements: t.Statement[] = [];
+
+  // await this.ensureMigrations();
+  bodyStatements.push(
+    t.expressionStatement(
+      t.awaitExpression(
+        t.callExpression(
+          t.memberExpression(t.thisExpression(), t.identifier('ensureMigrations')),
+          []
+        )
+      )
+    )
+  );
+
+  // const validator = type({...});
+  const validatorDecl = t.variableDeclaration('const', [
+    t.variableDeclarator(
+      t.identifier('validator'),
+      t.callExpression(t.identifier('type'), [parseExpression(action.argsSchemaSource)])
+    )
+  ]);
+  bodyStatements.push(validatorDecl);
+
+  // const validated = validator(args);
+  bodyStatements.push(
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('validated'),
+        t.callExpression(t.identifier('validator'), [t.identifier('args')])
+      )
+    ])
+  );
+
+  // if (validated instanceof type.errors) throw
+  bodyStatements.push(
+    t.ifStatement(
+      t.binaryExpression(
+        'instanceof',
+        t.identifier('validated'),
+        t.memberExpression(t.identifier('type'), t.identifier('errors'))
+      ),
+      t.blockStatement([
+        t.throwStatement(
+          t.newExpression(t.identifier('Error'), [
+            t.templateLiteral(
+              [
+                t.templateElement({ raw: `Invalid args for ${action.exportName}${sourceHint}: ` }, false),
+                t.templateElement({ raw: '' }, true)
+              ],
+              [t.memberExpression(t.identifier('validated'), t.identifier('summary'))]
+            )
+          ])
+        )
+      ])
+    )
+  );
+
+  // Context setup (if needed)
+  const ctxStatement = buildMethodContextStatement(action);
+  if (ctxStatement) {
+    bodyStatements.push(ctxStatement);
+  }
+
+  const handlerDecl = t.variableDeclaration('const', [
+    t.variableDeclarator(t.identifier('handler'), parseExpression(transformedHandler))
+  ]);
+  bodyStatements.push(handlerDecl);
+
+  // return handler(this.db, validated, ctx/undefined);
+  bodyStatements.push(
+    t.returnStatement(
+      t.callExpression(t.identifier('handler'), [
+        t.memberExpression(t.thisExpression(), t.identifier('db')),
+        t.identifier('validated'),
+        hasCrossDbCalls ? t.identifier('ctx') : t.identifier('undefined')
+      ])
+    )
+  );
+
+  return t.classMethod(
+    'method',
+    t.identifier(action.exportName),
+    params,
+    t.blockStatement(bodyStatements),
+    false,
+    false,
+    false,
+    true
+  );
+}
+
+/** Build migrations object expression */
+export function buildMigrationsObject(migrations?: Map<string, string[][]>): t.ObjectExpression {
   if (!migrations || migrations.size === 0) {
-    return '{}';
+    return t.objectExpression([]);
   }
 
   const entries = Array.from(migrations.entries())
-    .sort(([a], [b]) => a.localeCompare(b)) // Sort by migration name
-    .map(([name, chunks]) => {
-      // Generate chunks as arrays of statement arrays
-      const chunksCode = chunks
-        .map(chunk => {
-          const statementsCode = chunk
-            .map(s => JSON.stringify(s))
-            .join(',\n          ');
-          return `[\n          ${statementsCode}\n        ]`;
-        })
-        .join(',\n        ');
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([name, chunks]) => {
+    const chunksArray = t.arrayExpression(
+      chunks.map(chunk => t.arrayExpression(chunk.map(s => t.stringLiteral(s))))
+    );
 
-      return `    '${name}': {
-      chunks: [
-        ${chunksCode}
-      ]
-    }`;
-    });
+    return t.objectProperty(
+      t.stringLiteral(name),
+      t.objectExpression([t.objectProperty(t.identifier('chunks'), chunksArray)])
+    );
+  });
 
-  return `{
-${entries.join(',\n')}
-  }`;
+  return t.objectExpression(entries);
 }
 
-/**
- * Generate the complete Durable Objects module
- *
- * This creates a single module that exports all DO classes
- */
-export function generateDurableObjectsModule(
+/** Build a complete DO class */
+export function buildDOClass(
+  database: DatabaseInfo,
+  actions: ActionInfo[],
+  crossDbContext: CrossDbContext
+): t.ExportNamedDeclaration {
+  const methods = actions.map(action => buildDOMethod({ action, crossDbContext }));
+
+  const migrationsProperty = t.classProperty(
+    t.identifier('migrations'),
+    buildMigrationsObject(database.migrations)
+  );
+
+  const classDecl = t.classDeclaration(
+    t.identifier(database.className),
+    t.identifier('SqliteDurableObject'),
+    t.classBody([migrationsProperty, ...methods])
+  );
+
+  return t.exportNamedDeclaration(classDecl);
+}
+
+// ============================================================================
+// Cross-DB Context Builder
+// ============================================================================
+
+/** Build the cross-DB context from databases and their actions */
+export function buildCrossDbContext(
   databases: DatabaseInfo[],
-  actionsByDatabase: Map<string, ActionInfo[]>,
-  allActions: ActionInfo[]
-): string {
-  // Build a map of action name -> database info for cross-DB call transformation
+  actionsByDatabase: Map<string, ActionInfo[]>
+): CrossDbContext {
   const actionToDatabase = new Map<string, DatabaseInfo>();
+
   for (const db of databases) {
     const dbActions = actionsByDatabase.get(db.name) ?? [];
     for (const action of dbActions) {
@@ -246,42 +422,60 @@ export function generateDurableObjectsModule(
     }
   }
 
-  const crossDbContext: CrossDbContext = { actionToDatabase };
+  return { actionToDatabase };
+}
 
-  const classes = databases.map(db => {
-    const dbActions = actionsByDatabase.get(db.name) ?? [];
-    return generateDurableObjectClass(db, dbActions, crossDbContext);
-  }).join('\n');
+// ============================================================================
+// Public API
+// ============================================================================
 
-  return `import { SqliteDurableObject } from '@shoplayer/database/db';
-import { type } from 'arktype';
+/**
+ * Generate RPC stub code for a database's actions
+ */
+export function generateRpcStubs(
+  database: DatabaseInfo,
+  actions: ActionInfo[],
+  options: GeneratorOptions
+): string {
+  if (actions.length === 0) {
+    return `// No actions defined for ${database.name}`;
+  }
 
-${classes}
-`;
+  const statements: t.Statement[] = [
+    createNamedImport(['getContext'], options.contextImport),
+    createNamedImport(['type'], 'arktype'),
+    ...actions.map(action =>
+      buildStubFunction({ action, database, shopIdPath: options.shopIdPath })
+    )
+  ];
+
+  return generateFromStatements(statements);
 }
 
 /**
- * Generate type definitions for the virtual modules
+ * Generate the complete Durable Objects module
  */
-export function generateTypeDefinitions(
-  database: DatabaseInfo,
-  actions: ActionInfo[]
+export function generateDurableObjectsModule(
+  databases: DatabaseInfo[],
+  actionsByDatabase: Map<string, ActionInfo[]>,
+  _allActions: ActionInfo[]
 ): string {
-  const actionTypes = actions.map(action => {
-    return `export declare function ${action.exportName}(args: any): Promise<any>;`;
-  }).join('\n');
+  const crossDbContext = buildCrossDbContext(databases, actionsByDatabase);
 
-  return `// Type definitions for shoplayer/databases/${database.name}
-// @generated by @shoplayer/database
+  const statements: t.Statement[] = [
+    createNamedImport(['SqliteDurableObject'], '@shoplayer/database/db'),
+    createNamedImport(['type'], 'arktype'),
+    ...databases.map(db => {
+      const dbActions = actionsByDatabase.get(db.name) ?? [];
+      return buildDOClass(db, dbActions, crossDbContext);
+    })
+  ];
 
-${actionTypes}
-`;
+  return generateFromStatements(statements);
 }
 
 /**
  * Generate the module that re-exports actions from the virtual module
- *
- * This transforms the user's database file to re-export from the generated stubs
  */
 export function generateReExportModule(
   databaseName: string,
@@ -291,6 +485,7 @@ export function generateReExportModule(
     return `// No actions to re-export`;
   }
 
-  const names = actions.map(a => a.exportName).join(', ');
-  return `export { ${names} } from 'shoplayer/databases/${databaseName}';`;
+  return generateFromStatements([
+    createReExport(actions.map(a => a.exportName), `shoplayer/databases/${databaseName}`)
+  ]);
 }

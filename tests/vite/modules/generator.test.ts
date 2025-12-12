@@ -1,31 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import * as t from '@babel/types';
 import {
-  // Public API
-  generateRpcStubs,
-  generateDurableObjectsModule,
-  // AST Utilities
   parseExpression,
-  parseMemberPath,
-  createNamedImport,
-  createReExport,
-  generateFromStatements,
-  // Builders - RPC Stubs
-  buildIdStrategy,
-  buildRpcCall,
-  buildStubBodyStatements,
-  buildStubFunction,
-  // Builders - DO Methods
-  buildMethodContextStatement,
-  buildDOMethod,
-  buildMigrationsObject,
-  buildDOClass,
-  // Builders - Cross-DB
-  buildCrossDbContext,
-  // Types
-  type StubConfig,
-  type MethodConfig,
-  type CrossDbContext,
+  generateDurableObjectsModule,
+  transformActionFile,
 } from '../../../src/vite/modules/generator';
 import type { DatabaseInfo, ActionInfo } from '../../../src/db';
 
@@ -34,434 +11,334 @@ import type { DatabaseInfo, ActionInfo } from '../../../src/db';
 // ============================================================================
 
 const mockDatabase: DatabaseInfo = {
-  filePath: '/src/databases/main.js',
+  filePath: '/src/databases/main.ts',
   name: 'main',
   className: 'MainDatabaseDO',
   bindingName: 'MAIN_DATABASE_DO',
   instance: 'per-shop',
   migrationsDir: './migrations',
   schemaImport: './schema',
-  schemaTableNames: ['users', 'posts'],
+  schemaTableNames: ['users'],
 };
 
 const globalDatabase: DatabaseInfo = {
   ...mockDatabase,
   name: 'analytics',
-  className: 'AnalyticsDatabaseDO',
-  bindingName: 'ANALYTICS_DATABASE_DO',
+  className: 'AnalyticsDO',
+  bindingName: 'ANALYTICS_DO',
   instance: 'global',
 };
 
-const simpleAction: ActionInfo = {
+const createUserAction: ActionInfo = {
   exportName: 'createUser',
   argsSchemaSource: `{ name: 'string', email: 'string.email' }`,
-  handlerSource: `async (db, args) => db.insertInto('users').values({ name: args.name }).execute()`,
+  handlerSource: `async (db, args) => db.insertInto('users').values(args).execute()`,
   databaseName: 'main',
-  sourceFile: 'src/databases/actions/createUser.ts',
+  sourceFile: 'src/actions/users.ts',
   internalActionCalls: [],
   crossDbActionCalls: [],
 };
 
-const actionWithCrossDbCalls: ActionInfo = {
-  exportName: 'createUserWithLog',
-  argsSchemaSource: `{ name: 'string' }`,
-  handlerSource: `async (db, args) => db.insertInto('users').values(args).execute()`,
-  databaseName: 'main',
-  sourceFile: 'src/databases/actions/createUserWithLog.ts',
-  internalActionCalls: [],
-  crossDbActionCalls: ['logEvent'],
-};
-
-const actionWithoutSourceFile: ActionInfo = {
+const getUserAction: ActionInfo = {
   exportName: 'getUser',
   argsSchemaSource: `{ id: 'string' }`,
   handlerSource: `async (db, args) => db.selectFrom('users').where('id', '=', args.id).executeTakeFirst()`,
   databaseName: 'main',
-  sourceFile: undefined as unknown as string, // Test case for missing sourceFile
+  sourceFile: 'src/actions/users.ts',
   internalActionCalls: [],
   crossDbActionCalls: [],
 };
 
-const mockActions: ActionInfo[] = [simpleAction, actionWithoutSourceFile];
-
-const emptyCrossDbContext: CrossDbContext = {
-  actionToDatabase: new Map(),
-};
-
-// Context with logEvent mapped to globalDatabase (for cross-DB call tests)
-const crossDbContextWithLogEvent: CrossDbContext = {
-  actionToDatabase: new Map([['logEvent', globalDatabase]]),
-};
-
 // ============================================================================
-// AST Utilities Tests
+// parseExpression
 // ============================================================================
 
 describe('parseExpression', () => {
-  it('parses member expressions', () => {
-    const result = parseExpression('foo.bar');
-    expect(t.isMemberExpression(result)).toBe(true);
-  });
-
-  it('parses function calls', () => {
-    const result = parseExpression('foo()');
-    expect(t.isCallExpression(result)).toBe(true);
-  });
-
   it('parses object literals', () => {
     const result = parseExpression('{ a: 1, b: 2 }');
-    expect(t.isObjectExpression(result)).toBe(true);
+    expect(result.type).toBe('ObjectExpression');
   });
 
   it('parses arrow functions', () => {
     const result = parseExpression('async (db, args) => db.query()');
-    expect(t.isArrowFunctionExpression(result)).toBe(true);
+    expect(result.type).toBe('ArrowFunctionExpression');
   });
 
-  it('throws on variable declarations', () => {
+  it('parses function calls', () => {
+    const result = parseExpression('foo()');
+    expect(result.type).toBe('CallExpression');
+  });
+
+  it('parses member expressions', () => {
+    const result = parseExpression('foo.bar.baz');
+    expect(result.type).toBe('MemberExpression');
+  });
+
+  it('strips trailing semicolons', () => {
+    const result = parseExpression('{ x: 1 };');
+    expect(result.type).toBe('ObjectExpression');
+  });
+
+  it('throws on non-expressions', () => {
     expect(() => parseExpression('const x = 1')).toThrow();
   });
 });
 
-describe('parseMemberPath', () => {
-  it('builds simple path', () => {
-    const result = parseMemberPath(t.identifier('ctx'), 'shop');
-    const code = generateFromStatements([t.expressionStatement(result)]);
-    expect(code).toContain('ctx.shop');
-  });
-
-  it('builds nested path', () => {
-    const result = parseMemberPath(t.identifier('ctx'), 'session.shop');
-    const code = generateFromStatements([t.expressionStatement(result)]);
-    expect(code).toContain('ctx.session.shop');
-  });
-
-  it('builds deeply nested path', () => {
-    const result = parseMemberPath(t.identifier('ctx'), 'a.b.c.d');
-    const code = generateFromStatements([t.expressionStatement(result)]);
-    expect(code).toContain('ctx.a.b.c.d');
-  });
-});
-
-describe('createNamedImport', () => {
-  it('creates import with single specifier', () => {
-    const result = createNamedImport(['foo'], 'bar');
-    expect(t.isImportDeclaration(result)).toBe(true);
-    expect(result.specifiers).toHaveLength(1);
-  });
-
-  it('generates correct code', () => {
-    const result = createNamedImport(['getContext'], '@shoplayer/database/context');
-    const code = generateFromStatements([result]);
-    expect(code).toContain('import { getContext }');
-    expect(code).toContain('@shoplayer/database/context');
-  });
-});
-
-describe('createReExport', () => {
-  it('creates export with specifiers', () => {
-    const result = createReExport(['foo', 'bar'], 'source');
-    expect(t.isExportNamedDeclaration(result)).toBe(true);
-    expect(result.specifiers).toHaveLength(2);
-  });
-
-  it('generates correct code', () => {
-    const result = createReExport(['createUser', 'getUser'], 'shoplayer/databases/main');
-    const code = generateFromStatements([result]);
-    expect(code).toContain('export { createUser, getUser }');
-  });
-});
-
 // ============================================================================
-// RPC Stub Builder Tests
+// generateDurableObjectsModule
 // ============================================================================
 
-describe('buildIdStrategy', () => {
-  it('uses global for global instance', () => {
-    const result = buildIdStrategy(globalDatabase, 'session.shop');
-    const code = generateFromStatements([t.expressionStatement(result)]);
-    expect(code).toContain('"global"');
+describe('generateDurableObjectsModule', () => {
+  it('imports SqliteDurableObject', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toMatch(/import\s*\{\s*SqliteDurableObject\s*\}\s*from\s*["']@shoplayer\/database\/db["']/);
   });
 
-  it('uses ctx path for per-shop instance', () => {
-    const result = buildIdStrategy(mockDatabase, 'session.shop');
-    const code = generateFromStatements([t.expressionStatement(result)]);
-    expect(code).toContain('ctx.session.shop');
+  it('imports arktype', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toMatch(/import\s*\{\s*type\s*\}\s*from\s*["']arktype["']/);
   });
 
-  it('returns CallExpression', () => {
-    const result = buildIdStrategy(mockDatabase, 'session.shop');
-    expect(t.isCallExpression(result)).toBe(true);
-  });
-});
-
-describe('buildRpcCall', () => {
-  it('builds simple call without instanceKey', () => {
-    const config: StubConfig = {
-      action: simpleAction,
-      database: mockDatabase,
-      shopIdPath: 'session.shop',
-    };
-    const code = generateFromStatements([t.expressionStatement(buildRpcCall(config))]);
-    expect(code).toContain('stub.createUser(validatedArgs)');
-    expect(code).not.toContain('instanceKey');
+  it('imports from registry module', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toMatch(/import\s*\{[^}]*getAction[^}]*\}\s*from\s*["']@shoplayer\/database\/registry["']/);
+    expect(code).toMatch(/import\s*\{[^}]*runWithDoContext[^}]*\}\s*from\s*["']@shoplayer\/database\/registry["']/);
   });
 
-  it('builds call with instanceKey for cross-DB actions', () => {
-    const config: StubConfig = {
-      action: actionWithCrossDbCalls,
-      database: mockDatabase,
-      shopIdPath: 'session.shop',
-    };
-    const code = generateFromStatements([t.expressionStatement(buildRpcCall(config))]);
-    expect(code).toContain('instanceKey');
-  });
-});
-
-describe('buildStubBodyStatements', () => {
-  it('returns array of statements', () => {
-    const config: StubConfig = {
-      action: simpleAction,
-      database: mockDatabase,
-      shopIdPath: 'session.shop',
-    };
-    const result = buildStubBodyStatements(config);
-    expect(Array.isArray(result)).toBe(true);
-    expect(result.length).toBeGreaterThan(0);
-  });
-
-  it('includes validation', () => {
-    const config: StubConfig = {
-      action: simpleAction,
-      database: mockDatabase,
-      shopIdPath: 'session.shop',
-    };
-    const code = generateFromStatements(buildStubBodyStatements(config));
-    expect(code).toContain('argsSchema');
-    expect(code).toContain('type(');
-  });
-});
-
-describe('buildStubFunction', () => {
-  it('returns ExportNamedDeclaration', () => {
-    const config: StubConfig = {
-      action: simpleAction,
-      database: mockDatabase,
-      shopIdPath: 'session.shop',
-    };
-    expect(t.isExportNamedDeclaration(buildStubFunction(config))).toBe(true);
-  });
-
-  it('generates async exported function', () => {
-    const config: StubConfig = {
-      action: simpleAction,
-      database: mockDatabase,
-      shopIdPath: 'session.shop',
-    };
-    const code = generateFromStatements([buildStubFunction(config)]);
-    expect(code).toContain('export async function createUser');
-  });
-});
-
-// ============================================================================
-// DO Method Builder Tests
-// ============================================================================
-
-describe('buildMethodContextStatement', () => {
-  it('returns null for simple actions', () => {
-    expect(buildMethodContextStatement(simpleAction)).toBeNull();
-  });
-
-  it('returns statement for cross-DB actions', () => {
-    const result = buildMethodContextStatement(actionWithCrossDbCalls);
-    expect(result).not.toBeNull();
-    const code = generateFromStatements([result!]);
-    expect(code).toContain('const ctx');
-  });
-});
-
-describe('buildDOMethod', () => {
-  it('returns ClassMethod', () => {
-    const config: MethodConfig = {
-      action: simpleAction,
-      crossDbContext: emptyCrossDbContext,
-    };
-    expect(t.isClassMethod(buildDOMethod(config))).toBe(true);
-  });
-
-  it('is async', () => {
-    const config: MethodConfig = {
-      action: simpleAction,
-      crossDbContext: emptyCrossDbContext,
-    };
-    expect(buildDOMethod(config).async).toBe(true);
-  });
-
-  it('has one param for simple actions', () => {
-    const config: MethodConfig = {
-      action: simpleAction,
-      crossDbContext: emptyCrossDbContext,
-    };
-    expect(buildDOMethod(config).params).toHaveLength(1);
-  });
-
-  it('has two params for cross-DB actions', () => {
-    const config: MethodConfig = {
-      action: actionWithCrossDbCalls,
-      crossDbContext: crossDbContextWithLogEvent,
-    };
-    expect(buildDOMethod(config).params).toHaveLength(2);
-  });
-});
-
-describe('buildMigrationsObject', () => {
-  it('returns empty object for undefined', () => {
-    const result = buildMigrationsObject(undefined);
-    expect((result as t.ObjectExpression).properties).toHaveLength(0);
-  });
-
-  it('returns empty object for empty map', () => {
-    const result = buildMigrationsObject(new Map());
-    expect((result as t.ObjectExpression).properties).toHaveLength(0);
-  });
-
-  it('generates migrations with chunks', () => {
-    const migrations = new Map([
-      ['001_init', [['CREATE TABLE users (id TEXT)']]],
-    ]);
-    const code = generateFromStatements([t.expressionStatement(buildMigrationsObject(migrations))]);
-    expect(code).toContain('001_init');
-    expect(code).toContain('chunks');
-  });
-
-  it('sorts by name', () => {
-    const migrations = new Map([
-      ['002_second', [['ALTER']]],
-      ['001_first', [['CREATE']]],
-    ]);
-    const code = generateFromStatements([t.expressionStatement(buildMigrationsObject(migrations))]);
-    expect(code.indexOf('001_first')).toBeLessThan(code.indexOf('002_second'));
-  });
-});
-
-describe('buildDOClass', () => {
-  it('returns ExportNamedDeclaration', () => {
-    expect(t.isExportNamedDeclaration(buildDOClass(mockDatabase, [], emptyCrossDbContext))).toBe(true);
-  });
-
-  it('extends SqliteDurableObject', () => {
-    const code = generateFromStatements([buildDOClass(mockDatabase, [], emptyCrossDbContext)]);
-    expect(code).toContain('extends SqliteDurableObject');
+  it('generates class extending SqliteDurableObject', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('class MainDatabaseDO extends SqliteDurableObject');
   });
 
   it('includes migrations property', () => {
-    const code = generateFromStatements([buildDOClass(mockDatabase, [], emptyCrossDbContext)]);
-    expect(code).toContain('migrations =');
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('migrations = {}');
   });
 
-  it('includes methods', () => {
-    const code = generateFromStatements([buildDOClass(mockDatabase, mockActions, emptyCrossDbContext)]);
-    expect(code).toContain('createUser');
-    expect(code).toContain('getUser');
-  });
-});
-
-// ============================================================================
-// Cross-DB Context Tests
-// ============================================================================
-
-describe('buildCrossDbContext', () => {
-  it('builds empty context for empty inputs', () => {
-    const result = buildCrossDbContext([], new Map());
-    expect(result.actionToDatabase.size).toBe(0);
+  it('generates rpc method', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('async rpc(method, args, rpcContext)');
   });
 
-  it('maps actions to databases', () => {
-    const actionsByDatabase = new Map([['main', mockActions]]);
-    const result = buildCrossDbContext([mockDatabase], actionsByDatabase);
-    expect(result.actionToDatabase.get('createUser')).toBe(mockDatabase);
-  });
-});
-
-// ============================================================================
-// Public API Tests
-// ============================================================================
-
-describe('generateRpcStubs', () => {
-  const options = {
-    contextImport: '@shoplayer/database/context',
-    shopIdPath: 'session.shop',
-  };
-
-  it('generates functions for each action', () => {
-    const result = generateRpcStubs(mockDatabase, mockActions, options);
-    expect(result).toContain('function createUser');
-    expect(result).toContain('function getUser');
+  it('includes getAction call', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('getAction("main", method)');
   });
 
-  it('imports getContext', () => {
-    const result = generateRpcStubs(mockDatabase, mockActions, options);
-    expect(result).toContain('import { getContext }');
-  });
-
-  it('imports type from arktype', () => {
-    const result = generateRpcStubs(mockDatabase, mockActions, options);
-    expect(result).toContain('import { type }');
-  });
-
-  it('returns comment when no actions', () => {
-    const result = generateRpcStubs(mockDatabase, [], options);
-    expect(result).toContain('No actions defined');
-  });
-
-  it('only passes instanceKey for cross-DB actions', () => {
-    const result = generateRpcStubs(mockDatabase, [simpleAction, actionWithCrossDbCalls], options);
-    expect(result).toMatch(/stub\.createUser\(validatedArgs\)/);
-    expect(result).toContain('stub.createUserWithLog(validatedArgs, {');
-  });
-});
-
-describe('generateDurableObjectsModule', () => {
-  it('generates class extending SqliteDurableObject', () => {
-    const actionsByDatabase = new Map([['main', mockActions]]);
-    const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, mockActions);
-    expect(result).toContain('extends SqliteDurableObject');
-  });
-
-  it('imports dependencies', () => {
-    const actionsByDatabase = new Map([['main', mockActions]]);
-    const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, mockActions);
-    expect(result).toContain('import { SqliteDurableObject }');
-    expect(result).toContain('import { type }');
-  });
-
-  it('generates methods', () => {
-    const actionsByDatabase = new Map([['main', mockActions]]);
-    const result = generateDurableObjectsModule([mockDatabase], actionsByDatabase, mockActions);
-    expect(result).toContain('createUser(args');
-    expect(result).toContain('getUser(args');
+  it('includes runWithDoContext', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('runWithDoContext(');
   });
 
   it('handles multiple databases', () => {
-    const analyticsAction: ActionInfo = {
+    const code = generateDurableObjectsModule([mockDatabase, globalDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('class MainDatabaseDO');
+    expect(code).toContain('class AnalyticsDO');
+  });
+
+  it('generates binding names object', () => {
+    const code = generateDurableObjectsModule([mockDatabase, globalDatabase], '@shoplayer/database/registry');
+    // Check that both bindings are present (format may vary)
+    expect(code).toMatch(/["']main["']\s*:\s*["']MAIN_DATABASE_DO["']/);
+    expect(code).toMatch(/["']analytics["']\s*:\s*["']ANALYTICS_DO["']/);
+  });
+
+  it('includes migrations when provided', () => {
+    const dbWithMigrations: DatabaseInfo = {
+      ...mockDatabase,
+      migrations: new Map([['001_init', [['CREATE TABLE users (id TEXT)']]]]),
+    };
+    const code = generateDurableObjectsModule([dbWithMigrations], '@shoplayer/database/registry');
+    expect(code).toContain('001_init');
+    expect(code).toContain('chunks');
+  });
+});
+
+// ============================================================================
+// transformActionFile
+// ============================================================================
+
+describe('transformActionFile', () => {
+  const defaultOptions = {
+    dbName: 'main',
+    database: mockDatabase,
+    contextImport: '@shoplayer/database/context',
+    shopIdPath: 'session.shop',
+    registryImport: '@shoplayer/database/registry',
+  };
+
+  it('returns null for empty actions', () => {
+    const result = transformActionFile({
+      ...defaultOptions,
+      code: 'const x = 1;',
+      actionsInFile: [],
+    });
+    expect(result).toBeNull();
+  });
+
+  it('transforms action exports', () => {
+    const code = `
+import { action } from './main';
+
+export const createUser = action({
+  args: { name: 'string' },
+  handler: async (db, args) => db.insertInto('users').values(args).execute()
+});
+`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.code).toContain('export async function createUser');
+  });
+
+  it('adds arktype import', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']arktype["']/);
+  });
+
+  it('adds context import', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toMatch(/import\s*\{[^}]*getContext[^}]*\}\s*from\s*["']@shoplayer\/database\/context["']/);
+  });
+
+  it('adds registry imports', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toContain('registerAction');
+    expect(result!.code).toContain('getDoContext');
+    expect(result!.code).toContain('callActionInValidated');
+  });
+
+  it('generates registerAction call', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toContain('registerAction("main", "createUser"');
+  });
+
+  it('generates DO short path check', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toContain('getDoContext()');
+    expect(result!.code).toContain('callActionInValidated');
+  });
+
+  it('generates validation code', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toContain('argsSchema');
+    expect(result!.code).toContain('argsSchema.assert(args)');
+  });
+
+  it('uses global instanceKey for global databases', () => {
+    const code = `export const logEvent = action({ args: {}, handler: async () => {} });`;
+    const logEventAction: ActionInfo = {
       exportName: 'logEvent',
-      argsSchemaSource: `{ type: 'string' }`,
-      handlerSource: `async (db, args) => db.insertInto('events').values(args).execute()`,
+      argsSchemaSource: '{}',
+      handlerSource: 'async () => {}',
       databaseName: 'analytics',
-      sourceFile: 'src/databases/analytics.ts',
+      sourceFile: 'src/actions/analytics.ts',
       internalActionCalls: [],
       crossDbActionCalls: [],
     };
-    const actionsByDatabase = new Map([
-      ['main', mockActions],
-      ['analytics', [analyticsAction]],
-    ]);
-    const result = generateDurableObjectsModule(
-      [mockDatabase, globalDatabase],
-      actionsByDatabase,
-      [...mockActions, analyticsAction]
-    );
-    expect(result).toContain('class MainDatabaseDO');
-    expect(result).toContain('class AnalyticsDatabaseDO');
+
+    const result = transformActionFile({
+      ...defaultOptions,
+      dbName: 'analytics',
+      database: globalDatabase,
+      code,
+      actionsInFile: [logEventAction],
+    });
+
+    expect(result!.code).toContain('instanceKey = "global"');
+  });
+
+  it('uses shopIdPath for per-shop databases', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toContain('ctx.session.shop');
+  });
+
+  it('transforms multiple actions', () => {
+    const code = `
+export const createUser = action({ args: {}, handler: async () => {} });
+export const getUser = action({ args: {}, handler: async () => {} });
+`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction, getUserAction],
+    });
+
+    expect(result!.code).toContain('export async function createUser');
+    expect(result!.code).toContain('export async function getUser');
+    expect(result!.code).toContain('registerAction("main", "createUser"');
+    expect(result!.code).toContain('registerAction("main", "getUser"');
+  });
+
+  it('preserves non-action exports', () => {
+    const code = `
+export const createUser = action({ args: {}, handler: async () => {} });
+export const SOME_CONSTANT = 42;
+`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toContain('export const SOME_CONSTANT = 42');
+  });
+
+  it('returns sourcemap', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      sourceFileName: 'test.ts',
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.map).toBeDefined();
   });
 });

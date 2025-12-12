@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { discoverDatabaseFiles, readFile } from '../../src/vite/modules/discovery';
-import { parseDatabaseFile, resolveInternalActionCalls } from '../../src/vite/modules/parser';
-import { generateRpcStubs, generateDurableObjectsModule } from '../../src/vite/modules/generator';
+import { discoverDatabaseFiles, readFile } from '../../src/vite/modules';
+import { parseDatabaseFile } from '../../src/vite/modules';
+import { generateDurableObjectsModule, transformActionFile } from '../../src/vite/modules';
 import { generateRequiredConfig } from '../../src/vite/modules/wrangler';
 import type { DatabaseInfo, ActionInfo } from '../../src/db';
 
@@ -13,8 +13,6 @@ describe('plugin integration', () => {
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-test-'));
-
-    // Create test structure
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
   });
 
@@ -24,7 +22,6 @@ describe('plugin integration', () => {
 
   describe('full workflow', () => {
     it('discovers, parses, and generates code for a database', () => {
-      // Create test files
       const schemaCode = `
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
 
@@ -79,24 +76,34 @@ export const getUser = action({
       expect(parsed.database!.className).toBe('MainDatabaseDO');
       expect(parsed.actions).toHaveLength(2);
 
-      // 3. Generate RPC stubs
-      const stubs = generateRpcStubs(parsed.database!, parsed.actions, {
+      // 3. Transform action file
+      const transformed = transformActionFile({
+        code,
+        sourceFileName: discovered[0].absolutePath,
+        dbName: parsed.database!.name,
+        database: parsed.database!,
+        actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
         shopIdPath: 'session.shop',
+        registryImport: '@shoplayer/database/registry',
       });
 
-      expect(stubs).toContain('export async function createUser');
-      expect(stubs).toContain('export async function getUser');
-      expect(stubs).toContain('getContext');
-      expect(stubs).toContain('MAIN_DATABASE_DO');
+      expect(transformed).not.toBeNull();
+      expect(transformed!.code).toMatch(/export async function createUser/);
+      expect(transformed!.code).toMatch(/export async function getUser/);
+      expect(transformed!.code).toMatch(/getContext/);
+      expect(transformed!.code).toMatch(/registerAction/);
+      expect(transformed!.code).toMatch(/MAIN_DATABASE_DO/);
 
       // 4. Generate DO module
-      const actionsByDb = new Map([['main', parsed.actions]]);
-      const doModule = generateDurableObjectsModule([parsed.database!], actionsByDb, parsed.actions);
+      const doModule = generateDurableObjectsModule(
+        [parsed.database!],
+        '@shoplayer/database/registry'
+      );
 
-      expect(doModule).toContain('class MainDatabaseDO extends SqliteDurableObject');
-      expect(doModule).toContain('async createUser');
-      expect(doModule).toContain('async getUser');
+      expect(doModule).toMatch(/class MainDatabaseDO extends SqliteDurableObject/);
+      expect(doModule).toMatch(/async rpc/);
+      expect(doModule).toMatch(/getAction/);
 
       // 5. Generate wrangler config
       const wranglerConfig = generateRequiredConfig([parsed.database!]);
@@ -104,57 +111,6 @@ export const getUser = action({
       expect(wranglerConfig.durable_objects!.bindings).toHaveLength(1);
       expect(wranglerConfig.durable_objects!.bindings![0].name).toBe('MAIN_DATABASE_DO');
       expect(wranglerConfig.durable_objects!.bindings![0].class_name).toBe('MainDatabaseDO');
-    });
-
-    it('handles internal action calls correctly', () => {
-      const mainCode = `
-import { defineDatabase } from '@shoplayer/database/db';
-import { users } from './schema';
-
-export const { action } = defineDatabase({
-  migrationsDir: './migrations',
-  schema: { users },
-});
-
-export const getUser = action({
-  args: { id: 'string' },
-  handler: async (db, args, ctx) => {
-    return db.selectFrom('users').where('id', '=', args.id).executeTakeFirst();
-  },
-});
-
-export const createUserIfNotExists = action({
-  args: { name: 'string', email: 'string' },
-  handler: async (db, args, ctx) => {
-    const existing = await getUser({ id: args.email });
-    if (existing) return existing;
-    return db.insertInto('users').values({ id: args.email, ...args }).execute();
-  },
-});
-`;
-      fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'main.ts'), mainCode);
-
-      const discovered = discoverDatabaseFiles({
-        projectRoot: tempDir,
-        databasesDir: 'src/databases',
-      });
-
-      const code = readFile(discovered[0].absolutePath);
-      const parsed = parseDatabaseFile(discovered[0].absolutePath, code);
-
-      // Resolve internal action calls (pass same array twice for single-DB case)
-      resolveInternalActionCalls(parsed.actions, parsed.actions);
-
-      // Check that createUserIfNotExists knows it calls getUser
-      const createIfNotExists = parsed.actions.find(a => a.exportName === 'createUserIfNotExists');
-      expect(createIfNotExists?.internalActionCalls).toContain('getUser');
-
-      // Generate DO and verify transformation
-      const actionsByDb = new Map([['main', parsed.actions]]);
-      const doModule = generateDurableObjectsModule([parsed.database!], actionsByDb, parsed.actions);
-
-      // The generated code should have this.getUser instead of getUser
-      expect(doModule).toContain('this.getUser');
     });
 
     it('handles multiple databases', () => {
@@ -196,7 +152,6 @@ export const logEvent = action({
 
       // Parse both
       const databases: DatabaseInfo[] = [];
-      const allActions: ActionInfo[] = [];
 
       for (const file of discovered) {
         const code = readFile(file.absolutePath);
@@ -204,52 +159,75 @@ export const logEvent = action({
         if (parsed.database) {
           databases.push(parsed.database);
         }
-        allActions.push(...parsed.actions);
       }
 
       expect(databases).toHaveLength(2);
 
-      const mainDb = databases.find(d => d.name === 'main');
-      const analyticsDb = databases.find(d => d.name === 'analytics');
+      const mainDb = databases.find((d) => d.name === 'main');
+      const analyticsDb = databases.find((d) => d.name === 'analytics');
 
       expect(mainDb?.instance).toBe('per-shop');
       expect(analyticsDb?.instance).toBe('global');
+
+      // Generate DO module with both databases
+      const doModule = generateDurableObjectsModule(databases, '@shoplayer/database/registry');
+
+      expect(doModule).toMatch(/class MainDatabaseDO/);
+      expect(doModule).toMatch(/class AnalyticsDatabaseDO/);
 
       // Generate wrangler config
       const wranglerConfig = generateRequiredConfig(databases);
       expect(wranglerConfig.durable_objects!.bindings).toHaveLength(2);
     });
 
-    it('transforms cross-database action calls to RPC', () => {
-      // Main database with action that calls another database
+    it('generates correct stub for per-shop database', () => {
       const mainCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
   migrationsDir: './migrations',
   schema: {},
+  instance: 'per-shop',
 });
-export const createUserWithAnalytics = action({
+export const createUser = action({
   args: { name: 'string' },
-  handler: async (db, args, ctx) => {
-    const user = await db.insertInto('users').values(args).execute();
-    await logEvent({ type: 'user_created' });
-    return user;
-  },
+  handler: async (db, args) => null,
 });
 `;
       fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'main.ts'), mainCode);
 
-      // Analytics database
+      const discovered = discoverDatabaseFiles({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      const code = readFile(discovered[0].absolutePath);
+      const parsed = parseDatabaseFile(discovered[0].absolutePath, code);
+
+      const transformed = transformActionFile({
+        code,
+        dbName: parsed.database!.name,
+        database: parsed.database!,
+        actionsInFile: parsed.actions,
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+        registryImport: '@shoplayer/database/registry',
+      });
+
+      // Should use ctx.session.shop for instance key
+      expect(transformed!.code).toMatch(/ctx\.session\.shop/);
+    });
+
+    it('generates correct stub for global database', () => {
       const analyticsCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
-  migrationsDir: './migrations/analytics',
+  migrationsDir: './migrations',
   schema: {},
   instance: 'global',
 });
 export const logEvent = action({
   args: { type: 'string' },
-  handler: async (db, args, ctx) => null,
+  handler: async (db, args) => null,
 });
 `;
       fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'analytics.ts'), analyticsCode);
@@ -259,40 +237,59 @@ export const logEvent = action({
         databasesDir: 'src/databases',
       });
 
-      // Parse both
-      const databases: DatabaseInfo[] = [];
-      const allActions: ActionInfo[] = [];
-      const actionsByDb = new Map<string, ActionInfo[]>();
+      const code = readFile(discovered[0].absolutePath);
+      const parsed = parseDatabaseFile(discovered[0].absolutePath, code);
 
-      for (const file of discovered) {
-        const code = readFile(file.absolutePath);
-        const parsed = parseDatabaseFile(file.absolutePath, code);
-        if (parsed.database) {
-          databases.push(parsed.database);
-          actionsByDb.set(parsed.database.name, parsed.actions);
-        }
-        allActions.push(...parsed.actions);
-      }
+      const transformed = transformActionFile({
+        code,
+        dbName: parsed.database!.name,
+        database: parsed.database!,
+        actionsInFile: parsed.actions,
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+        registryImport: '@shoplayer/database/registry',
+      });
 
-      // Resolve internal/cross-DB calls for each database
-      for (const [dbName, dbActions] of actionsByDb) {
-        resolveInternalActionCalls(dbActions, allActions);
-      }
+      // Should use "global" as instance key
+      expect(transformed!.code).toMatch(/instanceKey\s*=\s*["']global["']/);
+    });
 
-      // Find the action that calls across databases
-      const mainActions = actionsByDb.get('main') ?? [];
-      const createUserWithAnalytics = mainActions.find(a => a.exportName === 'createUserWithAnalytics');
+    it('includes DO short path optimization', () => {
+      const mainCode = `
+import { defineDatabase } from '@shoplayer/database/db';
+export const { action } = defineDatabase({
+  migrationsDir: './migrations',
+  schema: {},
+});
+export const createUser = action({
+  args: { name: 'string' },
+  handler: async (db, args) => null,
+});
+`;
+      fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'main.ts'), mainCode);
 
-      // Should detect logEvent as a cross-DB call
-      expect(createUserWithAnalytics?.crossDbActionCalls).toContain('logEvent');
-      expect(createUserWithAnalytics?.internalActionCalls).toEqual([]);
+      const discovered = discoverDatabaseFiles({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
 
-      // Generate DO and verify it transforms cross-DB calls to RPC
-      const doModule = generateDurableObjectsModule(databases, actionsByDb, allActions);
+      const code = readFile(discovered[0].absolutePath);
+      const parsed = parseDatabaseFile(discovered[0].absolutePath, code);
 
-      // Should contain the RPC transformation
-      expect(doModule).toContain('ANALYTICS_DATABASE_DO');
-      expect(doModule).toContain('idFromName');
+      const transformed = transformActionFile({
+        code,
+        dbName: parsed.database!.name,
+        database: parsed.database!,
+        actionsInFile: parsed.actions,
+        contextImport: '@shoplayer/database/context',
+        shopIdPath: 'session.shop',
+        registryImport: '@shoplayer/database/registry',
+      });
+
+      // Should include DO context check for short path
+      expect(transformed!.code).toMatch(/getDoContext/);
+      expect(transformed!.code).toMatch(/callActionInValidated/);
+      expect(transformed!.code).toMatch(/__do/);
     });
   });
 });

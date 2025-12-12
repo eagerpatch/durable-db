@@ -62,6 +62,10 @@ function parseMemberPath(base: t.Expression, path: string): t.Expression {
   );
 }
 
+// ============================================================================
+// AST Builders - Imports
+// ============================================================================
+
 function createNamedImport(names: string[], source: string): t.ImportDeclaration {
   const specifiers = names.map((name) =>
     t.importSpecifier(t.identifier(name), t.identifier(name))
@@ -94,9 +98,50 @@ function ensureNamedImports(body: t.Statement[], source: string, names: string[]
   }
 }
 
-function generateWithMap(ast: t.File, sourceFileName?: string): { code: string; map: any } {
-  const out = generate(ast, { sourceMaps: true, sourceFileName, comments: true });
-  return { code: out.code, map: out.map as any };
+// ============================================================================
+// AST Builders - Objects & Literals
+// ============================================================================
+
+function buildMigrationsObject(migrations?: Map<string, string[][]>): t.ObjectExpression {
+  if (!migrations || migrations.size === 0) {
+    return t.objectExpression([]);
+  }
+
+  const sorted = Array.from(migrations.entries()).sort(([a], [b]) => a.localeCompare(b));
+
+  const properties = sorted.map(([name, chunks]) => {
+    const chunksArray = t.arrayExpression(
+      chunks.map((chunk) =>
+        t.arrayExpression(chunk.map((stmt) => t.stringLiteral(stmt)))
+      )
+    );
+
+    return t.objectProperty(
+      t.stringLiteral(name),
+      t.objectExpression([t.objectProperty(t.identifier('chunks'), chunksArray)])
+    );
+  });
+
+  return t.objectExpression(properties);
+}
+
+function buildBindingNamesObject(databases: DatabaseInfo[]): t.ObjectExpression {
+  const properties = databases.map((db) =>
+    t.objectProperty(t.stringLiteral(db.name), t.stringLiteral(db.bindingName))
+  );
+  return t.objectExpression(properties);
+}
+
+// ============================================================================
+// Code Generation
+// ============================================================================
+
+function generateCode(ast: t.File): string {
+  return generate(ast, { comments: true }).code;
+}
+
+function generateWithMap(ast: t.File, sourceFileName?: string) {
+  return generate(ast, { sourceMaps: true, sourceFileName, comments: true });
 }
 
 // ============================================================================
@@ -107,59 +152,191 @@ export function generateDurableObjectsModule(
   databases: DatabaseInfo[],
   registryImport: string
 ): string {
-  const bindingNames = Object.fromEntries(databases.map((db) => [db.name, db.bindingName]));
-  const bindingNamesJson = JSON.stringify(bindingNames);
+  const bindingNamesExpr = buildBindingNamesObject(databases);
 
-  const classes = databases.map((db) => {
-    const migrationsJson = generateMigrationsJson(db.migrations);
+  const imports: t.ImportDeclaration[] = [
+    createNamedImport(['SqliteDurableObject'], '@shoplayer/database/db'),
+    createNamedImport(['type'], 'arktype'),
+    createNamedImport(['getAction', 'runWithDoContext'], registryImport),
+  ];
 
-    return `
-export class ${db.className} extends SqliteDurableObject {
-  migrations = ${migrationsJson};
+  const classes = databases.map((db) => buildDurableObjectClass(db, bindingNamesExpr));
 
-  async rpc(method, args, rpcContext) {
-    await this.ensureMigrations();
-
-    const entry = getAction(${JSON.stringify(db.name)}, method);
-    if (!entry) {
-      throw new Error(\`[shoplayer-database] Unknown action "\${method}" for db "${db.name}" (was it imported?)\`);
-    }
-
-    const validated = entry.validator(args);
-    if (validated instanceof type.errors) {
-      throw new Error(\`[shoplayer-database] Invalid args for "\${method}": \${validated.summary}\`);
-    }
-
-    const ctx = {
-      env: this.env,
-      dbName: ${JSON.stringify(db.name)},
-      dbBindingNames: ${bindingNamesJson},
-      instanceKey: rpcContext?.instanceKey ?? 'global',
-    };
-
-    return runWithDoContext(
-      { db: this.db, ctx, dbName: ${JSON.stringify(db.name)}, instanceKey: ctx.instanceKey },
-      async () => entry.handler(this.db, validated, ctx)
-    );
-  }
-}`;
-  });
-
-  return `
-import { SqliteDurableObject } from '@shoplayer/database/db';
-import { type } from 'arktype';
-import { getAction, runWithDoContext } from '${registryImport}';
-${classes.join('\n')}
-`.trim();
+  const program = t.program([...imports, ...classes]);
+  return generateCode(t.file(program));
 }
 
-function generateMigrationsJson(migrations?: Map<string, string[][]>): string {
-  if (!migrations || migrations.size === 0) return '{}';
+function buildDurableObjectClass(
+  db: DatabaseInfo,
+  bindingNamesExpr: t.ObjectExpression
+): t.ExportNamedDeclaration {
+  // migrations = { ... }
+  const migrationsProperty = t.classProperty(
+    t.identifier('migrations'),
+    buildMigrationsObject(db.migrations)
+  );
 
-  const sorted = Array.from(migrations.entries()).sort(([a], [b]) => a.localeCompare(b));
-  const entries = sorted.map(([name, chunks]) => `${JSON.stringify(name)}: { chunks: ${JSON.stringify(chunks)} }`);
+  // async rpc(method, args, rpcContext) { ... }
+  const rpcMethod = buildRpcMethod(db, bindingNamesExpr);
 
-  return `{ ${entries.join(', ')} }`;
+  const classDecl = t.classDeclaration(
+    t.identifier(db.className),
+    t.identifier('SqliteDurableObject'),
+    t.classBody([migrationsProperty, rpcMethod])
+  );
+
+  return t.exportNamedDeclaration(classDecl);
+}
+
+function buildRpcMethod(
+  db: DatabaseInfo,
+  bindingNamesExpr: t.ObjectExpression
+): t.ClassMethod {
+  const dbNameLiteral = t.stringLiteral(db.name);
+
+  const body = t.blockStatement([
+    // await this.ensureMigrations();
+    t.expressionStatement(
+      t.awaitExpression(
+        t.callExpression(
+          t.memberExpression(t.thisExpression(), t.identifier('ensureMigrations')),
+          []
+        )
+      )
+    ),
+
+    // const entry = getAction("dbName", method);
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('entry'),
+        t.callExpression(t.identifier('getAction'), [dbNameLiteral, t.identifier('method')])
+      ),
+    ]),
+
+    // if (!entry) { throw new Error(...) }
+    t.ifStatement(
+      t.unaryExpression('!', t.identifier('entry')),
+      t.blockStatement([
+        t.throwStatement(
+          t.newExpression(t.identifier('Error'), [
+            t.templateLiteral(
+              [
+                t.templateElement({ raw: `[shoplayer-database] Unknown action "`, cooked: `[shoplayer-database] Unknown action "` }, false),
+                t.templateElement({ raw: `" for db "${db.name}" (was it imported?)`, cooked: `" for db "${db.name}" (was it imported?)` }, true),
+              ],
+              [t.identifier('method')]
+            ),
+          ])
+        ),
+      ])
+    ),
+
+    // const validated = entry.validator(args);
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('validated'),
+        t.callExpression(
+          t.memberExpression(t.identifier('entry'), t.identifier('validator')),
+          [t.identifier('args')]
+        )
+      ),
+    ]),
+
+    // if (validated instanceof type.errors) { throw new Error(...) }
+    t.ifStatement(
+      t.binaryExpression(
+        'instanceof',
+        t.identifier('validated'),
+        t.memberExpression(t.identifier('type'), t.identifier('errors'))
+      ),
+      t.blockStatement([
+        t.throwStatement(
+          t.newExpression(t.identifier('Error'), [
+            t.templateLiteral(
+              [
+                t.templateElement({ raw: `[shoplayer-database] Invalid args for "`, cooked: `[shoplayer-database] Invalid args for "` }, false),
+                t.templateElement({ raw: `": `, cooked: `": ` }, false),
+                t.templateElement({ raw: '', cooked: '' }, true),
+              ],
+              [
+                t.identifier('method'),
+                t.memberExpression(t.identifier('validated'), t.identifier('summary')),
+              ]
+            ),
+          ])
+        ),
+      ])
+    ),
+
+    // const ctx = { env: this.env, dbName: "...", dbBindingNames: {...}, instanceKey: ... };
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('ctx'),
+        t.objectExpression([
+          t.objectProperty(
+            t.identifier('env'),
+            t.memberExpression(t.thisExpression(), t.identifier('env'))
+          ),
+          t.objectProperty(t.identifier('dbName'), dbNameLiteral),
+          t.objectProperty(t.identifier('dbBindingNames'), bindingNamesExpr),
+          t.objectProperty(
+            t.identifier('instanceKey'),
+            t.logicalExpression(
+              '??',
+              t.optionalMemberExpression(
+                t.identifier('rpcContext'),
+                t.identifier('instanceKey'),
+                false,
+                true
+              ),
+              t.stringLiteral('global')
+            )
+          ),
+        ])
+      ),
+    ]),
+
+    // return runWithDoContext({ db: this.db, ctx, dbName: "...", instanceKey: ctx.instanceKey }, async () => ...)
+    t.returnStatement(
+      t.callExpression(t.identifier('runWithDoContext'), [
+        t.objectExpression([
+          t.objectProperty(
+            t.identifier('db'),
+            t.memberExpression(t.thisExpression(), t.identifier('db'))
+          ),
+          t.objectProperty(t.identifier('ctx'), t.identifier('ctx')),
+          t.objectProperty(t.identifier('dbName'), dbNameLiteral),
+          t.objectProperty(
+            t.identifier('instanceKey'),
+            t.memberExpression(t.identifier('ctx'), t.identifier('instanceKey'))
+          ),
+        ]),
+        t.arrowFunctionExpression(
+          [],
+          t.callExpression(
+            t.memberExpression(t.identifier('entry'), t.identifier('handler')),
+            [
+              t.memberExpression(t.thisExpression(), t.identifier('db')),
+              t.identifier('validated'),
+              t.identifier('ctx'),
+            ]
+          ),
+          true // async
+        ),
+      ])
+    ),
+  ]);
+
+  return t.classMethod(
+    'method',
+    t.identifier('rpc'),
+    [t.identifier('method'), t.identifier('args'), t.identifier('rpcContext')],
+    body,
+    false, // computed
+    false, // static
+    false, // generator
+    true   // async
+  );
 }
 
 // ============================================================================
@@ -182,6 +359,7 @@ function buildRpcCall(action: ActionInfo): t.CallExpression {
 function buildDoShortPath(config: StubConfig): t.Statement[] {
   const { action, database } = config;
 
+  // const __do = getDoContext();
   const doDecl = t.variableDeclaration('const', [
     t.variableDeclarator(
       t.identifier('__do'),
@@ -189,6 +367,7 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
     ),
   ]);
 
+  // if (__do && __do.dbName === "dbName") { return callActionInValidated(...) }
   const fastIf = t.ifStatement(
     t.logicalExpression(
       '&&',
@@ -299,7 +478,7 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
 // Action File Transform
 // ============================================================================
 
-export function transformActionFile(options: TransformOptions): { code: string; map: any } | null {
+export function transformActionFile(options: TransformOptions) {
   const {
     code,
     sourceFileName,

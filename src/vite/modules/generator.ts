@@ -1,12 +1,8 @@
 import type { DatabaseInfo, ActionInfo } from '../../db';
 
-// Keep these exports alive if you already rely on them.
-import { transformHandlerForDO, transformCrossDbCalls } from './parser';
-
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
 import { parse } from '@babel/parser';
-import _traverse from '@babel/traverse';
 
 // Handle ESM/CJS babel packages
 const generate =
@@ -14,32 +10,29 @@ const generate =
     ? _generate
     : (_generate as unknown as { default: typeof _generate }).default;
 
-const traverse: typeof _traverse =
-  typeof (_traverse as any) === 'function'
-    ? (_traverse as any)
-    : ((_traverse as any).default as any);
-
 // ============================================================================
 // Types
 // ============================================================================
 
-export interface GeneratorOptions {
+export interface TransformOptions {
+  code: string;
+  sourceFileName?: string;
+  dbName: string;
+  database: DatabaseInfo;
+  actionsInFile: ActionInfo[];
   contextImport: string;
   shopIdPath: string;
+  registryImport: string;
 }
 
-export interface CrossDbContext {
-  actionToDatabase: Map<string, DatabaseInfo>;
-}
-
-export interface StubConfig {
+interface StubConfig {
   action: ActionInfo;
   database: DatabaseInfo;
   shopIdPath: string;
 }
 
 // ============================================================================
-// Parser helpers
+// Parser Utilities
 // ============================================================================
 
 const PARSER_PLUGINS: any[] = [
@@ -62,15 +55,14 @@ export function parseExpression(code: string): t.Expression {
   throw new Error(`Expected expression, got ${stmt?.type ?? 'unknown'}`);
 }
 
-export function parseMemberPath(base: t.Expression, path: string): t.Expression {
-  const parts = path.split('.');
-  return parts.reduce<t.Expression>(
+function parseMemberPath(base: t.Expression, path: string): t.Expression {
+  return path.split('.').reduce<t.Expression>(
     (obj, prop) => t.memberExpression(obj, t.identifier(prop)),
     base
   );
 }
 
-export function createNamedImport(names: string[], source: string): t.ImportDeclaration {
+function createNamedImport(names: string[], source: string): t.ImportDeclaration {
   const specifiers = names.map((name) =>
     t.importSpecifier(t.identifier(name), t.identifier(name))
   );
@@ -91,8 +83,8 @@ function ensureNamedImports(body: t.Statement[], source: string, names: string[]
 
   const have = new Set(
     existing.specifiers
-    .filter((sp) => t.isImportSpecifier(sp))
-    .map((sp) => (sp.imported as t.Identifier).name)
+    .filter((sp): sp is t.ImportSpecifier => t.isImportSpecifier(sp))
+    .map((sp) => ((sp.imported as t.Identifier).name))
   );
 
   for (const n of names) {
@@ -102,121 +94,79 @@ function ensureNamedImports(body: t.Statement[], source: string, names: string[]
   }
 }
 
-function generateWithMap(ast: t.File, sourceFileName?: string) {
+function generateWithMap(ast: t.File, sourceFileName?: string): { code: string; map: any } {
   const out = generate(ast, { sourceMaps: true, sourceFileName, comments: true });
-  return { code: out.code, map: out.map };
-}
-
-export function generateFromStatements(statements: t.Statement[]): string {
-  const file = t.file(t.program(statements));
-  return generate(file, { comments: true }).code;
+  return { code: out.code, map: out.map as any };
 }
 
 // ============================================================================
-// Registry virtual module (virtual:shoplayer/databases/__actionRegistry)
+// Durable Objects Module Generation
 // ============================================================================
 
-export const VIRTUAL_REGISTRY_ID = 'shoplayer/databases/__actionRegistry';
+export function generateDurableObjectsModule(
+  databases: DatabaseInfo[],
+  registryImport: string
+): string {
+  const bindingNames = Object.fromEntries(databases.map((db) => [db.name, db.bindingName]));
+  const bindingNamesJson = JSON.stringify(bindingNames);
 
-/**
- * Registry module responsibilities:
- * - store action implementations (validator + handler) keyed by db/action
- * - expose AsyncLocalStorage context for DO-local short path
- * - provide callActionIn for cross-db hopping (validated)
- * - provide callActionInValidated for DO-local “already validated” calls
- */
-export function generateActionRegistryModule(): string {
+  const classes = databases.map((db) => {
+    const migrationsJson = generateMigrationsJson(db.migrations);
+
+    return `
+export class ${db.className} extends SqliteDurableObject {
+  migrations = ${migrationsJson};
+
+  async rpc(method, args, rpcContext) {
+    await this.ensureMigrations();
+
+    const entry = getAction(${JSON.stringify(db.name)}, method);
+    if (!entry) {
+      throw new Error(\`[shoplayer-database] Unknown action "\${method}" for db "${db.name}" (was it imported?)\`);
+    }
+
+    const validated = entry.validator(args);
+    if (validated instanceof type.errors) {
+      throw new Error(\`[shoplayer-database] Invalid args for "\${method}": \${validated.summary}\`);
+    }
+
+    const ctx = {
+      env: this.env,
+      dbName: ${JSON.stringify(db.name)},
+      dbBindingNames: ${bindingNamesJson},
+      instanceKey: rpcContext?.instanceKey ?? 'global',
+    };
+
+    return runWithDoContext(
+      { db: this.db, ctx, dbName: ${JSON.stringify(db.name)}, instanceKey: ctx.instanceKey },
+      async () => entry.handler(this.db, validated, ctx)
+    );
+  }
+}`;
+  });
+
   return `
+import { SqliteDurableObject } from '@shoplayer/database/db';
 import { type } from 'arktype';
-import { AsyncLocalStorage } from 'node:async_hooks';
-
-const byDb = new Map();
-const als = new AsyncLocalStorage();
-
-/** Register an action implementation */
-export function registerAction(dbName, actionName, def) {
-  let dbMap = byDb.get(dbName);
-  if (!dbMap) {
-    dbMap = new Map();
-    byDb.set(dbName, dbMap);
-  }
-  dbMap.set(actionName, def);
-}
-
-/** Get an action definition */
-export function getAction(dbName, actionName) {
-  const dbMap = byDb.get(dbName);
-  return dbMap ? dbMap.get(actionName) : undefined;
-}
-
-/** DurableObject-local context: { db, ctx, dbName, instanceKey } */
-export function getDoContext() {
-  return als.getStore();
-}
-
-export function runWithDoContext(store, fn) {
-  return als.run(store, fn);
-}
-
-function getOrThrow(dbName, actionName) {
-  const entry = getAction(dbName, actionName);
-  if (!entry) {
-    throw new Error('[shoplayer-database] Action not registered: ' + dbName + '/' + actionName);
-  }
-  return entry;
-}
-
-/**
- * Like callActionIn, but assumes args are already validated.
- * Used by stubs when they’re running inside the DO (ALS store exists).
- */
-export async function callActionInValidated(db, targetDb, actionName, validatedArgs, ctx) {
-  const entry = getOrThrow(targetDb, actionName);
-
-  // Same DB: direct invocation (no RPC)
-  if (ctx && ctx.dbName === targetDb) {
-    return entry.handler(db, validatedArgs, ctx);
-  }
-
-  // Cross DB: hop
-  const env = ctx?.env;
-  const bindingName = ctx?.dbBindingNames?.[targetDb];
-  if (!env || !bindingName) {
-    throw new Error('[shoplayer-database] Missing env/binding for db: ' + targetDb);
-  }
-
-  const binding = env[bindingName];
-  const instanceKey = ctx.instanceKey ?? 'global';
-
-  const id = binding.idFromName(instanceKey);
-  const stub = binding.get(id);
-
-  return stub.rpc(actionName, validatedArgs, { instanceKey });
-}
-
-/**
- * Validating entry point for userland callers.
- */
-export async function callActionIn(db, targetDb, actionName, args, ctx) {
-  const entry = getOrThrow(targetDb, actionName);
-
-  const validated = entry.validator(args);
-  if (validated instanceof type.errors) {
-    throw new Error('[shoplayer-database] Invalid args: ' + validated.summary);
-  }
-
-  return callActionInValidated(db, targetDb, actionName, validated, ctx);
-}
+import { getAction, runWithDoContext } from '${registryImport}';
+${classes.join('\n')}
 `.trim();
 }
 
+function generateMigrationsJson(migrations?: Map<string, string[][]>): string {
+  if (!migrations || migrations.size === 0) return '{}';
+
+  const sorted = Array.from(migrations.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const entries = sorted.map(([name, chunks]) => `${JSON.stringify(name)}: { chunks: ${JSON.stringify(chunks)} }`);
+
+  return `{ ${entries.join(', ')} }`;
+}
+
 // ============================================================================
-// Stub generation (DO-local short path via AsyncLocalStorage)
+// Stub Body Generation (for DO-local short path via ALS)
 // ============================================================================
 
-function buildRpcCall(config: StubConfig): t.CallExpression {
-  const { action } = config;
-
+function buildRpcCall(action: ActionInfo): t.CallExpression {
   return t.callExpression(
     t.memberExpression(t.identifier('stub'), t.identifier('rpc')),
     [
@@ -232,7 +182,6 @@ function buildRpcCall(config: StubConfig): t.CallExpression {
 function buildDoShortPath(config: StubConfig): t.Statement[] {
   const { action, database } = config;
 
-  // const __do = getDoContext();
   const doDecl = t.variableDeclaration('const', [
     t.variableDeclarator(
       t.identifier('__do'),
@@ -240,7 +189,6 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
     ),
   ]);
 
-  // if (__do && __do.dbName === "<db>") return callActionInValidated(__do.db, "<db>", "<action>", validatedArgs, __do.ctx);
   const fastIf = t.ifStatement(
     t.logicalExpression(
       '&&',
@@ -271,7 +219,6 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
   const { action, database, shopIdPath } = config;
 
   const bindingExpr = t.memberExpression(t.identifier('env'), t.identifier(database.bindingName));
-
   const instanceKeyExpr =
     database.instance === 'global'
       ? t.stringLiteral('global')
@@ -297,7 +244,7 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
       ),
     ]),
 
-    // DO-local short path (no RPC)
+    // DO-local short path
     ...buildDoShortPath(config),
 
     // const ctx = getContext();
@@ -344,250 +291,15 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
     ]),
 
     // return stub.rpc(...)
-    t.returnStatement(buildRpcCall(config)),
+    t.returnStatement(buildRpcCall(action)),
   ];
 }
 
-function buildStubFunction(config: StubConfig): t.ExportNamedDeclaration {
-  const { action } = config;
-
-  const funcDecl = t.functionDeclaration(
-    t.identifier(action.exportName),
-    [t.identifier('args')],
-    t.blockStatement(buildStubBodyStatements(config)),
-    false,
-    true
-  );
-
-  return t.exportNamedDeclaration(funcDecl);
-}
-
-export function generateRpcStubs(
-  database: DatabaseInfo,
-  actions: ActionInfo[],
-  options: GeneratorOptions
-): string {
-  const statements: t.Statement[] = [
-    createNamedImport(['getContext'], options.contextImport),
-    createNamedImport(['type'], 'arktype'),
-    // for DO-local short path
-    createNamedImport(['getDoContext', 'callActionInValidated'], `virtual:${VIRTUAL_REGISTRY_ID}`),
-    ...actions.map((action) =>
-      buildStubFunction({ action, database, shopIdPath: options.shopIdPath })
-    ),
-  ];
-
-  return generateFromStatements(statements);
-}
-
 // ============================================================================
-// Classic Cross-db context + classic DO module (kept so exports don’t regress)
+// Action File Transform
 // ============================================================================
 
-export function buildCrossDbContext(
-  databases: DatabaseInfo[],
-  actionsByDatabase: Map<string, ActionInfo[]>
-): CrossDbContext {
-  const actionToDatabase = new Map<string, DatabaseInfo>();
-
-  for (const db of databases) {
-    const dbActions = actionsByDatabase.get(db.name) ?? [];
-    for (const action of dbActions) {
-      actionToDatabase.set(action.exportName, db);
-    }
-  }
-
-  return { actionToDatabase };
-}
-
-export function generateDurableObjectsModule(
-  databases: DatabaseInfo[],
-  actionsByDatabase: Map<string, ActionInfo[]>,
-  _allActions: ActionInfo[]
-): string {
-  const crossDbContext = buildCrossDbContext(databases, actionsByDatabase);
-
-  const statements: t.Statement[] = [
-    createNamedImport(['SqliteDurableObject'], '@shoplayer/database/db'),
-    createNamedImport(['type'], 'arktype'),
-    ...databases.map((db) => buildDOClass(db, actionsByDatabase.get(db.name) ?? [], crossDbContext)),
-  ];
-
-  return generateFromStatements(statements);
-}
-
-function buildMigrationsObject(migrations?: Map<string, string[][]>): t.ObjectExpression {
-  if (!migrations || migrations.size === 0) return t.objectExpression([]);
-
-  const entries = Array.from(migrations.entries())
-  .sort(([a], [b]) => a.localeCompare(b))
-  .map(([name, chunks]) => {
-    const chunksArray = t.arrayExpression(
-      chunks.map((chunk) => t.arrayExpression(chunk.map((s) => t.stringLiteral(s))))
-    );
-
-    return t.objectProperty(
-      t.stringLiteral(name),
-      t.objectExpression([t.objectProperty(t.identifier('chunks'), chunksArray)])
-    );
-  });
-
-  return t.objectExpression(entries);
-}
-
-function buildDOMethod(action: ActionInfo, crossDbContext: CrossDbContext): t.ClassMethod {
-  const hasCrossDbCalls = !!action.crossDbActionCalls?.length;
-
-  let handler = action.handlerSource;
-
-  if (action.internalActionCalls?.length) {
-    handler = transformHandlerForDO(handler, action.internalActionCalls);
-  }
-
-  if (action.crossDbActionCalls?.length) {
-    handler = transformCrossDbCalls(handler, action.crossDbActionCalls, crossDbContext.actionToDatabase);
-  }
-
-  const params: t.Identifier[] = [t.identifier('args')];
-  if (hasCrossDbCalls) params.push(t.identifier('rpcContext'));
-
-  const bodyStatements: t.Statement[] = [
-    t.expressionStatement(
-      t.awaitExpression(
-        t.callExpression(
-          t.memberExpression(t.thisExpression(), t.identifier('ensureMigrations')),
-          []
-        )
-      )
-    ),
-    t.variableDeclaration('const', [
-      t.variableDeclarator(
-        t.identifier('validator'),
-        t.callExpression(t.identifier('type'), [parseExpression(action.argsSchemaSource)])
-      ),
-    ]),
-    t.variableDeclaration('const', [
-      t.variableDeclarator(
-        t.identifier('validated'),
-        t.callExpression(t.identifier('validator'), [t.identifier('args')])
-      ),
-    ]),
-    t.ifStatement(
-      t.binaryExpression(
-        'instanceof',
-        t.identifier('validated'),
-        t.memberExpression(t.identifier('type'), t.identifier('errors'))
-      ),
-      t.blockStatement([
-        t.throwStatement(
-          t.newExpression(t.identifier('Error'), [
-            t.templateLiteral(
-              [
-                t.templateElement({ raw: `Invalid args for ${action.exportName}: ` }, false),
-                t.templateElement({ raw: '' }, true),
-              ],
-              [t.memberExpression(t.identifier('validated'), t.identifier('summary'))]
-            ),
-          ])
-        ),
-      ])
-    ),
-  ];
-
-  if (hasCrossDbCalls) {
-    bodyStatements.push(
-      t.variableDeclaration('const', [
-        t.variableDeclarator(
-          t.identifier('ctx'),
-          t.objectExpression([
-            t.objectProperty(
-              t.identifier('env'),
-              t.memberExpression(t.thisExpression(), t.identifier('env'))
-            ),
-            t.objectProperty(
-              t.identifier('instanceKey'),
-              t.logicalExpression(
-                '??',
-                t.optionalMemberExpression(
-                  t.identifier('rpcContext'),
-                  t.identifier('instanceKey'),
-                  false,
-                  true
-                ),
-                t.stringLiteral('global')
-              )
-            ),
-          ])
-        ),
-      ])
-    );
-  }
-
-  bodyStatements.push(
-    t.variableDeclaration('const', [
-      t.variableDeclarator(t.identifier('handler'), parseExpression(handler)),
-    ])
-  );
-
-  bodyStatements.push(
-    t.returnStatement(
-      t.callExpression(t.identifier('handler'), [
-        t.memberExpression(t.thisExpression(), t.identifier('db')),
-        t.identifier('validated'),
-        hasCrossDbCalls ? t.identifier('ctx') : t.identifier('undefined'),
-      ])
-    )
-  );
-
-  return t.classMethod(
-    'method',
-    t.identifier(action.exportName),
-    params,
-    t.blockStatement(bodyStatements),
-    false,
-    false,
-    false,
-    true
-  );
-}
-
-function buildDOClass(
-  database: DatabaseInfo,
-  actions: ActionInfo[],
-  crossDbContext: CrossDbContext
-): t.ExportNamedDeclaration {
-  const methods = actions.map((a) => buildDOMethod(a, crossDbContext));
-
-  const migrationsProperty = t.classProperty(
-    t.identifier('migrations'),
-    buildMigrationsObject(database.migrations)
-  );
-
-  const classDecl = t.classDeclaration(
-    t.identifier(database.className),
-    t.identifier('SqliteDurableObject'),
-    t.classBody([migrationsProperty, ...methods])
-  );
-
-  return t.exportNamedDeclaration(classDecl);
-}
-
-// ============================================================================
-// In-place transform (minimal, just registration + stub replacement)
-// ============================================================================
-
-export function transformActionFileInPlaceWithALSShortPath(args: {
-  code: string;
-  sourceFileName?: string;
-
-  dbName: string;
-  database: DatabaseInfo;
-  actionsInFile: ActionInfo[];
-
-  contextImport: string;
-  shopIdPath: string;
-  registryImport: string; // `virtual:${VIRTUAL_REGISTRY_ID}`
-}): { code: string; map: any } {
+export function transformActionFile(options: TransformOptions): { code: string; map: any } | null {
   const {
     code,
     sourceFileName,
@@ -597,9 +309,9 @@ export function transformActionFileInPlaceWithALSShortPath(args: {
     contextImport,
     shopIdPath,
     registryImport,
-  } = args;
+  } = options;
 
-  if (actionsInFile.length === 0) return { code, map: null };
+  if (actionsInFile.length === 0) return null;
 
   const actionNames = new Set(actionsInFile.map((a) => a.exportName));
   const ast = parseProgram(code);
@@ -612,82 +324,84 @@ export function transformActionFileInPlaceWithALSShortPath(args: {
   const out: t.Statement[] = [];
 
   for (const stmt of body) {
-    if (t.isExportNamedDeclaration(stmt) && stmt.declaration && t.isVariableDeclaration(stmt.declaration)) {
-      const decl = stmt.declaration;
-
-      const replaced: t.Statement[] = [];
-      const remaining: t.VariableDeclarator[] = [];
-
-      for (const d of decl.declarations) {
-        if (t.isIdentifier(d.id) && actionNames.has(d.id.name)) {
-          const exportName = d.id.name;
-          const action = actionsInFile.find((a) => a.exportName === exportName)!;
-
-          const validatorId = t.identifier(`__validator_${exportName}`);
-          const handlerId = t.identifier(`__handler_${exportName}`);
-
-          // const __validator_X = type(<schema>);
-          replaced.push(
-            t.variableDeclaration('const', [
-              t.variableDeclarator(
-                validatorId,
-                t.callExpression(t.identifier('type'), [parseExpression(action.argsSchemaSource)])
-              ),
-            ])
-          );
-
-          // const __handler_X = (<handler>);
-          replaced.push(
-            t.variableDeclaration('const', [
-              t.variableDeclarator(handlerId, parseExpression(action.handlerSource)),
-            ])
-          );
-
-          // registerAction(dbName, "X", { validator: (args)=>__validator_X(args), handler: __handler_X })
-          replaced.push(
-            t.expressionStatement(
-              t.callExpression(t.identifier('registerAction'), [
-                t.stringLiteral(dbName),
-                t.stringLiteral(exportName),
-                t.objectExpression([
-                  t.objectProperty(
-                    t.identifier('validator'),
-                    t.arrowFunctionExpression(
-                      [t.identifier('args')],
-                      t.callExpression(validatorId, [t.identifier('args')])
-                    )
-                  ),
-                  t.objectProperty(t.identifier('handler'), handlerId),
-                ]),
-              ])
-            )
-          );
-
-          // export async function X(args) { ...stub... }
-          const funcDecl = t.functionDeclaration(
-            t.identifier(exportName),
-            [t.identifier('args')],
-            t.blockStatement(buildStubBodyStatements({ action, database, shopIdPath })),
-            false,
-            true
-          );
-
-          replaced.push(t.exportNamedDeclaration(funcDecl));
-        } else {
-          remaining.push(d);
-        }
-      }
-
-      if (replaced.length > 0) {
-        if (remaining.length > 0) {
-          out.push(t.exportNamedDeclaration(t.variableDeclaration(decl.kind, remaining)));
-        }
-        out.push(...replaced);
-        continue;
-      }
+    if (!t.isExportNamedDeclaration(stmt) || !stmt.declaration || !t.isVariableDeclaration(stmt.declaration)) {
+      out.push(stmt);
+      continue;
     }
 
-    out.push(stmt);
+    const decl = stmt.declaration;
+    const replaced: t.Statement[] = [];
+    const remaining: t.VariableDeclarator[] = [];
+
+    for (const d of decl.declarations) {
+      if (!t.isIdentifier(d.id) || !actionNames.has(d.id.name)) {
+        remaining.push(d);
+        continue;
+      }
+
+      const exportName = d.id.name;
+      const action = actionsInFile.find((a) => a.exportName === exportName)!;
+
+      const validatorId = t.identifier(`__validator_${exportName}`);
+      const handlerId = t.identifier(`__handler_${exportName}`);
+
+      // const __validator_X = type(<schema>);
+      replaced.push(
+        t.variableDeclaration('const', [
+          t.variableDeclarator(
+            validatorId,
+            t.callExpression(t.identifier('type'), [parseExpression(action.argsSchemaSource)])
+          ),
+        ])
+      );
+
+      // const __handler_X = (<handler>);
+      replaced.push(
+        t.variableDeclaration('const', [
+          t.variableDeclarator(handlerId, parseExpression(action.handlerSource)),
+        ])
+      );
+
+      // registerAction(dbName, "X", { validator, handler })
+      replaced.push(
+        t.expressionStatement(
+          t.callExpression(t.identifier('registerAction'), [
+            t.stringLiteral(dbName),
+            t.stringLiteral(exportName),
+            t.objectExpression([
+              t.objectProperty(
+                t.identifier('validator'),
+                t.arrowFunctionExpression(
+                  [t.identifier('args')],
+                  t.callExpression(validatorId, [t.identifier('args')])
+                )
+              ),
+              t.objectProperty(t.identifier('handler'), handlerId),
+            ]),
+          ])
+        )
+      );
+
+      // export async function X(args) { ...stub... }
+      const funcDecl = t.functionDeclaration(
+        t.identifier(exportName),
+        [t.identifier('args')],
+        t.blockStatement(buildStubBodyStatements({ action, database, shopIdPath })),
+        false,
+        true
+      );
+
+      replaced.push(t.exportNamedDeclaration(funcDecl));
+    }
+
+    if (replaced.length > 0) {
+      if (remaining.length > 0) {
+        out.push(t.exportNamedDeclaration(t.variableDeclaration(decl.kind, remaining)));
+      }
+      out.push(...replaced);
+    } else {
+      out.push(stmt);
+    }
   }
 
   ast.program.body = out;

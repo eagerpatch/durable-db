@@ -22,6 +22,10 @@
     "./vite/modules": {
       "types": "./dist/vite/modules/index.d.ts",
       "import": "./dist/vite/modules/index.js"
+    },
+    "./registry": {
+      "types": "./dist/registry.d.ts",
+      "import": "./dist/registry.js"
     }
   },
   "scripts": {

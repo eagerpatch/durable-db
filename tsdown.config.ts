@@ -7,6 +7,7 @@ export default defineConfig({
     'src/migrations/index.ts',
     'src/vite/databasePlugin.ts',
     'src/vite/modules/index.ts',
+    'src/registry.ts',
   ],
   fixedExtension: false,
   format: 'esm',

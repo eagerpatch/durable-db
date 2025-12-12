@@ -202,7 +202,7 @@ export function buildStubFunction(config: StubConfig): t.ExportNamedDeclaration 
 // ============================================================================
 
 /** Transform the handler source for DO context */
-export function transformHandler(action: ActionInfo, crossDbContext: CrossDbContext): string {
+function transformHandler(action: ActionInfo, crossDbContext: CrossDbContext): string {
   let handler = action.handlerSource;
 
   if (action.internalActionCalls.length > 0) {
@@ -472,20 +472,4 @@ export function generateDurableObjectsModule(
   ];
 
   return generateFromStatements(statements);
-}
-
-/**
- * Generate the module that re-exports actions from the virtual module
- */
-export function generateReExportModule(
-  databaseName: string,
-  actions: ActionInfo[]
-): string {
-  if (actions.length === 0) {
-    return `// No actions to re-export`;
-  }
-
-  return generateFromStatements([
-    createReExport(actions.map(a => a.exportName), `shoplayer/databases/${databaseName}`)
-  ]);
 }

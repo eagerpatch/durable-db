@@ -4,7 +4,6 @@ import {
   // Public API
   generateRpcStubs,
   generateDurableObjectsModule,
-  generateReExportModule,
   // AST Utilities
   parseExpression,
   parseMemberPath,
@@ -17,7 +16,6 @@ import {
   buildStubBodyStatements,
   buildStubFunction,
   // Builders - DO Methods
-  transformHandler,
   buildMethodContextStatement,
   buildDOMethod,
   buildMigrationsObject,
@@ -29,7 +27,7 @@ import {
   type MethodConfig,
   type CrossDbContext,
 } from '../../../src/vite/modules/generator';
-import type { DatabaseInfo, ActionInfo } from '../../../src/db/types';
+import type { DatabaseInfo, ActionInfo } from '../../../src/db';
 
 // ============================================================================
 // Test Fixtures
@@ -465,23 +463,5 @@ describe('generateDurableObjectsModule', () => {
     );
     expect(result).toContain('class MainDatabaseDO');
     expect(result).toContain('class AnalyticsDatabaseDO');
-  });
-});
-
-describe('generateReExportModule', () => {
-  it('generates re-export', () => {
-    const result = generateReExportModule('main', mockActions);
-    expect(result).toContain('export { createUser, getUser }');
-    expect(result).toContain('shoplayer/databases/main');
-  });
-
-  it('returns comment when no actions', () => {
-    const result = generateReExportModule('main', []);
-    expect(result).toContain('No actions to re-export');
-  });
-
-  it('preserves order', () => {
-    const result = generateReExportModule('main', mockActions);
-    expect(result.indexOf('createUser')).toBeLessThan(result.indexOf('getUser'));
   });
 });

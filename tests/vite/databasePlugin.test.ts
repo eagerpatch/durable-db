@@ -86,10 +86,10 @@ describe('shoplayerDatabasePlugin', () => {
   describe('resolveId', () => {
     it('resolves virtual:shoplayer/databases/__durableObjects', async () => {
       const resolveId = plugin.resolveId as Function;
-      
+
       const result = await resolveId('virtual:shoplayer/databases/__durableObjects');
 
-      expect(result).toBe('\0virtual:shoplayer/databases/__durableObjects.ts');
+      expect(result).toBe('\0virtual:shoplayer/databases/__durableObjects.js');
     });
 
     it('resolves shoplayer/databases/__durableObjects (without virtual:)', async () => {
@@ -97,31 +97,7 @@ describe('shoplayerDatabasePlugin', () => {
 
       const result = await resolveId('shoplayer/databases/__durableObjects');
 
-      expect(result).toBe('\0virtual:shoplayer/databases/__durableObjects.ts');
-    });
-
-    it('resolves shoplayer/databases/main virtual module', async () => {
-      // First we need to set up the plugin with configResolved
-      const configResolved = plugin.configResolved as Function;
-      await configResolved({
-        root: tempDir,
-        command: 'build',
-      } as ResolvedConfig);
-
-      // Create a database file
-      const mainCode = `
-import { defineDatabase } from '@shoplayer/database/db';
-export const { action } = defineDatabase({
-  migrationsDir: './migrations',
-  schema: {},
-});
-`;
-      fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'main.ts'), mainCode);
-
-      const resolveId = plugin.resolveId as Function;
-      const result = await resolveId('shoplayer/databases/main');
-
-      expect(result).toBe('\0virtual:shoplayer/databases/main.ts');
+      expect(result).toBe('\0virtual:shoplayer/databases/__durableObjects.js');
     });
 
     it('returns null for non-virtual imports', async () => {

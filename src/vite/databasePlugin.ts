@@ -7,11 +7,12 @@ import {
   readFile,
   resolveImportPath,
   parseDatabaseFile,
-  resolveInternalActionCalls,
   patchWranglerConfig,
-  // generator exports (your barrel exports * from './generator')
+
+  // generator exports (via your barrel export)
   generateActionRegistryModule,
-  transformActionFileInPlaceWithCrossDb,
+  transformActionFileInPlaceWithALSShortPath,
+  VIRTUAL_REGISTRY_ID,
 } from './modules';
 
 import { loadMigrationFiles, generateMigration, buildAndLoadSchema } from '../migrations';
@@ -21,13 +22,9 @@ import { loadMigrationFiles, generateMigration, buildAndLoadSchema } from '../mi
 // ============================================================================
 
 export interface DatabasePluginOptions {
-  /** Import path for getContext(). @default '@shoplayer/database/context' */
   contextImport?: string;
-  /** Directory containing database definitions. @default 'src/databases' */
   databasesDir?: string;
-  /** Path to shop ID in context. @default 'session.shop' */
   shopIdPath?: string;
-  /** Auto-generate migrations. @default 'development' */
   autoMigrations?: boolean | 'development';
 }
 
@@ -36,10 +33,10 @@ export interface DatabasePluginOptions {
 // ============================================================================
 
 const VIRTUAL_DB_PREFIX = '\0virtual:shoplayer/databases/';
+
 const VIRTUAL_DO_ID = 'shoplayer/databases/__durableObjects';
 const VIRTUAL_DO_MODULE_ID = VIRTUAL_DB_PREFIX + '__durableObjects.js';
 
-const VIRTUAL_REGISTRY_ID = 'shoplayer/databases/__actionRegistry';
 const VIRTUAL_REGISTRY_MODULE_ID = VIRTUAL_DB_PREFIX + '__actionRegistry.js';
 
 // ============================================================================
@@ -221,7 +218,6 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       state.devServer = server;
       state.reset();
 
-      // Invalidate DO module whenever anything under databasesDir changes (keeps dev snappy)
       const absoluteDbDir = path.join(state.projectRoot, state.options.databasesDir);
       server.watcher.on('change', (file) => {
         const normalized = path.normalize(file);
@@ -256,10 +252,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     },
 
     async transform(code, id) {
-      // Skip virtual modules and node_modules
       if (id.startsWith('\0') || id.includes('node_modules')) return null;
-
-      // Only TS/TSX
       if (!id.endsWith('.ts') && !id.endsWith('.tsx')) return null;
 
       await state.initialize();
@@ -267,12 +260,11 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       const cleanId = id.split('?', 1)[0];
       const normalizedId = path.normalize(cleanId);
 
-      // Skip database definition files
+      // skip database definition files
       if (state.getDatabaseNameForPath(normalizedId)) return null;
 
       const parsed = parseDatabaseFile(normalizedId, code);
 
-      // Find which database this file imports `action` from
       const importedDbName = await findImportedDatabase.call(this, state, parsed.localImports, normalizedId);
       if (!importedDbName) return null;
 
@@ -281,33 +273,22 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
       const database = state.databases.get(importedDbName);
       if (!database) return null;
 
-      // Register actions (so we can build a global action graph)
+      // track (logs only)
       for (const action of parsed.actions) {
         state.registerAction(action, importedDbName, normalizedId);
       }
 
-      // Populate internal/cross-db call metadata across all discovered actions
-      const allActions = Array.from(state.actions.values());
-      for (const [dbName] of state.databases) {
-        const dbActions = allActions.filter((a) => a.databaseName === dbName);
-        resolveInternalActionCalls(dbActions, allActions);
-      }
-
-      // In-place rewrite (imports preserved; handler stays in original scope)
-      const out = transformActionFileInPlaceWithCrossDb({
+      const out = transformActionFileInPlaceWithALSShortPath({
         code,
         sourceFileName: normalizedId,
         dbName: importedDbName,
         database,
         actionsInFile: parsed.actions,
-        allDatabases: Array.from(state.databases.values()),
-        allActions,
         contextImport: state.options.contextImport,
         shopIdPath: state.options.shopIdPath,
         registryImport: `virtual:${VIRTUAL_REGISTRY_ID}`,
       });
 
-      // Dev: DO module should refresh when actions are discovered/changed
       if (state.config.command === 'serve') {
         state.invalidateDOModule();
       }
@@ -347,7 +328,7 @@ async function findImportedDatabase(
 }
 
 // ============================================================================
-// DO dispatcher module generator (no waiting; build-order safe)
+// DO dispatcher module generator (ALS context is set here)
 // ============================================================================
 
 function jsStringEscape(s: string): string {
@@ -360,7 +341,6 @@ function generateMigrationsLiteral(db: DatabaseInfo): string {
   const entries = Array.from(db.migrations.entries())
   .sort(([a], [b]) => a.localeCompare(b))
   .map(([name, mig]) => {
-    // mig is expected as string[][] chunks
     const chunks = JSON.stringify(mig);
     return `${JSON.stringify(name)}: { chunks: ${chunks} }`;
   });
@@ -369,17 +349,10 @@ function generateMigrationsLiteral(db: DatabaseInfo): string {
 }
 
 function generateBindingNamesObject(databases: DatabaseInfo[]): string {
-  const pairs = databases
-  .map((db) => `${JSON.stringify(db.name)}: ${JSON.stringify(db.bindingName)}`)
-  .join(', ');
+  const pairs = databases.map((db) => `${JSON.stringify(db.name)}: ${JSON.stringify(db.bindingName)}`).join(', ');
   return `{ ${pairs} }`;
 }
 
-/**
- * A build-order safe DO module:
- * - does NOT need to know actions at build time
- * - dispatches via registry in rpc(method, args, rpcContext)
- */
 function generateDurableObjectsDispatcherModule(databases: DatabaseInfo[]): string {
   const bindingNames = generateBindingNamesObject(databases);
 
@@ -413,7 +386,10 @@ export class ${className} extends SqliteDurableObject {
       instanceKey: (rpcContext && rpcContext.instanceKey) ? rpcContext.instanceKey : 'global',
     };
 
-    return entry.handler(this.db, validated, ctx);
+    return runWithDoContext(
+      { db: this.db, ctx, dbName: ${JSON.stringify(dbName)}, instanceKey: ctx.instanceKey },
+      async () => entry.handler(this.db, validated, ctx)
+    );
   }
 }
 `.trim();
@@ -423,7 +399,7 @@ export class ${className} extends SqliteDurableObject {
   return `
 import { SqliteDurableObject } from '@shoplayer/database/db';
 import { type } from 'arktype';
-import { getAction } from 'virtual:${VIRTUAL_REGISTRY_ID}';
+import { getAction, runWithDoContext } from 'virtual:${VIRTUAL_REGISTRY_ID}';
 
 ${classes}
 `.trim();

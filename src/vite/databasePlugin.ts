@@ -134,7 +134,44 @@ class PluginState {
       this.options.autoMigrations === true ||
       (this.options.autoMigrations === 'development' && isDev);
 
-    if (shouldAutoMigrate && db.schemaImport && db.schemaTableNames.length > 0) {
+    // In dev mode, use the new push system for dev migrations
+    if (isDev && shouldAutoMigrate && db.schemaImport && db.schemaTableNames.length > 0) {
+      try {
+        // Dynamic import to avoid circular dependencies
+        const { pushOne } = await import('../cli/push');
+        const result = await pushOne(
+          { projectRoot: this.projectRoot, databasesDir: this.options.databasesDir, verbose: false },
+          db.name
+        );
+        if (result?.hasChanges) {
+          console.log(
+            `[shoplayer-database] Dev migration for ${db.name}: ${result.migrationName} ` +
+            `(${result.statements.length} statements)`
+          );
+        }
+      } catch (error) {
+        // Fallback to old behavior if push fails
+        console.warn(`[shoplayer-database] Could not push migrations for ${db.name}: ${error}`);
+        try {
+          const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
+          if (schemaPath) {
+            const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
+            if (Object.keys(schema).length > 0) {
+              const result = await generateMigration({ migrationsDir, schema, write: true });
+              if (result.hasChanges) {
+                console.log(
+                  `[shoplayer-database] Generated migration for ${db.name}: ${result.migrationName} ` +
+                  `(${result.statements.length} statements)`
+                );
+              }
+            }
+          }
+        } catch (fallbackError) {
+          console.warn(`[shoplayer-database] Fallback migration generation failed: ${fallbackError}`);
+        }
+      }
+    } else if (shouldAutoMigrate && db.schemaImport && db.schemaTableNames.length > 0) {
+      // In build mode, use generateMigration (writes to prod migrations)
       try {
         const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
         if (schemaPath) {
@@ -154,9 +191,31 @@ class PluginState {
       }
     }
 
+    // Load production migrations
     db.migrations = loadMigrationFiles(migrationsDir);
+
+    // In dev mode, also load dev migrations
+    if (isDev) {
+      try {
+        const { loadDevMigrations } = await import('../cli/state');
+        const devMigrations = loadDevMigrations(this.projectRoot, db.name);
+        
+        // Merge dev migrations with prod migrations
+        // Dev migrations are prefixed with _dev_ to sort after prod migrations
+        for (const [name, chunks] of devMigrations) {
+          db.migrations.set(`_dev_${name}`, chunks);
+        }
+        
+        if (devMigrations.size > 0) {
+          console.log(`[shoplayer-database] Loaded ${devMigrations.size} dev migration(s) for ${db.name}`);
+        }
+      } catch (error) {
+        // Dev migrations not available, that's fine
+      }
+    }
+
     if (db.migrations.size > 0) {
-      console.log(`[shoplayer-database] Loaded ${db.migrations.size} migration(s) for ${db.name}`);
+      console.log(`[shoplayer-database] Total ${db.migrations.size} migration(s) for ${db.name}`);
     }
   }
 

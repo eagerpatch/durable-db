@@ -379,6 +379,145 @@ pnpm test
 cd example && pnpm dev
 ```
 
+## CLI Commands
+
+The database module provides both a standalone CLI and composable functions for integration.
+
+### Standalone CLI
+
+After installing, you can use the `shoplayer-db` command directly:
+
+```bash
+# Check database status
+npx shoplayer-db status
+
+# Push schema changes to dev migrations
+npx shoplayer-db push
+
+# Generate production migration
+npx shoplayer-db generate add_user_bio
+
+# Reset dev state (fresh database instances)
+npx shoplayer-db reset
+```
+
+### Programmatic API
+
+The CLI functions are also available for integration into other tools:
+
+```typescript
+import * as db from '@shoplayer/database/cli';
+
+// All functions default to process.cwd() for projectRoot
+const results = await db.push();
+const status = await db.status();
+const generated = await db.generate({}, { name: 'add_bio' });
+const resetResult = await db.reset();
+```
+
+### Available Commands
+
+#### `db:push` - Push schema changes to dev migrations
+
+During development, this creates ephemeral migrations in `node_modules/.cache/@shoplayer/database/`. These don't pollute your git history while you're iterating on your schema.
+
+```typescript
+const results = await db.push({ verbose: true });
+for (const r of results) {
+  if (r.hasChanges) {
+    console.log(`✓ ${r.database}: ${r.statements.length} statements`);
+  }
+}
+```
+
+#### `db:generate` - Generate production migrations
+
+When you're ready to commit your schema changes, this creates a proper migration file in your migrations directory.
+
+```typescript
+const results = await db.generate({}, { name: 'add_user_bio' });
+```
+
+#### `db:status` - Check migration status
+
+Shows the current state of all databases - pending changes, dev migrations, etc.
+
+```typescript
+const status = await db.status();
+console.log(db.formatStatus(status));
+```
+
+#### `db:reset` - Reset dev state
+
+Bumps the epoch (changing all dev instance keys) and clears dev migrations. Useful when your local DB is in a broken state.
+
+```typescript
+const result = await db.reset();
+console.log(`New epoch: ${result.newEpoch}`);
+```
+
+### Dev Workflow
+
+```
+1. Edit your Drizzle schema
+2. Vite dev server auto-runs `push` on schema change
+3. Dev migrations are stored in node_modules (not committed)
+4. Local DO instances use epoch-suffixed keys
+5. When ready, run `db:generate` to create prod migration
+6. Commit the migration file
+```
+
+### Instance Key Suffixing
+
+In development, database instance keys are automatically suffixed with a dev epoch. This allows you to "reset" your local database by bumping the epoch - the next request will use a fresh DO instance.
+
+```typescript
+import { getInstanceKey } from '@shoplayer/database/context';
+
+// In production: "my-shop.myshopify.com"
+// In development: "my-shop.myshopify.com__dev_abc123"
+const key = getInstanceKey('my-shop.myshopify.com');
+```
+
+### Integration with shoplayer CLI
+
+The CLI functions are designed to be easily wired up by higher-level CLIs:
+
+```typescript
+// In shoplayer CLI
+import { program } from 'commander';
+import * as db from '@shoplayer/database/cli';
+
+program
+  .command('db:push')
+  .action(async () => {
+    const results = await db.push({ verbose: true });
+    // Format and display results
+  });
+
+program
+  .command('db:generate [name]')
+  .action(async (name) => {
+    const results = await db.generate({}, { name });
+    // Format and display results
+  });
+
+program
+  .command('db:status')
+  .action(async () => {
+    const status = await db.status();
+    console.log(db.formatStatus(status));
+  });
+
+program
+  .command('db:reset')
+  .option('--keep-epoch', 'Only clear dev migrations')
+  .action(async (options) => {
+    const result = await db.reset({}, { keepEpoch: options.keepEpoch });
+    console.log(`Reset complete. New epoch: ${result.newEpoch ?? 'unchanged'}`);
+  });
+```
+
 ## How It Works
 
 1. **Vite plugin discovers** database files in `src/databases/`

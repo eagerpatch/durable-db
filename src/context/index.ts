@@ -83,3 +83,44 @@ export function runWithContext<T, TEnv = unknown, TSession = unknown>(
 export function hasContext(): boolean {
   return contextStorage.getStore() !== undefined;
 }
+
+/**
+ * Get the dev epoch for instance key suffixing
+ * Only used in development to allow database resets
+ *
+ * Returns null in production or if no dev state exists
+ */
+export function getDevInstanceKeySuffix(): string | null {
+  // Don't use epoch in production
+  if (process.env.NODE_ENV === 'production') {
+    return null;
+  }
+
+  // Try to load dev epoch from CLI state
+  // This is a lazy import to avoid loading CLI code in production
+  try {
+    // Note: This uses a dynamic require to work in the Cloudflare Workers environment
+    // In Vite dev, this will resolve; in production builds, it returns null
+    const { getDevEpoch } = require('../cli/state');
+    return getDevEpoch(process.cwd());
+  } catch {
+    // CLI not available (production build or worker environment)
+    return null;
+  }
+}
+
+/**
+ * Get a database instance key, optionally suffixed with dev epoch
+ *
+ * In development, this appends an epoch suffix to enable database resets.
+ * In production, this returns the base key unchanged.
+ *
+ * @param baseKey - The base instance key (e.g., shop domain or 'global')
+ */
+export function getInstanceKey(baseKey: string): string {
+  const suffix = getDevInstanceKeySuffix();
+  if (!suffix) {
+    return baseKey;
+  }
+  return `${baseKey}__dev_${suffix}`;
+}

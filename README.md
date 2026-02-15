@@ -683,7 +683,7 @@ The stub function:
 
 ## Outerbase Studio Integration
 
-[Outerbase Studio](https://github.com/outerbase/browsable-durable-object) provides a SQL endpoint for inspecting SQLite tables inside Durable Objects during development.
+[Outerbase Studio](https://github.com/outerbase/browsable-durable-object) provides a web UI and SQL endpoint for inspecting SQLite tables inside Durable Objects.
 
 ### Configuration
 
@@ -707,41 +707,45 @@ export const { action } = defineDatabase({
 
 ### How it works
 
-When `browsable` is enabled, the Vite plugin generates a `browsable = true` property on the Durable Object class. The `SqliteDurableObject` base class checks this flag in its `fetch()` method and delegates matching requests to Outerbase's `BrowsableHandler` before falling back to the default response.
+When `browsable` is enabled, the Vite plugin wraps the generated Durable Object class with Outerbase's `Browsable()` decorator. This adds:
 
-The `'development'` value is resolved at build time: the Vite plugin checks `config.command === 'serve'` and only emits the property when running in dev mode.
+- A `fetch()` handler that serves `/query/raw` for direct SQL access
+- A `__studio()` RPC method used by the Outerbase Studio web UI
 
-### Querying a Durable Object
+The `'development'` value is resolved at build time: the Vite plugin checks `config.command === 'serve'` and only applies the decorator when running in dev mode.
 
-Send a POST request to the DO's `/query/raw` endpoint:
+Migrations are guaranteed to run before any browsable request — the generated class overrides both `fetch()` and `__studio()` to call `ensureMigrations()` first.
+
+### Adding the Studio UI
+
+To serve the Outerbase Studio web interface, add a route in your worker that calls the `studio()` helper:
+
+```ts
+import { studio } from '@outerbase/browsable-durable-object';
+
+export default {
+  async fetch(request: Request, env: any) {
+    const url = new URL(request.url);
+
+    if (url.pathname === '/studio') {
+      return studio(request, env.MAIN_DATABASE_DO);
+    }
+
+    // ... rest of your routes
+  },
+};
+```
+
+Then visit `/studio` in your browser. You'll be prompted to enter a DO instance name (e.g. your shop ID), and Outerbase Studio will open with full SQL access to that instance.
+
+### Querying a Durable Object directly
+
+You can also query a DO's SQL endpoint directly without the Studio UI:
 
 ```bash
 curl -X POST http://your-do-endpoint/query/raw \
   -H 'Content-Type: application/json' \
   -d '{"sql": "SELECT * FROM users LIMIT 10"}'
-```
-
-Response:
-
-```json
-{
-  "result": [{
-    "columns": ["id", "name", "email"],
-    "rows": [["abc123", "Alice", "alice@example.com"]],
-    "meta": { "rows_read": 1, "rows_written": 0 }
-  }]
-}
-```
-
-Transactions are also supported:
-
-```json
-{
-  "transaction": [
-    { "sql": "INSERT INTO users (id, name) VALUES ('1', 'Alice')" },
-    { "sql": "INSERT INTO users (id, name) VALUES ('2', 'Bob')" }
-  ]
-}
 ```
 
 ### Security
@@ -918,7 +922,7 @@ src/
     state.ts        # Dev state persistence (epoch, snapshots, counters)
   context/          # AsyncLocalStorage-based request context
   db/               # Core database abstractions
-    SqliteDurableObject.ts   # Base DO class with migrations + browsable
+    SqliteDurableObject.ts   # Base DO class with migrations + PITR
     defineDatabase.ts        # defineDatabase() API
     plugins.ts               # Kysely plugins (CamelCase, Date, Schema)
     types.ts                 # TypeScript type definitions

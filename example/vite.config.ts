@@ -10,8 +10,8 @@ export default defineConfig({
       contextImport: '@shoplayer/database/context',
       // Where to find database definitions
       databasesDir: './src/databases',
-      // How to get the shop ID from context (for per-shop databases)
-      shopIdPath: 'session.shop',
+      // How to get the tenant ID from context (for per-tenant databases)
+      tenantIdPath: 'session.tenantId',
 
       autoMigrations: false,
     }),

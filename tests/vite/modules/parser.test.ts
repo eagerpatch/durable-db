@@ -160,7 +160,7 @@ describe('parser', () => {
         export const { action } = defineDatabase({
           migrationsDir: './migrations',
           schema: { users, posts },
-          instance: 'per-shop',
+          instance: 'per-tenant',
         });
       `;
 
@@ -170,7 +170,7 @@ describe('parser', () => {
       expect(result.database!.name).toBe('main');
       expect(result.database!.className).toBe('MainDatabaseDO');
       expect(result.database!.bindingName).toBe('MAIN_DATABASE_DO');
-      expect(result.database!.instance).toBe('per-shop');
+      expect(result.database!.instance).toBe('per-tenant');
       expect(result.database!.migrationsDir).toBe('./migrations');
       expect(result.database!.schemaImport).toBe('./schema');
       expect(result.database!.schemaTableNames).toEqual(['users', 'posts']);

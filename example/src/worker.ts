@@ -25,7 +25,7 @@ export default {
         request,
         session: {
           // In a real app, this would come from authentication
-          shop: 'example-shop.myshopify.com',
+          tenantId: 'example-tenant',
         },
       },
       async () => {

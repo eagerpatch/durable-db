@@ -214,7 +214,7 @@ function extractDatabaseInfo(
 
   // Default values
   let migrationsDir = './migrations';
-  let instance: 'per-shop' | 'global' = 'per-shop';
+  let instance: 'per-tenant' | 'global' = 'per-tenant';
   let browsable: boolean | 'development' = false;
   let schemaImport: string | null = null;
   const schemaTableNames: string[] = [];
@@ -232,7 +232,7 @@ function extractDatabaseInfo(
 
     if (key === 'instance' && t.isStringLiteral(prop.value)) {
       const value = prop.value.value;
-      if (value === 'per-shop' || value === 'global') {
+      if (value === 'per-tenant' || value === 'global') {
         instance = value;
       }
     }

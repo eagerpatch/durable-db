@@ -108,7 +108,7 @@ describe('db', () => {
       const perShop = defineDatabase({
         migrationsDir: './migrations',
         schema: {},
-        instance: 'per-shop',
+        instance: 'per-tenant',
       });
 
       const global = defineDatabase({

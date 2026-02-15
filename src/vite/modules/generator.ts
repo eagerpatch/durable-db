@@ -22,14 +22,14 @@ export interface TransformOptions {
   database: DatabaseInfo;
   actionsInFile: ActionInfo[];
   contextImport: string;
-  shopIdPath: string;
+  tenantIdPath: string;
   registryImport: string;
 }
 
 interface StubConfig {
   action: ActionInfo;
   database: DatabaseInfo;
-  shopIdPath: string;
+  tenantIdPath: string;
 }
 
 // ============================================================================
@@ -482,13 +482,13 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
 }
 
 function buildStubBodyStatements(config: StubConfig): t.Statement[] {
-  const { action, database, shopIdPath } = config;
+  const { action, database, tenantIdPath } = config;
 
   const bindingExpr = t.memberExpression(t.identifier('env'), t.identifier(database.bindingName));
   const instanceKeyExpr =
     database.instance === 'global'
       ? t.stringLiteral('global')
-      : parseMemberPath(t.identifier('ctx'), shopIdPath);
+      : parseMemberPath(t.identifier('ctx'), tenantIdPath);
 
   return [
     // const argsSchema = type({...});
@@ -573,7 +573,7 @@ export function transformActionFile(options: TransformOptions) {
     database,
     actionsInFile,
     contextImport,
-    shopIdPath,
+    tenantIdPath,
     registryImport,
   } = options;
 
@@ -652,7 +652,7 @@ export function transformActionFile(options: TransformOptions) {
       const funcDecl = t.functionDeclaration(
         t.identifier(exportName),
         [t.identifier('args')],
-        t.blockStatement(buildStubBodyStatements({ action, database, shopIdPath })),
+        t.blockStatement(buildStubBodyStatements({ action, database, tenantIdPath })),
         false,
         true
       );

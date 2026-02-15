@@ -28,7 +28,7 @@ describe('wrangler', () => {
     name: 'main',
     className: 'MainDatabaseDO',
     bindingName: 'MAIN_DATABASE_DO',
-    instance: 'per-shop',
+    instance: 'per-tenant',
     migrationsDir: './migrations',
     schemaImport: './schema',
     schemaTableNames: ['users'],

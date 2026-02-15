@@ -84,7 +84,7 @@ export const getUser = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        shopIdPath: 'session.shop',
+        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 
@@ -166,7 +166,7 @@ export const logEvent = action({
       const mainDb = databases.find((d) => d.name === 'main');
       const analyticsDb = databases.find((d) => d.name === 'analytics');
 
-      expect(mainDb?.instance).toBe('per-shop');
+      expect(mainDb?.instance).toBe('per-tenant');
       expect(analyticsDb?.instance).toBe('global');
 
       // Generate DO module with both databases
@@ -180,13 +180,13 @@ export const logEvent = action({
       expect(wranglerConfig.durable_objects!.bindings).toHaveLength(2);
     });
 
-    it('generates correct stub for per-shop database', () => {
+    it('generates correct stub for per-tenant database', () => {
       const mainCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
   migrationsDir: './migrations',
   schema: {},
-  instance: 'per-shop',
+  instance: 'per-tenant',
 });
 export const createUser = action({
   args: { name: 'string' },
@@ -209,12 +209,12 @@ export const createUser = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        shopIdPath: 'session.shop',
+        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 
-      // Should use ctx.session.shop for instance key
-      expect(transformed!.code).toMatch(/ctx\.session\.shop/);
+      // Should use ctx.session.tenantId for instance key
+      expect(transformed!.code).toMatch(/ctx\.session\.tenantId/);
     });
 
     it('generates correct stub for global database', () => {
@@ -246,7 +246,7 @@ export const logEvent = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        shopIdPath: 'session.shop',
+        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 
@@ -282,7 +282,7 @@ export const createUser = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        shopIdPath: 'session.shop',
+        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 

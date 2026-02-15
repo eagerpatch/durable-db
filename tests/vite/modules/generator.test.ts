@@ -15,7 +15,7 @@ const mockDatabase: DatabaseInfo = {
   name: 'main',
   className: 'MainDatabaseDO',
   bindingName: 'MAIN_DATABASE_DO',
-  instance: 'per-shop',
+  instance: 'per-tenant',
   browsable: false,
   migrationsDir: './migrations',
   schemaImport: './schema',
@@ -190,7 +190,7 @@ describe('transformActionFile', () => {
     dbName: 'main',
     database: mockDatabase,
     contextImport: '@shoplayer/database/context',
-    shopIdPath: 'session.shop',
+    tenantIdPath: 'session.tenantId',
     registryImport: '@shoplayer/database/registry',
   };
 
@@ -315,7 +315,7 @@ export const createUser = action({
     expect(result!.code).toContain('instanceKey = "global"');
   });
 
-  it('uses shopIdPath for per-shop databases', () => {
+  it('uses tenantIdPath for per-tenant databases', () => {
     const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
     const result = transformActionFile({
       ...defaultOptions,
@@ -323,7 +323,7 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toContain('ctx.session.shop');
+    expect(result!.code).toContain('ctx.session.tenantId');
   });
 
   it('transforms multiple actions', () => {

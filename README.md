@@ -122,7 +122,7 @@ export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
 export default {
   async fetch(request: Request, env: any) {
     return runWithContext(
-      { env, request, session: { shop: 'my.myshopify.com' } },
+      { env, request, session: { tenantId: 'my-tenant' } },
       async () => {
         const user = await createUser({ name: 'Alice', email: 'alice@example.com' });
         return Response.json(user);
@@ -152,7 +152,7 @@ import { users, posts } from './schema';
 export const { action } = defineDatabase({
   migrationsDir: './migrations',
   schema: { users, posts },
-  instance: 'per-shop',        // or 'global' (default: 'per-shop')
+  instance: 'per-tenant',        // or 'global' (default: 'per-tenant')
   browsable: 'development',    // Outerbase Studio integration (default: false)
 });
 ```
@@ -165,7 +165,7 @@ The destructured `action` function is your factory for creating database actions
 |--------|------|---------|-------------|
 | `migrationsDir` | `string` | (required) | Path to migrations directory, relative to the database file |
 | `schema` | `object` | (required) | Drizzle schema tables |
-| `instance` | `'per-shop' \| 'global'` | `'per-shop'` | Instance strategy (see [Instance Strategies](#instance-strategies)) |
+| `instance` | `'per-tenant' \| 'global'` | `'per-tenant'` | Instance strategy (see [Instance Strategies](#instance-strategies)) |
 | `browsable` | `boolean \| 'development'` | `false` | Enable Outerbase SQL browsing (see [Outerbase Studio](#outerbase-studio-integration)) |
 
 ---
@@ -246,7 +246,7 @@ export default {
       {
         env,
         request,
-        session: { shop: 'example.myshopify.com' },
+        session: { tenantId: 'example-tenant' },
       },
       async () => {
         if (request.method === 'POST') {
@@ -539,8 +539,8 @@ In development, each database instance key gets an epoch suffix to enable clean 
 
 | Environment | Instance key |
 |-------------|-------------|
-| Production | `example-shop.myshopify.com` |
-| Development | `example-shop.myshopify.com__dev_m1a2b3c` |
+| Production | `example-tenant` |
+| Development | `example-tenant__dev_m1a2b3c` |
 
 When you run `shoplayer-db reset` (without `--keep-epoch`), a new epoch is generated. This causes all subsequent DO accesses to create fresh instances, effectively giving you a clean database without data from previous iterations.
 
@@ -626,7 +626,7 @@ shoplayerDatabasePlugin({
   contextImport: '@shoplayer/database/context',  // Import path for context module
   registryImport: '@shoplayer/database/registry', // Import path for registry module
   databasesDir: 'src/databases',                  // Where database files live
-  shopIdPath: 'session.shop',                     // Path to shop ID in context
+  tenantIdPath: 'session.tenantId',                     // Path to tenant ID in context
   autoMigrations: 'development',                  // Auto-run push in dev mode
 });
 ```
@@ -638,7 +638,7 @@ shoplayerDatabasePlugin({
 | `contextImport` | `string` | `'@shoplayer/database/context'` | Import path for the request context module |
 | `registryImport` | `string` | `'@shoplayer/database/registry'` | Import path for the action registry module |
 | `databasesDir` | `string` | `'src/databases'` | Directory containing database definitions |
-| `shopIdPath` | `string` | `'session.shop'` | Property path to the shop ID in the request context |
+| `tenantIdPath` | `string` | `'session.tenantId'` | Property path to the tenant ID in the request context |
 | `autoMigrations` | `boolean \| 'development'` | `'development'` | Auto-push schema changes on dev server start |
 
 ### What the plugin does
@@ -736,7 +736,7 @@ export default {
 };
 ```
 
-Then visit `/studio` in your browser. You'll be prompted to enter a DO instance name (e.g. your shop ID), and Outerbase Studio will open with full SQL access to that instance.
+Then visit `/studio` in your browser. You'll be prompted to enter a DO instance name (e.g. your tenant ID), and Outerbase Studio will open with full SQL access to that instance.
 
 ### Querying a Durable Object directly
 
@@ -758,19 +758,19 @@ Using `browsable: 'development'` is recommended -- it enables the endpoint only 
 
 ## Instance Strategies
 
-### `per-shop` (default)
+### `per-tenant` (default)
 
-Each shop gets its own Durable Object instance, keyed by the shop identifier from the request context.
+Each tenant gets its own Durable Object instance, keyed by the tenant identifier from the request context.
 
 ```ts
 defineDatabase({
   schema: { users },
   migrationsDir: './migrations',
-  instance: 'per-shop',
+  instance: 'per-tenant',
 });
 ```
 
-The shop ID is extracted from the request context using the path configured in the Vite plugin's `shopIdPath` option (default: `session.shop`).
+The tenant ID is extracted from the request context using the path configured in the Vite plugin's `tenantIdPath` option (default: `session.tenantId`).
 
 ### `global`
 

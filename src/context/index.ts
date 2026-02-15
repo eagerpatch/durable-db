@@ -9,7 +9,7 @@ export interface RequestContext<TEnv = unknown, TSession = unknown> {
   env: TEnv;
   /** The incoming request */
   request: Request;
-  /** Session data (typically includes shop info for Shopify apps) */
+  /** Session data (typically includes tenant info) */
   session: TSession;
 }
 
@@ -29,7 +29,7 @@ const contextStorage = new AsyncLocalStorage<RequestContext<any, any>>();
  *
  * async function myHandler() {
  *   const ctx = getContext();
- *   const shop = ctx.session.shop;
+ *   const tenantId = ctx.session.tenantId;
  *   // ...
  * }
  * ```
@@ -37,7 +37,7 @@ const contextStorage = new AsyncLocalStorage<RequestContext<any, any>>();
 export function getContext<TEnv = unknown, TSession = unknown>(): RequestContext<TEnv, TSession> {
   return {
     session: {
-      shop: 'demo-shop.myshopify.com',
+      tenantId: 'demo-tenant',
     },
     env,
   } as RequestContext<TEnv, TSession>;
@@ -58,7 +58,7 @@ export function getContext<TEnv = unknown, TSession = unknown>(): RequestContext
  *       {
  *         env,
  *         request,
- *         session: { shop: 'my-shop.myshopify.com' },
+ *         session: { tenantId: 'my-tenant' },
  *       },
  *       async () => {
  *         // Call your actions here
@@ -115,7 +115,7 @@ export function getDevInstanceKeySuffix(): string | null {
  * In development, this appends an epoch suffix to enable database resets.
  * In production, this returns the base key unchanged.
  *
- * @param baseKey - The base instance key (e.g., shop domain or 'global')
+ * @param baseKey - The base instance key (e.g., tenant ID or 'global')
  */
 export function getInstanceKey(baseKey: string): string {
   const suffix = getDevInstanceKeySuffix();

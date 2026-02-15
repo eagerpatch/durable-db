@@ -6,7 +6,7 @@ describe('context', () => {
     it('makes context available within callback', () => {
       const mockEnv = { MY_BINDING: 'test' };
       const mockRequest = new Request('https://example.com');
-      const mockSession = { shop: 'test.myshopify.com' };
+      const mockSession = { tenantId: 'test-tenant' };
 
       runWithContext(
         { env: mockEnv, request: mockRequest, session: mockSession },

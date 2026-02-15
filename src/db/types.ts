@@ -19,8 +19,8 @@ export interface DatabaseConfig<
   migrationsDir: string;
   /** Drizzle schema tables */
   schema: TSchema;
-  /** Instance strategy - 'per-shop' (default) or 'global' */
-  instance?: 'per-shop' | 'global';
+  /** Instance strategy - 'per-tenant' (default) or 'global' */
+  instance?: 'per-tenant' | 'global';
   /** Enable Outerbase Studio browsable SQL endpoint on this DO.
    *  - true: always enabled
    *  - false: always disabled (default)
@@ -55,7 +55,7 @@ export interface ActionContext<TEnv = unknown> {
   env: TEnv;
   /**
    * The instance key used to address this Durable Object.
-   * For per-shop databases, this is the shop ID.
+   * For per-tenant databases, this is the tenant ID.
    * For global databases, this is 'global'.
    */
   instanceKey: string;
@@ -127,7 +127,7 @@ export interface DatabaseInfo {
   /** Binding name for wrangler config */
   bindingName: string;
   /** Instance strategy */
-  instance: 'per-shop' | 'global';
+  instance: 'per-tenant' | 'global';
   /** Path to migrations directory */
   migrationsDir: string;
   /** Schema import source (relative path) */

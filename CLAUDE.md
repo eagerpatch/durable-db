@@ -65,7 +65,7 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 
 ### Database Instance Strategies
 
-- `per-shop` (default): separate DO instance per shop, keyed by shop ID
+- `per-tenant` (default): separate DO instance per tenant, keyed by tenant ID
 - `global`: single shared DO instance
 
 ### Kysely Plugins

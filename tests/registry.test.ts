@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   registerAction,
   getAction,
@@ -165,6 +165,99 @@ describe('callActionInValidated', () => {
     await expect(
       callActionInValidated({}, 'otherDb', 'crossAction', {}, ctx)
     ).rejects.toThrow('Missing binding');
+  });
+
+  it('uses RPC for cross-db calls', async () => {
+    const handler = vi.fn();
+    registerAction('analytics', 'trackEvent', {
+      validator: (args) => args,
+      handler,
+    });
+
+    const rpcSpy = vi.fn().mockResolvedValue({ tracked: true });
+    const mockStub = { rpc: rpcSpy };
+    const mockId = { id: 'analytics-id' };
+
+    const ctx = createMockContext('main');
+    ctx.env = {
+      ANALYTICS_DO: {
+        idFromName: vi.fn().mockReturnValue(mockId),
+        get: vi.fn().mockReturnValue(mockStub),
+      },
+    };
+
+    const result = await callActionInValidated(
+      {},
+      'analytics',
+      'trackEvent',
+      { event: 'pageview' },
+      ctx
+    );
+
+    expect(result).toEqual({ tracked: true });
+    expect(rpcSpy).toHaveBeenCalledWith('trackEvent', { event: 'pageview' }, { instanceKey: 'test-shop' });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('calls handler directly with same db reference inside DO context', async () => {
+    const mockDb = { mock: 'db-instance' };
+    const handler = vi.fn().mockResolvedValue({ ok: true });
+    registerAction('main', 'internalAction', {
+      validator: (args) => args,
+      handler,
+    });
+
+    const ctx = createMockContext('main');
+    const doContext: DoContext = {
+      db: mockDb,
+      ctx,
+      dbName: 'main',
+      instanceKey: 'test-shop',
+    };
+
+    const result = await runWithDoContext(doContext, () =>
+      callActionInValidated(mockDb, 'main', 'internalAction', { key: 'value' }, ctx)
+    );
+
+    expect(result).toEqual({ ok: true });
+    expect(handler).toHaveBeenCalledWith(mockDb, { key: 'value' }, ctx);
+    // Verify db is the exact same reference
+    expect(handler.mock.calls[0][0]).toBe(mockDb);
+  });
+
+  it('uses RPC for cross-db calls even inside DO context', async () => {
+    const analyticsHandler = vi.fn();
+    registerAction('analytics', 'logMetric', {
+      validator: (args) => args,
+      handler: analyticsHandler,
+    });
+
+    const rpcSpy = vi.fn().mockResolvedValue({ logged: true });
+    const mockStub = { rpc: rpcSpy };
+    const mockId = { id: 'analytics-id' };
+
+    const ctx = createMockContext('main');
+    ctx.env = {
+      ANALYTICS_DO: {
+        idFromName: vi.fn().mockReturnValue(mockId),
+        get: vi.fn().mockReturnValue(mockStub),
+      },
+    };
+
+    const doContext: DoContext = {
+      db: { mock: 'main-db' },
+      ctx,
+      dbName: 'main',
+      instanceKey: 'test-shop',
+    };
+
+    const result = await runWithDoContext(doContext, () =>
+      callActionInValidated({}, 'analytics', 'logMetric', { metric: 'cpu' }, ctx)
+    );
+
+    expect(result).toEqual({ logged: true });
+    expect(rpcSpy).toHaveBeenCalledWith('logMetric', { metric: 'cpu' }, { instanceKey: 'test-shop' });
+    expect(analyticsHandler).not.toHaveBeenCalled();
   });
 });
 

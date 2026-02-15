@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   parseDatabaseFile,
   toPascalCase,
@@ -137,6 +137,20 @@ describe('parser', () => {
       const calls = findActionCallsInSource(source, knownActions);
       expect(calls).toEqual(['getUser']);
     });
+
+    it('warns on unparseable source', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const calls = findActionCallsInSource('not valid {{{ js', new Set(['foo']));
+
+      expect(calls).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to parse handler source'),
+        expect.anything()
+      );
+
+      warnSpy.mockRestore();
+    });
   });
 
   describe('transformHandlerForDO', () => {
@@ -179,6 +193,21 @@ describe('parser', () => {
       expect(transformed).toContain('this.getUser');
       expect(transformed).toContain('otherAction(');
       expect(transformed).not.toContain('this.otherAction');
+    });
+
+    it('warns and returns original on unparseable source', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const source = 'not valid {{{ js';
+      const result = transformHandlerForDO(source, ['foo']);
+
+      expect(result).toBe(source);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to transform handler'),
+        expect.anything()
+      );
+
+      warnSpy.mockRestore();
     });
   });
 

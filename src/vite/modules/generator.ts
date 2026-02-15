@@ -3,6 +3,7 @@ import type { DatabaseInfo, ActionInfo } from '../../db';
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
 import { parse } from '@babel/parser';
+import { BABEL_PARSER_PLUGINS } from './parser';
 
 // Handle ESM/CJS babel packages
 const generate =
@@ -35,21 +36,13 @@ interface StubConfig {
 // Parser Utilities
 // ============================================================================
 
-const PARSER_PLUGINS: any[] = [
-  'typescript',
-  'jsx',
-  'topLevelAwait',
-  'decorators-legacy',
-  'classProperties',
-];
-
 function parseProgram(code: string): t.File {
-  return parse(code, { sourceType: 'module', plugins: PARSER_PLUGINS }) as unknown as t.File;
+  return parse(code, { sourceType: 'module', plugins: BABEL_PARSER_PLUGINS }) as unknown as t.File;
 }
 
 export function parseExpression(code: string): t.Expression {
   const wrapped = `(${code.trim().replace(/;\s*$/, '')})`;
-  const ast = parse(wrapped, { sourceType: 'module', plugins: PARSER_PLUGINS });
+  const ast = parse(wrapped, { sourceType: 'module', plugins: BABEL_PARSER_PLUGINS });
   const stmt = ast.program.body[0];
   if (t.isExpressionStatement(stmt)) return stmt.expression;
   throw new Error(`Expected expression, got ${stmt?.type ?? 'unknown'}`);

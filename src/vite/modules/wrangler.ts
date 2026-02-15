@@ -48,15 +48,72 @@ export function findWranglerConfig(projectRoot: string): string | null {
 }
 
 /**
+ * Strip JSONC comments while respecting string literals.
+ * Tracks whether we're inside a `"..."` so `//` and `/*` inside
+ * strings (e.g. URLs) are preserved.
+ */
+export function stripJsoncComments(content: string): string {
+  let result = '';
+  let i = 0;
+  const len = content.length;
+
+  while (i < len) {
+    const ch = content[i];
+
+    // String literal — copy verbatim until the closing quote
+    if (ch === '"') {
+      result += '"';
+      i++;
+      while (i < len) {
+        const sc = content[i];
+        result += sc;
+        i++;
+        if (sc === '\\') {
+          // escaped character — copy next char unconditionally
+          if (i < len) {
+            result += content[i];
+            i++;
+          }
+        } else if (sc === '"') {
+          break;
+        }
+      }
+      continue;
+    }
+
+    // Single-line comment
+    if (ch === '/' && i + 1 < len && content[i + 1] === '/') {
+      // Skip until end of line
+      i += 2;
+      while (i < len && content[i] !== '\n') i++;
+      continue;
+    }
+
+    // Multi-line comment
+    if (ch === '/' && i + 1 < len && content[i + 1] === '*') {
+      i += 2;
+      while (i < len) {
+        if (content[i] === '*' && i + 1 < len && content[i + 1] === '/') {
+          i += 2;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+
+    result += ch;
+    i++;
+  }
+
+  return result;
+}
+
+/**
  * Parse wrangler.jsonc content (strips comments)
  */
 export function parseWranglerConfig(content: string): WranglerConfig {
-  // Strip single-line comments
-  const withoutSingleLine = content.replace(/\/\/.*$/gm, '');
-  // Strip multi-line comments
-  const withoutComments = withoutSingleLine.replace(/\/\*[\s\S]*?\*\//g, '');
-
-  return JSON.parse(withoutComments);
+  return JSON.parse(stripJsoncComments(content));
 }
 
 /**
@@ -123,17 +180,36 @@ export function patchWranglerConfig(
       .filter(c => !existingClasses.has(c));
 
     if (missingClasses.length > 0) {
-      // Add a new migration entry for missing classes
-      const nextTag = `v${config.migrations.length + 1}`;
+      // Parse existing tag numbers to avoid collisions with gaps (e.g. v1, v5 → v6)
+      const existingTagNumbers = config.migrations
+        .map(m => {
+          const match = m.tag.match(/^v(\d+)$/);
+          return match ? parseInt(match[1], 10) : 0;
+        });
+      const nextTagNum = existingTagNumbers.length > 0
+        ? Math.max(...existingTagNumbers) + 1
+        : 1;
+
       config.migrations.push({
-        tag: nextTag,
+        tag: `v${nextTagNum}`,
         new_sqlite_classes: missingClasses,
       });
       modified = true;
     }
 
     if (modified) {
-      // Write back as JSON (comments are lost, but structure is preserved)
+      // Back up the original file if it contains comments that will be lost
+      if (contentHasComments(content)) {
+        const backupPath = configPath + '.backup';
+        if (!fs.existsSync(backupPath)) {
+          fs.writeFileSync(backupPath, content, 'utf-8');
+          console.warn(
+            `[shoplayer-database] Original ${path.basename(configPath)} contained comments ` +
+            `that will be lost during patching. Backup saved to ${path.basename(backupPath)}`
+          );
+        }
+      }
+
       const newContent = JSON.stringify(config, null, 2);
       fs.writeFileSync(configPath, newContent, 'utf-8');
       console.log(`[shoplayer-database] Updated ${path.basename(configPath)} with DO bindings`);
@@ -145,6 +221,37 @@ export function patchWranglerConfig(
     logRequiredConfig(databases);
     return { modified: false, configPath, error: error as Error };
   }
+}
+
+/**
+ * Check whether a JSONC string contains comments (outside of string literals).
+ * Used to decide whether a backup is needed before re-serializing.
+ */
+export function contentHasComments(content: string): boolean {
+  let i = 0;
+  const len = content.length;
+
+  while (i < len) {
+    const ch = content[i];
+
+    if (ch === '"') {
+      i++;
+      while (i < len) {
+        if (content[i] === '\\') { i += 2; continue; }
+        if (content[i] === '"') { i++; break; }
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '/' && i + 1 < len && (content[i + 1] === '/' || content[i + 1] === '*')) {
+      return true;
+    }
+
+    i++;
+  }
+
+  return false;
 }
 
 /**

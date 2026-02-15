@@ -56,6 +56,7 @@ class PluginState {
 
   private readonly databaseFilePaths = new Map<string, string>();
   private initialized = false;
+  private initPromise: Promise<void> | null = null;
 
   projectRoot = '';
   config!: ResolvedConfig;
@@ -98,11 +99,18 @@ class PluginState {
     this.actions.clear();
     this.databaseFilePaths.clear();
     this.initialized = false;
+    this.initPromise = null;
   }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
 
+    this.initPromise = this.doInitialize();
+    return this.initPromise;
+  }
+
+  private async doInitialize(): Promise<void> {
     const files = discoverDatabaseFiles({
       projectRoot: this.projectRoot,
       databasesDir: this.options.databasesDir,
@@ -152,43 +160,11 @@ class PluginState {
       } catch (error) {
         // Fallback to old behavior if push fails
         console.warn(`[shoplayer-database] Could not push migrations for ${db.name}: ${error}`);
-        try {
-          const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
-          if (schemaPath) {
-            const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
-            if (Object.keys(schema).length > 0) {
-              const result = await generateMigration({ migrationsDir, schema, write: true });
-              if (result.hasChanges) {
-                console.log(
-                  `[shoplayer-database] Generated migration for ${db.name}: ${result.migrationName} ` +
-                  `(${result.statements.length} statements)`
-                );
-              }
-            }
-          }
-        } catch (fallbackError) {
-          console.warn(`[shoplayer-database] Fallback migration generation failed: ${fallbackError}`);
-        }
+        await this.generateMigrationFromSchema(db, migrationsDir, 'Fallback migration generation');
       }
     } else if (shouldAutoMigrate && db.schemaImport && db.schemaTableNames.length > 0) {
       // In build mode, use generateMigration (writes to prod migrations)
-      try {
-        const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
-        if (schemaPath) {
-          const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
-          if (Object.keys(schema).length > 0) {
-            const result = await generateMigration({ migrationsDir, schema, write: true });
-            if (result.hasChanges) {
-              console.log(
-                `[shoplayer-database] Generated migration for ${db.name}: ${result.migrationName} ` +
-                `(${result.statements.length} statements)`
-              );
-            }
-          }
-        }
-      } catch (error) {
-        console.warn(`[shoplayer-database] Could not auto-generate migrations for ${db.name}: ${error}`);
-      }
+      await this.generateMigrationFromSchema(db, migrationsDir, 'Auto-generate migrations');
     }
 
     // Load production migrations
@@ -216,6 +192,30 @@ class PluginState {
 
     if (db.migrations.size > 0) {
       console.log(`[shoplayer-database] Total ${db.migrations.size} migration(s) for ${db.name}`);
+    }
+  }
+
+  private async generateMigrationFromSchema(
+    db: DatabaseInfo,
+    migrationsDir: string,
+    label: string
+  ): Promise<void> {
+    try {
+      const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
+      if (schemaPath) {
+        const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
+        if (Object.keys(schema).length > 0) {
+          const result = await generateMigration({ migrationsDir, schema, write: true });
+          if (result.hasChanges) {
+            console.log(
+              `[shoplayer-database] Generated migration for ${db.name}: ${result.migrationName} ` +
+              `(${result.statements.length} statements)`
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.warn(`[shoplayer-database] ${label} failed for ${db.name}: ${error}`);
     }
   }
 

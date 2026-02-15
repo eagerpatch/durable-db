@@ -11,12 +11,24 @@ const traverse = typeof _traverse === 'function' ? _traverse : (_traverse as any
 const generate = typeof _generate === 'function' ? _generate : (_generate as any).default;
 
 /**
+ * Shared Babel parser plugins used across all parsing in the Vite plugin.
+ * Ensures consistent syntax support (TypeScript, JSX, decorators, etc.).
+ */
+export const BABEL_PARSER_PLUGINS: any[] = [
+  'typescript',
+  'jsx',
+  'topLevelAwait',
+  'decorators-legacy',
+  'classProperties',
+];
+
+/**
  * Parse a TypeScript/JavaScript file into an AST
  */
 export function parseCode(code: string): t.File {
   return parse(code, {
     sourceType: 'module',
-    plugins: ['typescript'],
+    plugins: BABEL_PARSER_PLUGINS,
   });
 }
 
@@ -38,7 +50,7 @@ export function findActionCallsInSource(source: string, knownActionNames: Set<st
     // Wrap the source so it's valid JS
     const ast = parse(`const __handler = ${source}`, {
       sourceType: 'module',
-      plugins: ['typescript'],
+      plugins: BABEL_PARSER_PLUGINS,
     });
 
     traverse(ast, {
@@ -52,8 +64,8 @@ export function findActionCallsInSource(source: string, knownActionNames: Set<st
         }
       },
     });
-  } catch {
-    // If parsing fails, return empty array
+  } catch (e) {
+    console.warn('[shoplayer-database] Failed to parse handler source for action call detection:', e);
   }
 
   return calls;
@@ -71,7 +83,7 @@ export function transformHandlerForDO(source: string, actionsToTransform: string
   try {
     const ast = parse(`const __handler = ${source}`, {
       sourceType: 'module',
-      plugins: ['typescript'],
+      plugins: BABEL_PARSER_PLUGINS,
     });
 
     const actionSet = new Set(actionsToTransform);
@@ -93,8 +105,8 @@ export function transformHandlerForDO(source: string, actionsToTransform: string
     const code = generate(ast).code;
     // Remove the "const __handler = " wrapper
     return code.replace(/^const __handler = /, '').replace(/;$/, '');
-  } catch {
-    // If transformation fails, return original
+  } catch (e) {
+    console.warn('[shoplayer-database] Failed to transform handler for DO class generation:', e);
     return source;
   }
 }
@@ -133,7 +145,7 @@ export function transformCrossDbCalls(
   try {
     const ast = parse(`const __handler = ${source}`, {
       sourceType: 'module',
-      plugins: ['typescript'],
+      plugins: BABEL_PARSER_PLUGINS,
     });
 
     const actionSet = new Set(crossDbActions);

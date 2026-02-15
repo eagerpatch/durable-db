@@ -202,3 +202,47 @@ describe('transform', () => {
     expect(result).toBeNull();
   });
 });
+
+// ============================================================================
+// Concurrent initialization
+// ============================================================================
+
+describe('concurrent initialization', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-init-'));
+    fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('does not initialize twice when load and transform race', async () => {
+    const plugin = shoplayerDatabasePlugin();
+
+    const configResolved = plugin.configResolved as Function;
+    await configResolved({
+      root: tempDir,
+      command: 'build',
+    } as ResolvedConfig);
+
+    const load = plugin.load as Function;
+    const transform = plugin.transform as Function;
+
+    // Fire both hooks concurrently — both call state.initialize()
+    const [loadResult, transformResult] = await Promise.all([
+      load('\0virtual:shoplayer/databases/__durableObjects.js'),
+      transform.call(
+        { resolve: async () => null },
+        'export const x = 1;',
+        path.join(tempDir, 'src', 'file.ts')
+      ),
+    ]);
+
+    // load should return code (even if empty), transform should return null
+    expect(loadResult).toHaveProperty('code');
+    expect(transformResult).toBeNull();
+  });
+});

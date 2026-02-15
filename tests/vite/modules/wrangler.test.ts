@@ -7,6 +7,8 @@ import {
   parseWranglerConfig,
   patchWranglerConfig,
   generateRequiredConfig,
+  stripJsoncComments,
+  contentHasComments,
 } from '../../../src/vite/modules/wrangler';
 import type { DatabaseInfo } from '../../../src/db';
 
@@ -116,6 +118,95 @@ describe('wrangler', () => {
 
       expect(() => parseWranglerConfig(content)).toThrow();
     });
+
+    it('preserves URLs containing // inside string values', () => {
+      const content = `{
+        // A comment
+        "url": "https://example.com/path",
+        "other": "value"
+      }`;
+
+      const result = parseWranglerConfig(content);
+
+      expect(result).toEqual({
+        url: 'https://example.com/path',
+        other: 'value',
+      });
+    });
+
+    it('preserves strings with /* inside them', () => {
+      const content = `{
+        "pattern": "/* not a comment */",
+        "name": "test"
+      }`;
+
+      const result = parseWranglerConfig(content);
+
+      expect(result).toEqual({
+        pattern: '/* not a comment */',
+        name: 'test',
+      });
+    });
+
+    it('handles escaped quotes inside strings', () => {
+      const content = `{
+        "value": "say \\"hello\\"", // comment
+        "name": "test"
+      }`;
+
+      const result = parseWranglerConfig(content);
+
+      expect(result).toEqual({
+        value: 'say "hello"',
+        name: 'test',
+      });
+    });
+  });
+
+  describe('stripJsoncComments', () => {
+    it('strips single-line comments', () => {
+      expect(stripJsoncComments('{"a": 1} // comment')).toBe('{"a": 1} ');
+    });
+
+    it('strips multi-line comments', () => {
+      expect(stripJsoncComments('{"a": /* removed */ 1}')).toBe('{"a":  1}');
+    });
+
+    it('preserves // inside strings', () => {
+      expect(stripJsoncComments('{"url": "https://x.com"}')).toBe('{"url": "https://x.com"}');
+    });
+
+    it('preserves /* inside strings', () => {
+      expect(stripJsoncComments('{"v": "a /* b */ c"}')).toBe('{"v": "a /* b */ c"}');
+    });
+
+    it('handles escaped quotes in strings', () => {
+      const input = '{"v": "a\\\\"} // comment';
+      const result = stripJsoncComments(input);
+      expect(result).toBe('{"v": "a\\\\"} ');
+    });
+  });
+
+  describe('contentHasComments', () => {
+    it('returns true for single-line comments', () => {
+      expect(contentHasComments('{"a": 1} // comment')).toBe(true);
+    });
+
+    it('returns true for multi-line comments', () => {
+      expect(contentHasComments('{"a": /* x */ 1}')).toBe(true);
+    });
+
+    it('returns false for plain JSON', () => {
+      expect(contentHasComments('{"a": 1}')).toBe(false);
+    });
+
+    it('returns false for // inside strings', () => {
+      expect(contentHasComments('{"url": "https://x.com"}')).toBe(false);
+    });
+
+    it('returns false for /* inside strings', () => {
+      expect(contentHasComments('{"v": "a /* b */ c"}')).toBe(false);
+    });
   });
 
   describe('patchWranglerConfig', () => {
@@ -224,6 +315,66 @@ describe('wrangler', () => {
 
       expect(config.durable_objects.bindings).toHaveLength(2);
       expect(config.migrations[0].new_sqlite_classes).toHaveLength(2);
+    });
+
+    it('generates correct tag when migrations have gaps', () => {
+      const existingConfig = {
+        durable_objects: { bindings: [] },
+        migrations: [
+          { tag: 'v1', new_sqlite_classes: ['OldDO'] },
+          { tag: 'v5', new_sqlite_classes: ['AnotherDO'] },
+        ],
+      };
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify(existingConfig));
+
+      patchWranglerConfig(tempDir, [mockDatabase]);
+
+      const content = fs.readFileSync(path.join(tempDir, 'wrangler.jsonc'), 'utf-8');
+      const config = JSON.parse(content);
+
+      // Should be v6 (max of existing + 1), not v3 (array length + 1)
+      expect(config.migrations).toHaveLength(3);
+      expect(config.migrations[2].tag).toBe('v6');
+    });
+
+    it('creates backup when config has comments', () => {
+      const configContent = `{
+        // This is a comment
+        "name": "test-worker"
+      }`;
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), configContent);
+
+      patchWranglerConfig(tempDir, [mockDatabase]);
+
+      const backupPath = path.join(tempDir, 'wrangler.jsonc.backup');
+      expect(fs.existsSync(backupPath)).toBe(true);
+      expect(fs.readFileSync(backupPath, 'utf-8')).toBe(configContent);
+    });
+
+    it('does not create backup when config has no comments', () => {
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), '{"name": "test-worker"}');
+
+      patchWranglerConfig(tempDir, [mockDatabase]);
+
+      const backupPath = path.join(tempDir, 'wrangler.jsonc.backup');
+      expect(fs.existsSync(backupPath)).toBe(false);
+    });
+
+    it('does not overwrite existing backup', () => {
+      const originalComment = `{
+        // Original comment
+        "name": "test-worker"
+      }`;
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), originalComment);
+
+      // Create an existing backup
+      const existingBackup = '{"old": "backup"}';
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc.backup'), existingBackup);
+
+      patchWranglerConfig(tempDir, [mockDatabase]);
+
+      // Existing backup should be preserved
+      expect(fs.readFileSync(path.join(tempDir, 'wrangler.jsonc.backup'), 'utf-8')).toBe(existingBackup);
     });
   });
 

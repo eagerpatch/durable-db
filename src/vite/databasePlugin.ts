@@ -305,9 +305,11 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
       await state.initialize();
 
+      const isDev = state.config.command === 'serve';
       const code = generateDurableObjectsModule(
         Array.from(state.databases.values()),
-        state.options.registryImport
+        state.options.registryImport,
+        isDev
       );
 
       return { code };

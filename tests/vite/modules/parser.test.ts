@@ -262,6 +262,69 @@ describe('parser', () => {
       expect(result.localImports.get('helperFn')?.source).toBe('./helpers');
     });
 
+    it('extracts browsable: true', () => {
+      const code = `
+        import { defineDatabase } from '@shoplayer/database/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          migrationsDir: './migrations',
+          schema: { users },
+          browsable: true,
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.js', code);
+      expect(result.database!.browsable).toBe(true);
+    });
+
+    it('extracts browsable: false', () => {
+      const code = `
+        import { defineDatabase } from '@shoplayer/database/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          migrationsDir: './migrations',
+          schema: { users },
+          browsable: false,
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.js', code);
+      expect(result.database!.browsable).toBe(false);
+    });
+
+    it('extracts browsable: "development"', () => {
+      const code = `
+        import { defineDatabase } from '@shoplayer/database/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          migrationsDir: './migrations',
+          schema: { users },
+          browsable: 'development',
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.js', code);
+      expect(result.database!.browsable).toBe('development');
+    });
+
+    it('defaults browsable to false when not specified', () => {
+      const code = `
+        import { defineDatabase } from '@shoplayer/database/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          migrationsDir: './migrations',
+          schema: { users },
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.js', code);
+      expect(result.database!.browsable).toBe(false);
+    });
+
     it('handles global instance strategy', () => {
       const code = `
         import { defineDatabase } from '@shoplayer/database/db';

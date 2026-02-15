@@ -215,6 +215,7 @@ function extractDatabaseInfo(
   // Default values
   let migrationsDir = './migrations';
   let instance: 'per-shop' | 'global' = 'per-shop';
+  let browsable: boolean | 'development' = false;
   let schemaImport: string | null = null;
   const schemaTableNames: string[] = [];
 
@@ -233,6 +234,14 @@ function extractDatabaseInfo(
       const value = prop.value.value;
       if (value === 'per-shop' || value === 'global') {
         instance = value;
+      }
+    }
+
+    if (key === 'browsable') {
+      if (t.isBooleanLiteral(prop.value)) {
+        browsable = prop.value.value;
+      } else if (t.isStringLiteral(prop.value) && prop.value.value === 'development') {
+        browsable = 'development';
       }
     }
 
@@ -264,6 +273,7 @@ function extractDatabaseInfo(
     className: toPascalCase(name) + 'DatabaseDO',
     bindingName: toScreamingSnakeCase(name) + '_DATABASE_DO',
     instance,
+    browsable,
     migrationsDir,
     schemaImport,
     schemaTableNames,

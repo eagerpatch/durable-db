@@ -1,20 +1,36 @@
-# Shoplayer Database
+# @shoplayer/database
 
-A zero-configuration database abstraction for Cloudflare Durable Objects with SQLite.
+Zero-configuration database abstraction for Cloudflare Durable Objects with SQLite.
 
-## Features
+Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely](https://kysely.dev/), validate with [ArkType](https://arktype.io/) -- and let the Vite plugin handle the rest: Durable Object class generation, RPC stubs, migration embedding, and wrangler config patching.
 
-- **Define actions with ArkType validation** - Type-safe args validation at runtime
-- **Drizzle schema, Kysely queries** - Best of both worlds for schema definition and query building
-- **Auto-generated migrations** - Schema is the source of truth, migrations generated automatically
-- **Per-shop or global databases** - Automatic instance management
-- **Internal DO calls** - Actions can call other actions efficiently within the same DO
-- **Cross-DB calls** - Automatically transformed to RPC calls at build time
-- **CamelCase support** - Automatic camelCase ↔ snake_case conversion
-- **Date serialization** - Seamless Date object handling for SQLite
-- **Vite plugin** - Zero configuration, just drop files in `src/databases/`
-- **Automatic wrangler config** - DO bindings are auto-generated
-- **Fully testable** - Split modules for easy unit testing
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Defining a Database](#defining-a-database)
+- [Writing Actions](#writing-actions)
+- [Calling Actions from Your Worker](#calling-actions-from-your-worker)
+- [CLI](#cli)
+  - [push](#shoplayer-db-push)
+  - [generate](#shoplayer-db-generate)
+  - [status](#shoplayer-db-status)
+  - [reset](#shoplayer-db-reset)
+  - [validate](#shoplayer-db-validate)
+- [Migration System](#migration-system)
+  - [Dev Migrations](#dev-migrations)
+  - [Production Migrations](#production-migrations)
+  - [Breakpoints](#breakpoints)
+  - [Epoch System](#epoch-system)
+  - [Typical Workflow](#typical-workflow)
+- [Vite Plugin](#vite-plugin)
+- [Outerbase Studio Integration](#outerbase-studio-integration)
+- [Instance Strategies](#instance-strategies)
+- [Action-to-Action Calls](#action-to-action-calls)
+- [PITR Safety](#pitr-safety)
+- [Architecture](#architecture)
+- [Development](#development)
+
+---
 
 ## Quick Start
 
@@ -24,27 +40,9 @@ A zero-configuration database abstraction for Cloudflare Durable Objects with SQ
 pnpm add @shoplayer/database
 ```
 
-### 2. Configure Vite
+### 2. Define your schema
 
-```typescript
-// vite.config.ts
-import { defineConfig } from 'vite';
-import { shoplayerDatabasePlugin } from '@shoplayer/database/vite';
-
-export default defineConfig({
-  plugins: [
-    shoplayerDatabasePlugin({
-      contextImport: '@shoplayer/database/context',
-      databasesDir: 'src/databases',
-      shopIdPath: 'session.shop',
-    }),
-  ],
-});
-```
-
-### 3. Define Your Schema
-
-```typescript
+```ts
 // src/databases/schema.ts
 import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
 
@@ -56,9 +54,9 @@ export const users = sqliteTable('users', {
 });
 ```
 
-### 4. Define Your Database and Actions
+### 3. Define your database
 
-```typescript
+```ts
 // src/databases/main.ts
 import { defineDatabase } from '@shoplayer/database/db';
 import { users } from './schema';
@@ -67,75 +65,66 @@ export const { action } = defineDatabase({
   migrationsDir: './migrations',
   schema: { users },
 });
+```
+
+### 4. Write actions
+
+```ts
+// src/databases/actions/createUser.ts
+import { action } from '../main';
 
 export const createUser = action({
   args: {
     name: 'string',
     email: 'string.email',
   },
-  handler: async (db, args, ctx) => {
+  handler: async (db, args) => {
     return db
       .insertInto('users')
       .values({
         id: crypto.randomUUID(),
         name: args.name,
         email: args.email,
-        createdAt: new Date(), // Dates are automatically serialized
+        created_at: new Date(),
       })
       .returningAll()
       .executeTakeFirstOrThrow();
   },
 });
+```
 
-export const getUser = action({
-  args: { userId: 'string' },
-  handler: async (db, args, ctx) => {
-    return db
-      .selectFrom('users')
-      .where('id', '=', args.userId)
-      .selectAll()
-      .executeTakeFirst();
-  },
-});
+### 5. Add the Vite plugin
 
-// Actions can call other actions - transformed to this.* in the DO
-export const createUserIfNotExists = action({
-  args: { name: 'string', email: 'string.email' },
-  handler: async (db, args, ctx) => {
-    const existing = await getUserByEmail({ email: args.email });
-    if (existing) return { created: false, user: existing };
-    
-    const user = await createUser({ name: args.name, email: args.email });
-    return { created: true, user };
-  },
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+import { cloudflare } from '@cloudflare/vite-plugin';
+import { shoplayerDatabasePlugin } from '@shoplayer/database/vite';
+
+export default defineConfig({
+  plugins: [
+    shoplayerDatabasePlugin(),
+    cloudflare(),
+  ],
 });
 ```
 
-### 5. Use Actions in Your Worker
+### 6. Use in your worker
 
-```typescript
+```ts
 // src/worker.ts
 import { runWithContext } from '@shoplayer/database/context';
-import { createUser, getUser } from './databases/main';
+import { createUser } from './databases/actions/createUser';
 
-// Export the generated Durable Object
+// Export the generated Durable Object class
 export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any) {
     return runWithContext(
-      {
-        env,
-        request,
-        session: { shop: 'my-shop.myshopify.com' },
-      },
+      { env, request, session: { shop: 'my.myshopify.com' } },
       async () => {
-        // Just call actions like regular functions!
-        const user = await createUser({ 
-          name: 'John', 
-          email: 'john@example.com' 
-        });
-        
+        const user = await createUser({ name: 'Alice', email: 'alice@example.com' });
         return Response.json(user);
       }
     );
@@ -143,398 +132,807 @@ export default {
 };
 ```
 
-## ArkType Validation
+### 7. Push schema and run
 
-Actions use [ArkType](https://arktype.io/) for runtime validation:
-
-```typescript
-action({
-  args: {
-    name: 'string',           // Required string
-    email: 'string.email',    // Email validation
-    age: 'number > 0',        // Positive number
-    role: "'admin' | 'user'", // Literal union
-    bio: 'string?',           // Optional
-  },
-  handler: async (db, args, ctx) => { ... }
-})
+```bash
+shoplayer-db push    # Create dev migrations from your schema
+pnpm dev             # Start the dev server
 ```
 
-## Internal Action Calls
+---
 
-Actions can call other actions within the same database. The plugin automatically transforms these calls to use `this.*`:
+## Defining a Database
 
-```typescript
-export const getUser = action({
-  args: { id: 'string' },
-  handler: async (db, args, ctx) => {
-    return db.selectFrom('users').where('id', '=', args.id).executeTakeFirst();
-  },
-});
+Call `defineDatabase()` with a config object. The Vite plugin parses this at build time to generate a Durable Object class.
 
-export const createUserIfNotExists = action({
-  args: { name: 'string', email: 'string' },
-  handler: async (db, args, ctx) => {
-    // This calls getUser - automatically transformed to this.getUser() in the DO
-    const existing = await getUser({ id: args.email });
-    if (existing) return existing;
-    return db.insertInto('users').values(args).execute();
-  },
-});
-```
+```ts
+import { defineDatabase } from '@shoplayer/database/db';
+import { users, posts } from './schema';
 
-## Cross-Database Calls
-
-Actions can call actions from other databases - the plugin **automatically transforms these to RPC calls**:
-
-```typescript
-// src/databases/main.ts
-export const createUserWithAnalytics = action({
-  args: { name: 'string', email: 'string' },
-  handler: async (db, args, ctx) => {
-    const user = await db.insertInto('users').values(args).execute();
-    
-    // Just call the action! Automatically transformed to RPC
-    await logEvent({ type: 'user_created', userId: user.id });
-    
-    return user;
-  },
-});
-
-// src/databases/analytics.ts (global database)
-export const logEvent = action({
-  args: { type: 'string', userId: 'string?' },
-  handler: async (db, args, ctx) => {
-    return db.insertInto('events').values(args).execute();
-  },
-});
-```
-
-The plugin automatically:
-1. Detects cross-database calls at build time
-2. Transforms them into proper RPC calls using `ctx.env`
-3. Uses the correct instance key based on the target database's strategy:
-   - **Per-shop databases**: Uses the same shop ID as the calling database
-   - **Global databases**: Uses `'global'` as the instance key
-
-### Manual Cross-Database Calls
-
-If you prefer explicit control, you can still use `ctx.env` directly:
-
-```typescript
-export const createUserWithAnalytics = action({
-  args: { name: 'string', email: 'string' },
-  handler: async (db, args, ctx) => {
-    const user = await db.insertInto('users').values(args).execute();
-    
-    // Explicit RPC call
-    const analyticsId = ctx.env.ANALYTICS_DATABASE_DO.idFromName('global');
-    const analytics = ctx.env.ANALYTICS_DATABASE_DO.get(analyticsId);
-    await analytics.logEvent({ type: 'user_created', userId: user.id });
-    
-    return user;
-  },
-});
-```
-
-## Multiple Databases
-
-You can have multiple databases with different instance strategies:
-
-```typescript
-// src/databases/main.ts - Per-shop (default)
 export const { action } = defineDatabase({
-  schema: { users },
-  migrationsDir: './migrations',
-});
-
-// src/databases/analytics.ts - Global (shared)
-export const { action } = defineDatabase({
-  schema: { events },
-  migrationsDir: './migrations/analytics',
-  instance: 'global',
-});
-```
-
-## Migrations
-
-**Your Drizzle schema is the source of truth.** The plugin automatically generates migrations when your schema changes.
-
-### How it works
-
-1. At build time, the plugin loads your Drizzle schema
-2. Compares it to the previous snapshot (stored in `migrationsDir/_snapshot.json`)
-3. If changes are detected, generates SQL migration statements using `drizzle-kit`
-4. Saves the migration SQL file and updates the snapshot
-5. Embeds migrations in the generated Durable Object
-
-### Auto-generated migrations
-
-When you modify your schema:
-
-```typescript
-// schema.ts - Add a new column
-export const users = sqliteTable('users', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  email: text('email').notNull(),
-  bio: text('bio'), // New column!
-});
-```
-
-The plugin automatically generates:
-
-```sql
--- migrations/20241208143000_auto.sql
-ALTER TABLE users ADD COLUMN bio TEXT;
-```
-
-### Manual migrations
-
-You can also write migrations manually by creating `.sql` files in your migrations directory:
-
-```sql
--- migrations/001_initial.sql
-CREATE TABLE users (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  email TEXT NOT NULL
-);
-
-CREATE INDEX idx_users_email ON users(email);
-```
-
-### Migration utilities
-
-The migrations module is also available for programmatic use:
-
-```typescript
-import { 
-  generateMigration,
-  loadMigrationFiles,
-  generateSnapshotFromSchema 
-} from '@shoplayer/database/migrations';
-
-// Generate a migration from schema changes
-const result = await generateMigration({
   migrationsDir: './migrations',
   schema: { users, posts },
+  instance: 'per-shop',        // or 'global' (default: 'per-shop')
+  browsable: 'development',    // Outerbase Studio integration (default: false)
 });
-
-if (result.hasChanges) {
-  console.log('Generated migration:', result.migrationName);
-  console.log('SQL statements:', result.statements);
-}
 ```
 
-### Disabling auto-migrations
+The destructured `action` function is your factory for creating database actions.
 
-If you prefer manual control:
+### Config Options
 
-```typescript
-shoplayerDatabasePlugin({
-  autoMigrations: false,
-})
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `migrationsDir` | `string` | (required) | Path to migrations directory, relative to the database file |
+| `schema` | `object` | (required) | Drizzle schema tables |
+| `instance` | `'per-shop' \| 'global'` | `'per-shop'` | Instance strategy (see [Instance Strategies](#instance-strategies)) |
+| `browsable` | `boolean \| 'development'` | `false` | Enable Outerbase SQL browsing (see [Outerbase Studio](#outerbase-studio-integration)) |
+
+---
+
+## Writing Actions
+
+Actions are type-safe database operations with runtime argument validation.
+
+```ts
+import { action } from '../main';
+
+export const getUser = action({
+  args: { userId: 'string' },
+  handler: async (db, args, ctx) => {
+    return db
+      .selectFrom('users')
+      .selectAll()
+      .where('id', '=', args.userId)
+      .executeTakeFirst();
+  },
+});
 ```
 
-## Plugins
+### The `args` object
 
-The library includes Kysely plugins for common operations:
+Uses [ArkType](https://arktype.io/) syntax for runtime validation:
 
-- **CamelCasePlugin** - Converts `camelCase` to `snake_case` for SQL
-- **DateSerializePlugin** - Handles Date serialization/deserialization
-- **DrizzleSchemaPlugin** - Schema-aware column mapping
-
-## Plugin Options
-
-```typescript
-shoplayerDatabasePlugin({
-  // Import path for context module
-  contextImport: '@shoplayer/database/context',
-  
-  // Directory containing database definitions
-  databasesDir: 'src/databases',
-  
-  // Path to shop ID in context (for per-shop DBs)
-  shopIdPath: 'session.shop',
-  
-  // Auto-generate migrations from schema changes (default: true)
-  autoMigrations: true,
-})
+```ts
+args: { name: 'string' }                    // Required string
+args: { email: 'string.email' }             // Email validation
+args: { limit: 'number > 0' }               // Positive number
+args: { offset: 'number >= 0' }             // Non-negative number
+args: { tags: 'string[]' }                  // Array of strings
+args: { name: 'string', age: 'number?' }    // Optional field
+args: { role: "'admin' | 'user'" }           // Literal union
 ```
 
-## Development
+### The `handler` function
+
+Receives three arguments:
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `db` | `Kysely<Schema>` | Type-safe Kysely query builder bound to your Drizzle schema |
+| `args` | inferred from `args` | Validated arguments (ArkType ensures correctness at runtime) |
+| `ctx` | `ActionContext` | Context with `env` (Cloudflare bindings) and `instanceKey` |
+
+### File organization
+
+Actions can live inline in the database file or in separate files:
+
+```
+src/databases/
+  main.ts              # defineDatabase() call
+  schema.ts            # Drizzle schema (excluded from action discovery)
+  actions/
+    createUser.ts      # import { action } from '../main'
+    getUser.ts
+    listUsers.ts
+```
+
+Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery.
+
+---
+
+## Calling Actions from Your Worker
+
+Wrap your request handler in `runWithContext()` to provide the environment and session. Then call actions like regular async functions:
+
+```ts
+import { runWithContext } from '@shoplayer/database/context';
+import { createUser } from './databases/actions/createUser';
+import { listUsers } from './databases/actions/listUsers';
+
+export default {
+  async fetch(request: Request, env: any) {
+    return runWithContext(
+      {
+        env,
+        request,
+        session: { shop: 'example.myshopify.com' },
+      },
+      async () => {
+        if (request.method === 'POST') {
+          const body = await request.json();
+          const user = await createUser({ name: body.name, email: body.email });
+          return Response.json(user);
+        }
+
+        const users = await listUsers({ limit: 10, offset: 0 });
+        return Response.json(users);
+      }
+    );
+  },
+};
+```
+
+Behind the scenes, each action call is an RPC call to the correct Durable Object instance. The Vite plugin generates stubs that handle instance routing, argument validation, and DO communication transparently.
+
+---
+
+## CLI
+
+The `shoplayer-db` CLI manages your migration lifecycle. All commands share these options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-d, --databases-dir <dir>` | `src/databases` | Directory containing database definitions |
+| `-v, --verbose` | `false` | Show detailed output |
+
+### `shoplayer-db push`
+
+Push schema changes to dev migrations. This is the command you run most often during development.
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Build the package
-pnpm build
-
-# Run tests
-pnpm test
-
-# Run example
-cd example && pnpm dev
+shoplayer-db push
+shoplayer-db push --verbose
+shoplayer-db push --databases-dir ./src/db
 ```
 
-## CLI Commands
+**What it does:**
 
-The database module provides both a standalone CLI and composable functions for integration.
+1. Discovers all database files in your databases directory
+2. Parses each file for `defineDatabase()` calls
+3. For each database:
+   - Loads the current production snapshot (`_snapshot.json` in the migrations directory)
+   - Checks if the production snapshot has changed since the last push (e.g. a teammate committed a migration) -- if so, **automatically resets dev state** for that database
+   - Loads the dev snapshot (falls back to the production snapshot if none exists yet)
+   - Generates a fresh snapshot from your current Drizzle schema
+   - Diffs the two snapshots to produce SQL migration statements
+   - If there are changes: writes an incremental dev migration file (e.g. `0001_dev.sql`) and updates the dev snapshot
 
-### Standalone CLI
+**Output example:**
 
-After installing, you can use the `shoplayer-db` command directly:
+```
+[db:push] main: 0001_dev (3 statements)
+[db:push] analytics: no changes
+```
+
+If a production snapshot change is detected:
+
+```
+[db:push] Production snapshot changed for main -- dev state reset
+[db:push] main: 0001_dev (1 statement)
+```
+
+Dev migrations are stored in `node_modules/.cache/@shoplayer/database/` and are never committed to git. They are loaded automatically by the Vite plugin in dev mode.
+
+### `shoplayer-db generate`
+
+Generate a production migration from your current schema changes. Run this when you're ready to commit.
 
 ```bash
-# Check database status
-npx shoplayer-db status
-
-# Push schema changes to dev migrations
-npx shoplayer-db push
-
-# Generate production migration
-npx shoplayer-db generate add_user_bio
-
-# Reset dev state (fresh database instances)
-npx shoplayer-db reset
+shoplayer-db generate
+shoplayer-db generate add_user_bio
+shoplayer-db generate --database main
+shoplayer-db generate --database main add_posts_table
 ```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `[name]` | Optional suffix appended to the timestamp-based migration name |
+
+**Extra flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--database <db>` | Only generate for this specific database |
+
+**What it does:**
+
+1. Compares your current Drizzle schema against the production snapshot (`_snapshot.json`)
+2. Generates SQL statements for the diff
+3. Writes a timestamped `.sql` file to the configured `migrationsDir`
+4. Updates the production snapshot with a new ID and `prevId` chain
+5. Clears dev state for this database (the dev migrations are now superseded by the production migration)
+
+**Output example:**
+
+```
+[db:generate] main: 20240315123045_add_user_bio (2 statements)
+  -> src/databases/migrations/20240315123045_add_user_bio.sql
+```
+
+**Migration file naming:**
+
+- Without name argument: `20240315123045.sql`
+- With name argument: `20240315123045_add_user_bio.sql`
+
+### `shoplayer-db status`
+
+Show the current migration status for all databases without making any changes.
+
+```bash
+shoplayer-db status
+shoplayer-db status --verbose
+```
+
+**Output example:**
+
+```
+Dev Epoch: m1a2b3c
+
+main
+  Production migrations: 3
+  Dev migrations: 2
+  Uncommitted changes: 1 statement(s)
+  Pending SQL:
+    ALTER TABLE users ADD COLUMN bio TEXT
+  Last push: 2024-03-15T10:30:00.000Z
+
+analytics
+  Production migrations: 1
+  Dev migrations: 0
+  Schema is up to date
+```
+
+Shows per-database: production migration count, dev migration count, whether there are uncommitted schema changes (pending SQL statements that haven't been pushed yet), and the last push timestamp.
+
+### `shoplayer-db reset`
+
+Reset dev state and (optionally) create fresh database instances.
+
+```bash
+shoplayer-db reset
+shoplayer-db reset --keep-epoch
+shoplayer-db reset --database main
+shoplayer-db reset --database main --keep-epoch
+```
+
+**Extra flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--keep-epoch` | Only clear dev migrations; keep the same DO instances |
+| `--database <db>` | Only reset this specific database |
+
+**Two modes:**
+
+| Mode | What happens |
+|------|-------------|
+| **Full reset** (default) | Bumps the epoch. All local DO instances start fresh on next access. Clears all dev migrations and snapshots. |
+| **Keep epoch** (`--keep-epoch`) | Only clears dev migrations and snapshots. Existing DO instances keep running with their current data. |
+
+**Output example:**
+
+```
+[db:reset] New epoch: m1a2b3c -> n4d5e6f
+[db:reset] main: reset
+[db:reset] analytics: reset
+```
+
+### `shoplayer-db validate`
+
+Dry-run all migrations against a local in-memory SQLite database to catch errors before deployment.
+
+```bash
+shoplayer-db validate
+shoplayer-db validate --database main
+shoplayer-db validate --no-dev
+shoplayer-db validate --verbose
+```
+
+**Extra flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--database <db>` | Only validate this specific database |
+| `--no-dev` | Skip dev migrations, only validate production migrations |
+
+**What it does:**
+
+1. Creates an in-memory SQLite database (requires `libsql` as a dev dependency)
+2. Applies all migrations sequentially (production + dev, unless `--no-dev`)
+3. Builds the expected schema separately from the Drizzle definition
+4. Compares the migrated schema against the expected schema to detect drift
+5. Reports SQL errors, foreign key violations, or schema mismatches
+
+**Output example (success):**
+
+```
+[db:validate] main: 5 migrations applied (3 prod, 2 dev)
+[db:validate] main: schema matches
+[db:validate] All validations passed
+```
+
+**Output example (failure):**
+
+```
+[db:validate] main: error in migration 20240315123045_bad
+  near "INVALID": syntax error
+[db:validate] Validation failed
+```
+
+**Requirements:** Requires `libsql` as a dev dependency:
+
+```bash
+pnpm add -D libsql
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| `0` | All validations passed |
+| `1` | Validation errors found |
 
 ### Programmatic API
 
-The CLI functions are also available for integration into other tools:
+All CLI functions are also available for integration into other tools:
 
-```typescript
+```ts
 import * as db from '@shoplayer/database/cli';
 
-// All functions default to process.cwd() for projectRoot
-const results = await db.push();
-const status = await db.status();
-const generated = await db.generate({}, { name: 'add_bio' });
-const resetResult = await db.reset();
+const pushResults = await db.push({ verbose: true });
+const statusResults = await db.status();
+const generateResults = await db.generate({}, { name: 'add_bio' });
+const resetResult = await db.reset({}, { keepEpoch: false });
+const validateResults = await db.validate({}, { includeDev: true });
 ```
 
-### Available Commands
+---
 
-#### `db:push` - Push schema changes to dev migrations
+## Migration System
 
-During development, this creates ephemeral migrations in `node_modules/.cache/@shoplayer/database/`. These don't pollute your git history while you're iterating on your schema.
+### Dev Migrations
 
-```typescript
-const results = await db.push({ verbose: true });
-for (const r of results) {
-  if (r.hasChanges) {
-    console.log(`✓ ${r.database}: ${r.statements.length} statements`);
+Dev migrations are ephemeral migration files used during development for fast iteration.
+
+- **Created by**: `shoplayer-db push` or the Vite plugin's `autoMigrations` feature
+- **Location**: `node_modules/.cache/@shoplayer/database/databases/<dbName>/migrations/`
+- **Naming**: Sequential -- `0001_dev.sql`, `0002_dev.sql`, etc.
+- **Lifecycle**: Cleared when you run `shoplayer-db generate` (consolidated into production) or `shoplayer-db reset`
+- **Never committed to git**
+
+The Vite plugin automatically loads dev migrations in dev mode and appends them after production migrations when generating the DO class.
+
+### Production Migrations
+
+Production migrations are the canonical migrations committed to your repository.
+
+- **Created by**: `shoplayer-db generate`
+- **Location**: Your configured `migrationsDir` (e.g. `src/databases/migrations/`)
+- **Naming**: Timestamp-based -- `20240315123045.sql` or `20240315123045_description.sql`
+- **Lifecycle**: Permanent, committed to git, deployed to production
+- **Snapshot**: Each `generate` also updates `_snapshot.json` in the migrations directory (tracks schema state with `id`/`prevId` chain)
+
+### Breakpoints
+
+Long migrations can be split into chunks using the `--> breakpoint` marker:
+
+```sql
+CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+
+--> breakpoint
+
+CREATE INDEX idx_users_name ON users(name);
+
+--> breakpoint
+
+CREATE TABLE posts (id TEXT PRIMARY KEY, author_id TEXT REFERENCES users(id));
+```
+
+Each chunk is tracked independently in the `__migrations` table. If a Durable Object restarts mid-migration, it resumes from the last completed chunk rather than re-running from the start.
+
+### Epoch System
+
+In development, each database instance key gets an epoch suffix to enable clean resets:
+
+| Environment | Instance key |
+|-------------|-------------|
+| Production | `example-shop.myshopify.com` |
+| Development | `example-shop.myshopify.com__dev_m1a2b3c` |
+
+When you run `shoplayer-db reset` (without `--keep-epoch`), a new epoch is generated. This causes all subsequent DO accesses to create fresh instances, effectively giving you a clean database without data from previous iterations.
+
+The epoch is a base36-encoded timestamp stored in `node_modules/.cache/@shoplayer/database/state.json`.
+
+### Dev State Structure
+
+```
+node_modules/.cache/@shoplayer/database/
+  state.json                          # Global state (epoch, per-db counters)
+  databases/
+    main/
+      _snapshot.json                  # Dev snapshot (schema state)
+      migrations/
+        0001_dev.sql
+        0002_dev.sql
+    analytics/
+      _snapshot.json
+      migrations/
+        0001_dev.sql
+```
+
+The `state.json` file tracks:
+
+```json
+{
+  "epoch": "m1a2b3c",
+  "databases": {
+    "main": {
+      "prodSnapshotHash": "abc123...",
+      "lastPush": "2024-03-15T10:30:00.000Z",
+      "devMigrationCount": 2
+    }
   }
 }
 ```
 
-#### `db:generate` - Generate production migrations
+### Typical Workflow
 
-When you're ready to commit your schema changes, this creates a proper migration file in your migrations directory.
+**During development:**
 
-```typescript
-const results = await db.generate({}, { name: 'add_user_bio' });
+```bash
+# 1. Edit your Drizzle schema
+# 2. Push changes to dev migrations
+shoplayer-db push
+
+# 3. Run the dev server -- migrations apply automatically on DO access
+pnpm dev
+
+# 4. Iterate: edit schema -> push -> refresh browser
+# 5. If you need a clean slate:
+shoplayer-db reset
 ```
 
-#### `db:status` - Check migration status
+**Ready to deploy:**
 
-Shows the current state of all databases - pending changes, dev migrations, etc.
+```bash
+# 1. Generate a production migration
+shoplayer-db generate add_user_profiles
 
-```typescript
-const status = await db.status();
-console.log(db.formatStatus(status));
+# 2. Validate before deploying
+shoplayer-db validate
+
+# 3. Commit the migration file and updated snapshot
+git add src/databases/migrations/
+git commit -m "Add user profiles migration"
+
+# 4. Deploy
 ```
 
-#### `db:reset` - Reset dev state
+**Team collaboration:**
 
-Bumps the epoch (changing all dev instance keys) and clears dev migrations. Useful when your local DB is in a broken state.
+When a teammate commits a production migration, `shoplayer-db push` automatically detects the snapshot hash change and resets your dev state for that database. Your next push rebuilds dev migrations cleanly on top of the new production baseline.
 
-```typescript
-const result = await db.reset();
-console.log(`New epoch: ${result.newEpoch}`);
+---
+
+## Vite Plugin
+
+```ts
+import { shoplayerDatabasePlugin } from '@shoplayer/database/vite';
+
+shoplayerDatabasePlugin({
+  contextImport: '@shoplayer/database/context',  // Import path for context module
+  registryImport: '@shoplayer/database/registry', // Import path for registry module
+  databasesDir: 'src/databases',                  // Where database files live
+  shopIdPath: 'session.shop',                     // Path to shop ID in context
+  autoMigrations: 'development',                  // Auto-run push in dev mode
+});
 ```
 
-### Dev Workflow
+### Plugin Options
 
-```
-1. Edit your Drizzle schema
-2. Vite dev server auto-runs `push` on schema change
-3. Dev migrations are stored in node_modules (not committed)
-4. Local DO instances use epoch-suffixed keys
-5. When ready, run `db:generate` to create prod migration
-6. Commit the migration file
-```
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `contextImport` | `string` | `'@shoplayer/database/context'` | Import path for the request context module |
+| `registryImport` | `string` | `'@shoplayer/database/registry'` | Import path for the action registry module |
+| `databasesDir` | `string` | `'src/databases'` | Directory containing database definitions |
+| `shopIdPath` | `string` | `'session.shop'` | Property path to the shop ID in the request context |
+| `autoMigrations` | `boolean \| 'development'` | `'development'` | Auto-push schema changes on dev server start |
 
-### Instance Key Suffixing
+### What the plugin does
 
-In development, database instance keys are automatically suffixed with a dev epoch. This allows you to "reset" your local database by bumping the epoch - the next request will use a fresh DO instance.
+1. **Discovery**: Finds all `defineDatabase()` files in your databases directory (excludes `schema.ts`, `_*.ts`, `.d.ts`)
+2. **AST Parsing**: Uses Babel to extract database config and action definitions (no regexes)
+3. **Migration Loading**: Loads production migrations from disk; in dev mode also loads dev migrations from cache
+4. **Code Generation**: Produces a virtual module (`virtual:shoplayer/databases/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods
+5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker
+6. **Wrangler Patching**: Automatically updates `wrangler.jsonc` with Durable Object bindings and SQLite migration entries
+7. **HMR**: Watches database files and invalidates the virtual module on change
 
-```typescript
-import { getInstanceKey } from '@shoplayer/database/context';
+### Generated Class Naming
 
-// In production: "my-shop.myshopify.com"
-// In development: "my-shop.myshopify.com__dev_abc123"
-const key = getInstanceKey('my-shop.myshopify.com');
-```
+For each `defineDatabase()` call, the plugin generates a class based on the filename:
 
-### Integration with shoplayer CLI
+| Filename | Class Name | Binding Name |
+|----------|-----------|-------------|
+| `main.ts` | `MainDatabaseDO` | `MAIN_DATABASE_DO` |
+| `analytics.ts` | `AnalyticsDatabaseDO` | `ANALYTICS_DATABASE_DO` |
+| `user-data.ts` | `UserDataDatabaseDO` | `USER_DATA_DATABASE_DO` |
 
-The CLI functions are designed to be easily wired up by higher-level CLIs:
+Export the generated class from your worker entry point:
 
-```typescript
-// In shoplayer CLI
-import { program } from 'commander';
-import * as db from '@shoplayer/database/cli';
-
-program
-  .command('db:push')
-  .action(async () => {
-    const results = await db.push({ verbose: true });
-    // Format and display results
-  });
-
-program
-  .command('db:generate [name]')
-  .action(async (name) => {
-    const results = await db.generate({}, { name });
-    // Format and display results
-  });
-
-program
-  .command('db:status')
-  .action(async () => {
-    const status = await db.status();
-    console.log(db.formatStatus(status));
-  });
-
-program
-  .command('db:reset')
-  .option('--keep-epoch', 'Only clear dev migrations')
-  .action(async (options) => {
-    const result = await db.reset({}, { keepEpoch: options.keepEpoch });
-    console.log(`Reset complete. New epoch: ${result.newEpoch ?? 'unchanged'}`);
-  });
+```ts
+export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
 ```
 
-## How It Works
+### Action Transformation
 
-1. **Vite plugin discovers** database files in `src/databases/`
-2. **Extracts actions** using Babel AST parsing (no regexes!)
-3. **Loads schema** and generates migrations if schema changed
-4. **Resolves action calls** - detects when actions call other actions
-5. **Generates Durable Object classes** with action methods and embedded migrations
-6. **Transforms internal calls** - `getUser()` becomes `this.getUser()`
-7. **Transforms cross-DB calls** - `logEvent()` becomes RPC via `ctx.env`
-8. **Generates RPC stubs** that use AsyncLocalStorage for context
-9. **Patches wrangler.jsonc** with DO bindings automatically
+The plugin transforms each `action()` definition into two things:
 
-When you call an action from your worker:
-1. The RPC stub gets context from AsyncLocalStorage
-2. Creates a DO stub using `idFromName(shopId)` (or `'global'`)
-3. Calls the action method via Cloudflare's RPC, passing `instanceKey`
-4. The DO validates args with ArkType
-5. Executes the Kysely query against SQLite
-6. For cross-DB calls, the `instanceKey` is used to address the target DO
-7. Returns the result
+1. **A registry registration** (handler + ArkType validator) -- runs inside the DO
+2. **An RPC stub function** (exported under the same name) -- runs in your worker
+
+The stub function:
+- Validates args with ArkType
+- Checks if we're already inside the same DO (via AsyncLocalStorage) for a fast direct-call path
+- Otherwise, resolves the DO instance via `env.BINDING.idFromName(instanceKey)` and calls `stub.rpc()`
+
+---
+
+## Outerbase Studio Integration
+
+[Outerbase Studio](https://github.com/outerbase/browsable-durable-object) provides a SQL endpoint for inspecting SQLite tables inside Durable Objects during development.
+
+### Configuration
+
+Add `browsable` to your `defineDatabase()` config:
+
+```ts
+export const { action } = defineDatabase({
+  migrationsDir: './migrations',
+  schema: { users, posts },
+  browsable: 'development', // Enable in dev mode only
+});
+```
+
+### Options
+
+| Value | Behavior |
+|-------|----------|
+| `false` | Disabled (default) |
+| `true` | Always enabled (dev and production) |
+| `'development'` | Enabled only when running `vite dev` / `vite serve` |
+
+### How it works
+
+When `browsable` is enabled, the Vite plugin generates a `browsable = true` property on the Durable Object class. The `SqliteDurableObject` base class checks this flag in its `fetch()` method and delegates matching requests to Outerbase's `BrowsableHandler` before falling back to the default response.
+
+The `'development'` value is resolved at build time: the Vite plugin checks `config.command === 'serve'` and only emits the property when running in dev mode.
+
+### Querying a Durable Object
+
+Send a POST request to the DO's `/query/raw` endpoint:
+
+```bash
+curl -X POST http://your-do-endpoint/query/raw \
+  -H 'Content-Type: application/json' \
+  -d '{"sql": "SELECT * FROM users LIMIT 10"}'
+```
+
+Response:
+
+```json
+{
+  "result": [{
+    "columns": ["id", "name", "email"],
+    "rows": [["abc123", "Alice", "alice@example.com"]],
+    "meta": { "rows_read": 1, "rows_written": 0 }
+  }]
+}
+```
+
+Transactions are also supported:
+
+```json
+{
+  "transaction": [
+    { "sql": "INSERT INTO users (id, name) VALUES ('1', 'Alice')" },
+    { "sql": "INSERT INTO users (id, name) VALUES ('2', 'Bob')" }
+  ]
+}
+```
+
+### Security
+
+The browsable endpoint has **no built-in authentication**. For production use (`browsable: true`), add your own authentication middleware or restrict access at the network level.
+
+Using `browsable: 'development'` is recommended -- it enables the endpoint only during local development and excludes it from production builds entirely.
+
+---
+
+## Instance Strategies
+
+### `per-shop` (default)
+
+Each shop gets its own Durable Object instance, keyed by the shop identifier from the request context.
+
+```ts
+defineDatabase({
+  schema: { users },
+  migrationsDir: './migrations',
+  instance: 'per-shop',
+});
+```
+
+The shop ID is extracted from the request context using the path configured in the Vite plugin's `shopIdPath` option (default: `session.shop`).
+
+### `global`
+
+A single shared Durable Object instance for all requests, keyed by the string `'global'`.
+
+```ts
+defineDatabase({
+  schema: { settings },
+  migrationsDir: './migrations',
+  instance: 'global',
+});
+```
+
+---
+
+## Action-to-Action Calls
+
+Actions can call other actions. The Vite plugin detects these calls at build time and routes them correctly.
+
+```ts
+// actions/createUser.ts
+import { action } from '../main';
+import { getUserByEmail } from './getUserByEmail';
+
+export const createUser = action({
+  args: { name: 'string', email: 'string.email' },
+  handler: async (db, args) => {
+    // This calls another action in the same database
+    const existing = await getUserByEmail({ email: args.email });
+    if (existing) throw new Error('User already exists');
+
+    return db.insertInto('users').values({
+      id: crypto.randomUUID(),
+      name: args.name,
+      email: args.email,
+      created_at: new Date(),
+    }).returningAll().executeTakeFirstOrThrow();
+  },
+});
+```
+
+### Routing behavior
+
+- **Same database**: The call uses a direct fast path via AsyncLocalStorage (no RPC overhead). The registry detects that we're already inside the target DO and calls the handler directly.
+- **Cross database**: The call routes through RPC to the other database's Durable Object, using the appropriate instance key based on the target database's strategy.
+
+---
+
+## PITR Safety
+
+On Cloudflare with Point-in-Time Recovery (PITR) enabled, migrations are protected with automatic snapshots.
+
+### How it works
+
+1. Before running migrations, the DO increments a retry counter and takes a PITR bookmark
+2. Migrations are applied (this is the second write, after the counter increment)
+3. On success: the retry counter is reset to 0
+4. On failure: the DO schedules a restore to the pre-migration bookmark and aborts
+5. On next access, the DO restarts with the counter already incremented (the counter write was before the bookmark)
+6. After 3 consecutive failures, PITR restore is skipped and the error propagates so the developer can fix the migration and redeploy
+
+This prevents broken migrations from permanently corrupting data while giving developers a clear signal to fix the issue.
+
+### Diagnostic methods
+
+The `SqliteDurableObject` base class provides methods for inspecting migration state:
+
+- `getMigrationAttempts()` -- Returns `{ attemptCount, lastAttemptAt, lastError }`
+- `getMigrationBookmark()` -- Returns the current PITR bookmark string, or `null` if PITR is unavailable
+- `restoreToBookmark(bookmark)` -- Manually trigger a PITR restore
+
+---
+
+## Architecture
+
+### Module Map
+
+| Export path | Source | Purpose |
+|---|---|---|
+| `./db` | `src/db/` | `defineDatabase()`, `SqliteDurableObject`, Kysely plugins |
+| `./vite` | `src/vite/databasePlugin.ts` | Vite plugin (`shoplayerDatabasePlugin`) |
+| `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
+| `./context` | `src/context/` | AsyncLocalStorage-based request context (`runWithContext`, `getContext`) |
+| `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
+| `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callActionInValidated`) |
+| `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `shoplayer-db` binary |
+
+### Request Flow
+
+```
+Worker fetch()
+  -> runWithContext({ env, request, session })
+    -> createUser({ name, email })              // Looks like a normal function call
+      -> ArkType validates args
+      -> Check AsyncLocalStorage for DO-local short path
+      -> If same DO: direct handler call (no RPC)
+      -> If cross-DO: env.BINDING.idFromName(instanceKey) -> stub.rpc()
+        -> DO.rpc(method, args, rpcContext)
+          -> ensureMigrations()                 // Run pending migrations if any
+          -> getAction(dbName, method)           // Look up handler in registry
+          -> Validate args with ArkType
+          -> runWithDoContext(...)               // Set up AsyncLocalStorage
+            -> handler(db, validatedArgs, ctx)  // Your action code runs here
+```
+
+### Kysely Plugins
+
+The library includes plugins for transparent data mapping between JavaScript and SQLite:
+
+- **CamelCasePlugin**: Converts `camelCase` JS property names to `snake_case` SQL column names and back
+- **SchemaPlugin**: Schema-aware version of CamelCasePlugin that uses Drizzle metadata for precise column mapping (handles non-standard mappings)
+- **DateSerializePlugin**: Converts `Date` objects to ISO strings (`YYYY-MM-DD HH:MM:SS`) for SQLite storage, and parses them back on read
+
+---
+
+## Development
+
+```bash
+pnpm install      # Install dependencies
+pnpm build        # Build with tsdown -> dist/
+pnpm dev          # Build in watch mode
+pnpm test         # Run vitest in watch mode
+pnpm test:run     # Run tests once
+```
+
+Run a single test file:
+
+```bash
+npx vitest run tests/db/defineDatabase.test.ts
+```
+
+Run the example app:
+
+```bash
+cd example && pnpm dev
+```
+
+### Project Structure
+
+```
+src/
+  cli/              # CLI commands and state management
+    bin.ts          # Binary entry point (commander)
+    push.ts         # Push command implementation
+    generate.ts     # Generate command implementation
+    status.ts       # Status command implementation
+    reset.ts        # Reset command implementation
+    validate.ts     # Validate command implementation
+    state.ts        # Dev state persistence (epoch, snapshots, counters)
+  context/          # AsyncLocalStorage-based request context
+  db/               # Core database abstractions
+    SqliteDurableObject.ts   # Base DO class with migrations + browsable
+    defineDatabase.ts        # defineDatabase() API
+    plugins.ts               # Kysely plugins (CamelCase, Date, Schema)
+    types.ts                 # TypeScript type definitions
+  migrations/       # Snapshot-based migration generation
+    snapshot.ts     # Drizzle schema -> snapshot diffing
+    generator.ts    # Migration file reading/writing
+  registry.ts       # Action registration and RPC dispatch
+  vite/
+    databasePlugin.ts        # Vite plugin entry
+    modules/
+      discovery.ts           # Database file discovery
+      parser.ts              # Babel AST parsing
+      generator.ts           # DO class and stub code generation
+      wrangler.ts            # wrangler.jsonc auto-patching
+tests/              # Mirrors src/ structure
+example/            # Example Cloudflare Worker app
+```

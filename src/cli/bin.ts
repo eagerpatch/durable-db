@@ -6,6 +6,7 @@ import {
   reset,
   status,
   formatStatus,
+  validate,
 } from './index.js';
 
 const program = new Command();
@@ -148,6 +149,63 @@ program
         console.log(`✓ Reset databases: ${result.databases.join(', ')}`);
       } else {
         console.log(`· No databases to reset`);
+      }
+    } catch (error) {
+      console.error('Error:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('validate')
+  .description('Dry-run migrations against local SQLite to catch errors before deployment')
+  .option('--database <db>', 'Only validate this database')
+  .option('--no-dev', 'Skip dev migrations, only validate production')
+  .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+  .option('-v, --verbose', 'Show each migration as it is applied')
+  .action(async (options) => {
+    try {
+      const results = await validate({
+        databasesDir: options.databasesDir,
+        verbose: options.verbose,
+        noDev: !options.dev,
+        database: options.database,
+      });
+
+      if (results.length === 0) {
+        console.log('No databases found.');
+        return;
+      }
+
+      let allValid = true;
+      for (const r of results) {
+        const status = r.migrationsValid ? '✓' : '✗';
+        const devNote = r.includesDevMigrations ? ' (includes dev migrations)' : '';
+        console.log(`${status} ${r.database}: ${r.migrationCount} migration(s)${devNote}`);
+
+        if (!r.migrationsValid) {
+          allValid = false;
+          for (const err of r.errors) {
+            console.error(`  ✗ ${err.migration}[${err.chunk}]: ${err.error}`);
+            if (options.verbose) {
+              console.error(`    Statement: ${err.statement}`);
+            }
+          }
+        }
+
+        if (!r.schemaMatches) {
+          allValid = false;
+          console.warn(`  ⚠ Schema drift detected:`);
+          for (const diff of r.schemaDiffs) {
+            console.warn(`    ${diff}`);
+          }
+        } else if (r.migrationsValid) {
+          console.log(`  Schema matches ✓`);
+        }
+      }
+
+      if (!allValid) {
+        process.exit(1);
       }
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);

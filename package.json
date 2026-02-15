@@ -46,6 +46,7 @@
     "@babel/parser": "^7.0.0",
     "@babel/traverse": "^7.0.0",
     "@babel/types": "^7.0.0",
+    "@outerbase/browsable-durable-object": "^0.1.0",
     "arktype": "^2.1.28",
     "commander": "^13.1.0",
     "drizzle-kit": "^0.30.0",
@@ -53,6 +54,9 @@
     "esbuild": "^0.27.1",
     "kysely": "^0.27.0",
     "magic-string": "^0.30.21"
+  },
+  "optionalDependencies": {
+    "libsql": "^0.5.0"
   },
   "peerDependencies": {
     "vite": "^5.0.0 || ^6.0.0"
@@ -68,6 +72,7 @@
     "@types/node": "^22.0.0",
     "drizzle-kit": "^0.30.0",
     "esbuild": "^0.27.1",
+    "libsql": "^0.5.0",
     "tsdown": "^0.17.2",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",

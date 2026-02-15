@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { BrowsableHandler } from '@outerbase/browsable-durable-object';
 import {
   Kysely,
   SqliteDialect,
@@ -192,6 +193,20 @@ export function createKyselyFromSql<T>(
 }
 
 /**
+ * Maximum number of PITR restore attempts before giving up
+ */
+const MAX_PITR_ATTEMPTS = 3;
+
+/**
+ * Migration attempt info returned by getMigrationAttempts()
+ */
+export interface MigrationAttemptInfo {
+  attemptCount: number;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+}
+
+/**
  * Base class for SQLite Durable Objects with migration support
  *
  * Extend this class and set the `migrations` property to define your schema.
@@ -199,6 +214,12 @@ export function createKyselyFromSql<T>(
  *
  * Migrations are SQL-based with breakpoint support for long-running migrations.
  * Breakpoints allow migrations to be resumed if the DO restarts mid-migration.
+ *
+ * When running on Cloudflare with PITR (Point-in-Time Recovery) support,
+ * migrations are protected with automatic snapshots. If a migration fails,
+ * the DO is restored to the pre-migration state and retried on next access.
+ * After {@link MAX_PITR_ATTEMPTS} consecutive failures, PITR is skipped and
+ * the error propagates so the developer can fix the migration and redeploy.
  *
  * @example
  * ```ts
@@ -224,6 +245,9 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   abstract migrations: Migrations;
 
+  /** Whether this DO exposes a browsable SQL endpoint. Override in subclass. */
+  browsable: boolean = false;
+
   /**
    * The Kysely database instance - available after migrations run
    */
@@ -239,10 +263,35 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   private migrationsApplied = false;
 
+  /**
+   * Cached result of PITR availability check (null = not yet checked)
+   */
+  private pitrAvailable: boolean | null = null;
+
+  /**
+   * Lazy-initialized BrowsableHandler for Outerbase Studio integration
+   */
+  private browsableHandler: BrowsableHandler | null = null;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.db = createKyselyFromSql(this.sql);
+  }
+
+  /**
+   * Check if PITR is available on this DO's storage.
+   * Result is cached after the first call.
+   */
+  private async checkPitrAvailable(): Promise<boolean> {
+    if (this.pitrAvailable !== null) return this.pitrAvailable;
+    try {
+      await this.ctx.storage.getCurrentBookmark();
+      this.pitrAvailable = true;
+    } catch {
+      this.pitrAvailable = false;
+    }
+    return this.pitrAvailable;
   }
 
   /**
@@ -266,11 +315,17 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Run pending migrations
+   * Run pending migrations with PITR safety.
+   *
+   * Two-write strategy for retry guard:
+   * 1. WRITE 1: Increment retry counter in __migration_attempts
+   * 2. Take PITR bookmark (captures state including the counter)
+   * 3. WRITE 2: Apply the actual migrations
+   * On failure → restore to bookmark → counter value survives
+   * After MAX_PITR_ATTEMPTS, stop restoring and let the error propagate
    */
   private async runMigrations(): Promise<void> {
-    // Create migrations tracking table if it doesn't exist
-    // Tracks both the migration name and the chunk index for resumability
+    // Create tracking tables
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS __migrations (
         name TEXT NOT NULL,
@@ -280,10 +335,107 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       )
     `);
 
-    // Get already applied migrations and their chunks
-    const applied = this.sql.exec('SELECT name, chunk_index FROM __migrations').toArray() as Array<{ name: string; chunk_index: number }>;
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS __migration_attempts (
+        id TEXT PRIMARY KEY DEFAULT 'current',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        last_error TEXT
+      )
+    `);
 
-    // Build a map of migration -> set of applied chunk indices
+    // Ensure the attempts row exists
+    this.sql.exec(`
+      INSERT OR IGNORE INTO __migration_attempts (id, attempt_count) VALUES ('current', 0)
+    `);
+
+    // Collect pending migrations
+    const pending = this.collectPendingMigrations();
+    if (pending.length === 0) {
+      return; // Nothing to do
+    }
+
+    const hasPitr = await this.checkPitrAvailable();
+
+    let bookmark: string | undefined;
+
+    if (hasPitr) {
+      // WRITE 1: Increment the attempt counter BEFORE taking the bookmark
+      this.sql.exec(`
+        UPDATE __migration_attempts
+        SET attempt_count = attempt_count + 1,
+            last_attempt_at = ?
+        WHERE id = 'current'
+      `, new Date().toISOString());
+
+      // Check the attempt count
+      const rows = this.sql.exec(
+        'SELECT attempt_count FROM __migration_attempts WHERE id = ?', 'current'
+      ).toArray() as Array<{ attempt_count: number }>;
+      const attemptCount = rows[0]?.attempt_count ?? 0;
+
+      if (attemptCount > MAX_PITR_ATTEMPTS) {
+        // Too many retries — skip PITR, let error propagate naturally
+        console.error(
+          `[database] Migration has failed ${attemptCount} times. ` +
+          `PITR restore disabled — fix the migration and redeploy.`
+        );
+      } else {
+        // Take bookmark AFTER the counter write (so counter survives restore)
+        bookmark = await this.ctx.storage.getCurrentBookmark();
+        console.log(
+          `[database] PITR bookmark taken (attempt ${attemptCount}/${MAX_PITR_ATTEMPTS})`
+        );
+      }
+    }
+
+    // WRITE 2: Apply migrations
+    try {
+      this.applyMigrations(pending);
+
+      // Success — reset the attempt counter
+      this.sql.exec(`
+        UPDATE __migration_attempts
+        SET attempt_count = 0, last_error = NULL
+        WHERE id = 'current'
+      `);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      if (bookmark) {
+        // Record the error before restoring
+        this.sql.exec(`
+          UPDATE __migration_attempts SET last_error = ? WHERE id = 'current'
+        `, errorMessage);
+
+        console.error(
+          `[database] Migration failed, restoring to pre-migration bookmark.`,
+          error
+        );
+
+        // Schedule restore and abort — the DO will restart with the counter
+        // already incremented (since we wrote it before the bookmark)
+        await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
+        this.ctx.abort('Restoring to pre-migration bookmark');
+      }
+
+      // No PITR available or attempts exhausted — propagate error
+      throw error;
+    }
+  }
+
+  /**
+   * Collect pending migration chunks that haven't been applied yet.
+   */
+  private collectPendingMigrations(): Array<{
+    name: string;
+    chunkIndex: number;
+    statements: string[];
+  }> {
+    const applied = this.sql.exec(
+      'SELECT name, chunk_index FROM __migrations'
+    ).toArray() as Array<{ name: string; chunk_index: number }>;
+
     const appliedMap = new Map<string, Set<number>>();
     for (const row of applied) {
       if (!appliedMap.has(row.name)) {
@@ -292,53 +444,114 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       appliedMap.get(row.name)!.add(row.chunk_index);
     }
 
-    // Get pending migrations (sorted by name - should be timestamp-prefixed)
+    const pending: Array<{ name: string; chunkIndex: number; statements: string[] }> = [];
     const migrationNames = Object.keys(this.migrations).sort();
 
-    // Apply each migration
     for (const name of migrationNames) {
       const migration = this.migrations[name];
       const appliedChunks = appliedMap.get(name) ?? new Set<number>();
 
-      // Apply each chunk that hasn't been applied yet
       for (let chunkIndex = 0; chunkIndex < migration.chunks.length; chunkIndex++) {
-        if (appliedChunks.has(chunkIndex)) {
-          continue; // Already applied
+        if (!appliedChunks.has(chunkIndex)) {
+          pending.push({ name, chunkIndex, statements: migration.chunks[chunkIndex] });
         }
+      }
+    }
 
-        const chunk = migration.chunks[chunkIndex];
+    return pending;
+  }
 
-        try {
-          // Execute each statement in the chunk
-          for (const statement of chunk) {
-            if (statement.trim()) {
-              this.sql.exec(statement);
-            }
+  /**
+   * Apply a list of pending migration chunks.
+   */
+  private applyMigrations(
+    pending: Array<{ name: string; chunkIndex: number; statements: string[] }>
+  ): void {
+    for (const { name, chunkIndex, statements } of pending) {
+      try {
+        for (const statement of statements) {
+          if (statement.trim()) {
+            this.sql.exec(statement);
           }
-
-          // Record successful chunk application
-          this.sql.exec(
-            'INSERT INTO __migrations (name, chunk_index, applied_at) VALUES (?, ?, ?)',
-            name,
-            chunkIndex,
-            new Date().toISOString()
-          );
-
-          console.log(`[database] Migration chunk applied: ${name}[${chunkIndex}]`);
-        } catch (error) {
-          console.error(`[database] Migration chunk failed: ${name}[${chunkIndex}]`, error);
-          // Forward-only: no rollback, just fail
-          throw error;
         }
+
+        this.sql.exec(
+          'INSERT INTO __migrations (name, chunk_index, applied_at) VALUES (?, ?, ?)',
+          name,
+          chunkIndex,
+          new Date().toISOString()
+        );
+
+        console.log(`[database] Migration chunk applied: ${name}[${chunkIndex}]`);
+      } catch (error) {
+        console.error(`[database] Migration chunk failed: ${name}[${chunkIndex}]`, error);
+        throw error;
       }
     }
   }
 
   /**
-   * Override fetch to ensure migrations run before any request
+   * Manually restore the DO to a specific PITR bookmark.
+   * The DO will restart on next access with the restored state.
+   */
+  async restoreToBookmark(bookmark: string): Promise<void> {
+    await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
+    this.ctx.abort('Restoring to pre-migration bookmark');
+  }
+
+  /**
+   * Get the current PITR bookmark for diagnostic purposes.
+   * Returns null if PITR is not available.
+   */
+  async getMigrationBookmark(): Promise<string | null> {
+    const hasPitr = await this.checkPitrAvailable();
+    if (!hasPitr) return null;
+    return this.ctx.storage.getCurrentBookmark();
+  }
+
+  /**
+   * Get migration attempt diagnostics.
+   * Returns the current retry counter and last error info.
+   */
+  getMigrationAttempts(): MigrationAttemptInfo {
+    try {
+      const rows = this.sql.exec(
+        'SELECT attempt_count, last_attempt_at, last_error FROM __migration_attempts WHERE id = ?',
+        'current'
+      ).toArray() as Array<{ attempt_count: number; last_attempt_at: string | null; last_error: string | null }>;
+
+      if (rows.length === 0) {
+        return { attemptCount: 0, lastAttemptAt: null, lastError: null };
+      }
+
+      return {
+        attemptCount: rows[0].attempt_count,
+        lastAttemptAt: rows[0].last_attempt_at,
+        lastError: rows[0].last_error,
+      };
+    } catch {
+      // Table doesn't exist yet (no migrations have run)
+      return { attemptCount: 0, lastAttemptAt: null, lastError: null };
+    }
+  }
+
+  /**
+   * Override fetch to ensure migrations run before any request.
+   * When browsable is enabled, delegates to BrowsableHandler for SQL endpoints.
    */
   async fetch(request: Request): Promise<Response> {
     await this.ensureMigrations();
+
+    if (this.browsable) {
+      if (!this.browsableHandler) {
+        this.browsableHandler = new BrowsableHandler(this.sql);
+      }
+      const response = await this.browsableHandler.fetch(request);
+      if (response.status !== 404) {
+        return response;
+      }
+    }
+
     return new Response('OK');
   }
 }

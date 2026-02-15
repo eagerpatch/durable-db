@@ -21,6 +21,11 @@ export interface DatabaseConfig<
   schema: TSchema;
   /** Instance strategy - 'per-shop' (default) or 'global' */
   instance?: 'per-shop' | 'global';
+  /** Enable Outerbase Studio browsable SQL endpoint on this DO.
+   *  - true: always enabled
+   *  - false: always disabled (default)
+   *  - 'development': enabled only in dev mode */
+  browsable?: boolean | 'development';
 }
 
 /**
@@ -129,6 +134,8 @@ export interface DatabaseInfo {
   schemaImport: string | null;
   /** Names of schema tables */
   schemaTableNames: string[];
+  /** Whether the DO should expose a browsable SQL endpoint */
+  browsable: boolean | 'development';
   /** Loaded migrations - Map of name -> chunks (each chunk is array of SQL statements) */
   migrations?: Map<string, string[][]>;
 }

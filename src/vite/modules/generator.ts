@@ -143,7 +143,8 @@ function generateWithMap(ast: t.File, sourceFileName?: string) {
 
 export function generateDurableObjectsModule(
   databases: DatabaseInfo[],
-  registryImport: string
+  registryImport: string,
+  isDev: boolean = false
 ): string {
   const bindingNamesExpr = buildBindingNamesObject(databases);
 
@@ -153,7 +154,7 @@ export function generateDurableObjectsModule(
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
   ];
 
-  const classes = databases.map((db) => buildDurableObjectClass(db, bindingNamesExpr));
+  const classes = databases.map((db) => buildDurableObjectClass(db, bindingNamesExpr, isDev));
 
   const program = t.program([...imports, ...classes]);
   return generateCode(t.file(program));
@@ -161,7 +162,8 @@ export function generateDurableObjectsModule(
 
 function buildDurableObjectClass(
   db: DatabaseInfo,
-  bindingNamesExpr: t.ObjectExpression
+  bindingNamesExpr: t.ObjectExpression,
+  isDev: boolean
 ): t.ExportNamedDeclaration {
   // migrations = { ... }
   const migrationsProperty = t.classProperty(
@@ -172,10 +174,20 @@ function buildDurableObjectClass(
   // async rpc(method, args, rpcContext) { ... }
   const rpcMethod = buildRpcMethod(db, bindingNamesExpr);
 
+  const classBodyMembers: (t.ClassProperty | t.ClassMethod)[] = [migrationsProperty, rpcMethod];
+
+  // Resolve browsable: 'development' → true/false at build time
+  const isBrowsable = db.browsable === true || (db.browsable === 'development' && isDev);
+  if (isBrowsable) {
+    classBodyMembers.push(
+      t.classProperty(t.identifier('browsable'), t.booleanLiteral(true))
+    );
+  }
+
   const classDecl = t.classDeclaration(
     t.identifier(db.className),
     t.identifier('SqliteDurableObject'),
-    t.classBody([migrationsProperty, rpcMethod])
+    t.classBody(classBodyMembers)
   );
 
   return t.exportNamedDeclaration(classDecl);

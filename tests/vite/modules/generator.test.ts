@@ -16,6 +16,7 @@ const mockDatabase: DatabaseInfo = {
   className: 'MainDatabaseDO',
   bindingName: 'MAIN_DATABASE_DO',
   instance: 'per-shop',
+  browsable: false,
   migrationsDir: './migrations',
   schemaImport: './schema',
   schemaTableNames: ['users'],
@@ -137,6 +138,30 @@ describe('generateDurableObjectsModule', () => {
     // Check that both bindings are present (format may vary)
     expect(code).toMatch(/["']main["']\s*:\s*["']MAIN_DATABASE_DO["']/);
     expect(code).toMatch(/["']analytics["']\s*:\s*["']ANALYTICS_DO["']/);
+  });
+
+  it('generates browsable = true when browsable is true', () => {
+    const db: DatabaseInfo = { ...mockDatabase, browsable: true };
+    const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', false);
+    expect(code).toContain('browsable = true');
+  });
+
+  it('generates browsable = true when browsable is "development" and isDev', () => {
+    const db: DatabaseInfo = { ...mockDatabase, browsable: 'development' };
+    const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', true);
+    expect(code).toContain('browsable = true');
+  });
+
+  it('does not generate browsable when browsable is "development" and not isDev', () => {
+    const db: DatabaseInfo = { ...mockDatabase, browsable: 'development' };
+    const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', false);
+    expect(code).not.toContain('browsable');
+  });
+
+  it('does not generate browsable when browsable is false', () => {
+    const db: DatabaseInfo = { ...mockDatabase, browsable: false };
+    const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', true);
+    expect(code).not.toContain('browsable');
   });
 
   it('includes migrations when provided', () => {

@@ -1,6 +1,6 @@
 export { defineDatabase } from './defineDatabase';
 export { SqliteDurableObject, createKyselyFromSql } from './SqliteDurableObject';
-export type { Migration, Migrations, CreateKyselyOptions, SqlExecutor } from './SqliteDurableObject';
+export type { Migration, Migrations, CreateKyselyOptions, SqlExecutor, MigrationAttemptInfo } from './SqliteDurableObject';
 
 // Plugins
 export {

@@ -72,3 +72,11 @@ export {
   status,
   formatStatus,
 } from './status';
+
+// Validate command
+export {
+  type ValidateContext,
+  type ValidateError,
+  type ValidateResult,
+  validate,
+} from './validate';

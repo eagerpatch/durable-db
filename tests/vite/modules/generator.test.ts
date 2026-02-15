@@ -140,28 +140,34 @@ describe('generateDurableObjectsModule', () => {
     expect(code).toMatch(/["']analytics["']\s*:\s*["']ANALYTICS_DO["']/);
   });
 
-  it('generates browsable = true when browsable is true', () => {
+  it('wraps class with Browsable() when browsable is true', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: true };
     const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', false);
-    expect(code).toContain('browsable = true');
+    expect(code).toContain('Browsable');
+    expect(code).toContain('_MainDatabaseDO_Base');
+    // Should have migration guard overrides for fetch and __studio
+    expect(code).toContain('ensureMigrations');
+    expect(code).toContain('__studio');
   });
 
-  it('generates browsable = true when browsable is "development" and isDev', () => {
+  it('wraps class with Browsable() when browsable is "development" and isDev', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: 'development' };
     const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', true);
-    expect(code).toContain('browsable = true');
+    expect(code).toContain('Browsable');
+    expect(code).toContain('_MainDatabaseDO_Base');
   });
 
-  it('does not generate browsable when browsable is "development" and not isDev', () => {
+  it('does not use Browsable() when browsable is "development" and not isDev', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: 'development' };
     const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', false);
-    expect(code).not.toContain('browsable');
+    expect(code).not.toContain('Browsable');
+    expect(code).not.toContain('_MainDatabaseDO_Base');
   });
 
-  it('does not generate browsable when browsable is false', () => {
+  it('does not use Browsable() when browsable is false', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: false };
     const code = generateDurableObjectsModule([db], '@shoplayer/database/registry', true);
-    expect(code).not.toContain('browsable');
+    expect(code).not.toContain('Browsable');
   });
 
   it('includes migrations when provided', () => {

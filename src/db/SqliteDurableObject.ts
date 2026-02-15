@@ -1,5 +1,4 @@
 import { DurableObject } from 'cloudflare:workers';
-import { BrowsableHandler } from '@outerbase/browsable-durable-object';
 import {
   Kysely,
   SqliteDialect,
@@ -245,9 +244,6 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   abstract migrations: Migrations;
 
-  /** Whether this DO exposes a browsable SQL endpoint. Override in subclass. */
-  browsable: boolean = false;
-
   /**
    * The Kysely database instance - available after migrations run
    */
@@ -267,11 +263,6 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    * Cached result of PITR availability check (null = not yet checked)
    */
   private pitrAvailable: boolean | null = null;
-
-  /**
-   * Lazy-initialized BrowsableHandler for Outerbase Studio integration
-   */
-  private browsableHandler: BrowsableHandler | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -536,70 +527,13 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Execute a query and return results in Outerbase Studio format.
-   */
-  private executeStudioQuery(sql: string) {
-    const cursor = this.sql.exec(sql);
-    const columnSet = new Set<string>();
-    const headers = cursor.columnNames.map((colName) => {
-      let name = colName;
-      for (let i = 0; i < 20; i++) {
-        if (!columnSet.has(name)) break;
-        name = '__' + colName + '_' + i;
-      }
-      columnSet.add(name);
-      return { name, displayName: colName, originalType: 'text' as const, type: undefined };
-    });
-    return {
-      headers,
-      rows: Array.from(cursor.raw()).map((r: unknown[]) =>
-        headers.reduce<Record<string, unknown>>((obj, h, idx) => {
-          obj[h.name] = r[idx];
-          return obj;
-        }, {})
-      ),
-      stat: {
-        queryDurationMs: 0,
-        rowsAffected: 0,
-        rowsRead: cursor.rowsRead,
-        rowsWritten: cursor.rowsWritten,
-      },
-    };
-  }
-
-  /**
-   * RPC method for Outerbase Studio integration.
-   * Called by the studio() function from the worker to execute queries.
-   */
-  async __studio(cmd: { type: string; statement?: string; statements?: string[] }) {
-    await this.ensureMigrations();
-
-    if (cmd.type === 'query' && cmd.statement) {
-      return this.executeStudioQuery(cmd.statement);
-    } else if (cmd.type === 'transaction' && cmd.statements) {
-      return this.ctx.storage.transactionSync(() => {
-        return cmd.statements!.map((s) => this.executeStudioQuery(s));
-      });
-    }
-  }
-
-  /**
    * Override fetch to ensure migrations run before any request.
-   * When browsable is enabled, delegates to BrowsableHandler for SQL endpoints.
+   * Subclasses (e.g. Browsable-wrapped DOs) should call ensureMigrations()
+   * before delegating to super.fetch().
    */
   async fetch(request: Request): Promise<Response> {
     await this.ensureMigrations();
-
-    if (this.browsable) {
-      if (!this.browsableHandler) {
-        this.browsableHandler = new BrowsableHandler(this.sql);
-      }
-      const response = await this.browsableHandler.fetch(request);
-      if (response.status !== 404) {
-        return response;
-      }
-    }
-
     return new Response('OK');
   }
 }
+

@@ -175,32 +175,11 @@ vi.mock('cloudflare:workers', () => ({
 }));
 
 // Mock @outerbase/browsable-durable-object (it imports cloudflare:workers internally)
-vi.mock('@outerbase/browsable-durable-object', () => {
-  class MockBrowsableHandler {
-    private sql: any;
-    constructor(sql: any) {
-      this.sql = sql;
-    }
-    async fetch(request: Request): Promise<Response> {
-      const url = new URL(request.url);
-      if (url.pathname === '/query/raw' && request.method === 'POST') {
-        const body = await request.json() as any;
-        try {
-          const cursor = this.sql.exec(body.sql);
-          return new Response(JSON.stringify({ result: cursor.toArray() }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' },
-          });
-        } catch (e: any) {
-          return new Response(JSON.stringify({ error: e.message }), { status: 500 });
-        }
-      }
-      return new Response('Not found', { status: 404 });
-    }
-  }
-
-  return { BrowsableHandler: MockBrowsableHandler };
-});
+vi.mock('@outerbase/browsable-durable-object', () => ({
+  BrowsableHandler: class {},
+  Browsable: () => (cls: any) => cls,
+  studio: () => new Response('studio'),
+}));
 
 class TestDurableObject extends SqliteDurableObject {
   migrations: Migrations = {};
@@ -412,53 +391,6 @@ describe('SqliteDurableObject', () => {
 
       expect(onNextSessionRestoreBookmark).toHaveBeenCalledWith('my-bookmark');
       expect(abort).toHaveBeenCalledWith('Restoring to pre-migration bookmark');
-    });
-  });
-
-  describe('browsable fetch delegation', () => {
-    it('returns OK without delegating when browsable is false', async () => {
-      const { state } = createMockDurableObjectState({ pitrAvailable: false });
-
-      const dobj = new TestDurableObject(state, {});
-      dobj.migrations = {};
-
-      const response = await dobj.fetch(new Request('http://test/query/raw', {
-        method: 'POST',
-        body: JSON.stringify({ sql: 'SELECT 1' }),
-      }));
-
-      expect(response.status).toBe(200);
-      expect(await response.text()).toBe('OK');
-    });
-
-    it('delegates to BrowsableHandler when browsable is true', async () => {
-      const { state } = createMockDurableObjectState({ pitrAvailable: false });
-
-      const dobj = new TestDurableObject(state, {});
-      dobj.migrations = {};
-      dobj.browsable = true;
-
-      const response = await dobj.fetch(new Request('http://test/query/raw', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sql: 'SELECT 1' }),
-      }));
-
-      // BrowsableHandler should handle POST /query/raw, not return 'OK'
-      expect(await response.text()).not.toBe('OK');
-    });
-
-    it('falls through to default response for unhandled routes when browsable', async () => {
-      const { state } = createMockDurableObjectState({ pitrAvailable: false });
-
-      const dobj = new TestDurableObject(state, {});
-      dobj.migrations = {};
-      dobj.browsable = true;
-
-      const response = await dobj.fetch(new Request('http://test/some-other-path'));
-
-      // BrowsableHandler returns 404 for non-matching routes, so we fall through
-      expect(await response.text()).toBe('OK');
     });
   });
 

@@ -13,19 +13,9 @@ export default {
   async fetch(request: Request, env: any): Promise<Response> {
     const url = new URL(request.url);
 
-    // Outerbase Studio UI — browse tables visually at /studio
+    // Outerbase Studio UI at /studio
     if (url.pathname === '/studio') {
       return studio(request, env.MAIN_DATABASE_DO);
-    }
-
-    // Browsable SQL endpoint - proxies to the DO's fetch handler
-    // e.g. POST /db/query/raw -> DO.fetch(/query/raw)
-    if (url.pathname.startsWith('/db/')) {
-      const id = env.MAIN_DATABASE_DO.idFromName('example-shop.myshopify.com');
-      const stub = env.MAIN_DATABASE_DO.get(id);
-      const doUrl = new URL(request.url);
-      doUrl.pathname = url.pathname.replace(/^\/db/, '');
-      return stub.fetch(new Request(doUrl.toString(), request));
     }
 
     // Run the request within a context that provides env and session

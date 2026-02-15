@@ -147,6 +147,9 @@ export function generateDurableObjectsModule(
   isDev: boolean = false
 ): string {
   const bindingNamesExpr = buildBindingNamesObject(databases);
+  const anyBrowsable = databases.some(
+    (db) => db.browsable === true || (db.browsable === 'development' && isDev)
+  );
 
   const imports: t.ImportDeclaration[] = [
     createNamedImport(['SqliteDurableObject'], '@shoplayer/database/db'),
@@ -154,43 +157,122 @@ export function generateDurableObjectsModule(
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
   ];
 
-  const classes = databases.map((db) => buildDurableObjectClass(db, bindingNamesExpr, isDev));
+  if (anyBrowsable) {
+    imports.push(createNamedImport(['Browsable'], '@outerbase/browsable-durable-object'));
+  }
 
-  const program = t.program([...imports, ...classes]);
+  const statements: t.Statement[] = [...imports];
+  for (const db of databases) {
+    statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, isDev));
+  }
+
+  const program = t.program(statements);
   return generateCode(t.file(program));
 }
 
-function buildDurableObjectClass(
+/**
+ * Build an async method that calls this.ensureMigrations() then super.<name>(...args).
+ */
+function buildMigrationGuardMethod(
+  name: string,
+  params: t.Identifier[]
+): t.ClassMethod {
+  return t.classMethod(
+    'method',
+    t.identifier(name),
+    params,
+    t.blockStatement([
+      // await this.ensureMigrations();
+      t.expressionStatement(
+        t.awaitExpression(
+          t.callExpression(
+            t.memberExpression(t.thisExpression(), t.identifier('ensureMigrations')),
+            []
+          )
+        )
+      ),
+      // return super.<name>(...args);
+      t.returnStatement(
+        t.callExpression(
+          t.memberExpression(t.super(), t.identifier(name)),
+          params
+        )
+      ),
+    ]),
+    false, // computed
+    false, // static
+    false, // generator
+    true   // async
+  );
+}
+
+/**
+ * Build statements for a single database's Durable Object class.
+ *
+ * When browsable is enabled, generates:
+ *   const _ClassName_Base = Browsable()(class extends SqliteDurableObject { migrations = {...}; });
+ *   export class ClassName extends _ClassName_Base {
+ *     async fetch(req) { await this.ensureMigrations(); return super.fetch(req); }
+ *     async __studio(cmd) { await this.ensureMigrations(); return super.__studio(cmd); }
+ *     async rpc(...) { ... }
+ *   }
+ *
+ * When not browsable:
+ *   export class ClassName extends SqliteDurableObject {
+ *     migrations = {...};
+ *     async rpc(...) { ... }
+ *   }
+ */
+function buildDurableObjectStatements(
   db: DatabaseInfo,
   bindingNamesExpr: t.ObjectExpression,
   isDev: boolean
-): t.ExportNamedDeclaration {
-  // migrations = { ... }
+): t.Statement[] {
+  const isBrowsable = db.browsable === true || (db.browsable === 'development' && isDev);
+  const rpcMethod = buildRpcMethod(db, bindingNamesExpr);
   const migrationsProperty = t.classProperty(
     t.identifier('migrations'),
     buildMigrationsObject(db.migrations)
   );
 
-  // async rpc(method, args, rpcContext) { ... }
-  const rpcMethod = buildRpcMethod(db, bindingNamesExpr);
-
-  const classBodyMembers: (t.ClassProperty | t.ClassMethod)[] = [migrationsProperty, rpcMethod];
-
-  // Resolve browsable: 'development' → true/false at build time
-  const isBrowsable = db.browsable === true || (db.browsable === 'development' && isDev);
-  if (isBrowsable) {
-    classBodyMembers.push(
-      t.classProperty(t.identifier('browsable'), t.booleanLiteral(true))
+  if (!isBrowsable) {
+    // Simple case: class ClassName extends SqliteDurableObject { migrations; rpc() }
+    const classDecl = t.classDeclaration(
+      t.identifier(db.className),
+      t.identifier('SqliteDurableObject'),
+      t.classBody([migrationsProperty, rpcMethod])
     );
+    return [t.exportNamedDeclaration(classDecl)];
   }
 
+  // Browsable case:
+  // const _ClassName_Base = Browsable()(class extends SqliteDurableObject { migrations = {...}; });
+  const baseName = `_${db.className}_Base`;
+  const innerClass = t.classExpression(
+    null,
+    t.identifier('SqliteDurableObject'),
+    t.classBody([migrationsProperty])
+  );
+  const browsableWrapped = t.callExpression(
+    t.callExpression(t.identifier('Browsable'), []),
+    [innerClass]
+  );
+  const baseDecl = t.variableDeclaration('const', [
+    t.variableDeclarator(t.identifier(baseName), browsableWrapped),
+  ]);
+
+  // export class ClassName extends _ClassName_Base { fetch, __studio, rpc }
   const classDecl = t.classDeclaration(
     t.identifier(db.className),
-    t.identifier('SqliteDurableObject'),
-    t.classBody(classBodyMembers)
+    t.identifier(baseName),
+    t.classBody([
+      buildMigrationGuardMethod('fetch', [t.identifier('request')]),
+      buildMigrationGuardMethod('__studio', [t.identifier('cmd')]),
+      rpcMethod,
+    ])
   );
 
-  return t.exportNamedDeclaration(classDecl);
+  return [baseDecl, t.exportNamedDeclaration(classDecl)];
 }
 
 function buildRpcMethod(

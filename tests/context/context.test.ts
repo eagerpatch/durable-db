@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { getContext, runWithContext, hasContext } from '../../src/context';
+import { describe, it, expect, afterEach } from 'vitest';
+import { getContext, runWithContext, hasContext, setContextResolver } from '../../src/context';
 
 describe('context', () => {
   describe('runWithContext', () => {
@@ -111,6 +111,64 @@ describe('context', () => {
           expect(ctx.session.userId).toBe('123');
         }
       );
+    });
+  });
+
+  describe('setContextResolver', () => {
+    afterEach(() => {
+      setContextResolver(null);
+    });
+
+    it('provides context via resolver when no ALS store', () => {
+      const mockEnv = { RESOLVED: true };
+      const mockRequest = new Request('https://example.com');
+      const mockSession = { tenantId: 'resolved-tenant' };
+
+      setContextResolver(() => ({ env: mockEnv, request: mockRequest, session: mockSession }));
+
+      const ctx = getContext();
+      expect(ctx.env).toBe(mockEnv);
+      expect(ctx.session).toBe(mockSession);
+    });
+
+    it('ALS store takes priority over resolver', () => {
+      const alsEnv = { source: 'als' };
+      const resolverEnv = { source: 'resolver' };
+
+      setContextResolver(() => ({
+        env: resolverEnv,
+        request: new Request('https://example.com'),
+        session: {},
+      }));
+
+      runWithContext(
+        { env: alsEnv, request: new Request('https://example.com'), session: {} },
+        () => {
+          expect(getContext().env).toBe(alsEnv);
+        }
+      );
+    });
+
+    it('can be cleared by passing null', () => {
+      setContextResolver(() => ({
+        env: {},
+        request: new Request('https://example.com'),
+        session: {},
+      }));
+
+      setContextResolver(null);
+
+      expect(() => getContext()).toThrow('getContext() called outside of request context');
+    });
+
+    it('hasContext returns true when resolver is set', () => {
+      setContextResolver(() => ({
+        env: {},
+        request: new Request('https://example.com'),
+        session: {},
+      }));
+
+      expect(hasContext()).toBe(true);
     });
   });
 

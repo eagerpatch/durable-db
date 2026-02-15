@@ -147,10 +147,6 @@ export interface ActionInfo {
   databaseName: string;
   /** File where the action is defined */
   sourceFile: string;
-  /** Names of other actions from the SAME database called within this handler (transformed to this.x()) */
-  internalActionCalls: string[];
-  /** Names of actions from OTHER databases called within this handler (need special handling) */
-  crossDbActionCalls: string[];
 }
 
 /**

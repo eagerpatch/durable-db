@@ -4,7 +4,7 @@ export type { Migration, Migrations, CreateKyselyOptions, SqlExecutor } from './
 
 // Plugins
 export {
-  DrizzleSchemaPlugin,
+  SchemaPlugin,
   DateSerializePlugin,
   dateSerializers,
   createDrizzlePlugins

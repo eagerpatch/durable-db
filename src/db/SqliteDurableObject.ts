@@ -166,16 +166,14 @@ export function createKyselyFromSql<T>(
   // Build plugins array
   const allPlugins: KyselyPlugin[] = [];
 
-  // Add CamelCasePlugin if enabled (converts JS camelCase to SQL snake_case)
-  if (camelCase) {
-    allPlugins.push(new CamelCasePlugin());
-  }
-
-  // Add Drizzle plugins if schema is provided
+  // Add schema/camelCase plugins
   if (schema) {
-    allPlugins.push(...createDrizzlePlugins(schema));
+    // SchemaPlugin extends CamelCasePlugin, so no need for standalone CamelCasePlugin
+    allPlugins.push(...createDrizzlePlugins(schema, camelCase));
+  } else if (camelCase) {
+    allPlugins.push(new CamelCasePlugin());
+    allPlugins.push(new DateSerializePlugin());
   } else {
-    // Add DateSerializePlugin even without schema
     allPlugins.push(new DateSerializePlugin());
   }
 

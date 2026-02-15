@@ -35,8 +35,6 @@ const createUserAction: ActionInfo = {
   handlerSource: `async (db, args) => db.insertInto('users').values(args).execute()`,
   databaseName: 'main',
   sourceFile: 'src/actions/users.ts',
-  internalActionCalls: [],
-  crossDbActionCalls: [],
 };
 
 const getUserAction: ActionInfo = {
@@ -45,8 +43,6 @@ const getUserAction: ActionInfo = {
   handlerSource: `async (db, args) => db.selectFrom('users').where('id', '=', args.id).executeTakeFirst()`,
   databaseName: 'main',
   sourceFile: 'src/actions/users.ts',
-  internalActionCalls: [],
-  crossDbActionCalls: [],
 };
 
 // ============================================================================

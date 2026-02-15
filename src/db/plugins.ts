@@ -1,6 +1,7 @@
-import { 
-  type KyselyPlugin, 
-  type PluginTransformQueryArgs, 
+import {
+  CamelCasePlugin,
+  type KyselyPlugin,
+  type PluginTransformQueryArgs,
   type PluginTransformResultArgs,
   type QueryResult,
   type RootOperationNode,
@@ -10,38 +11,48 @@ import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { getTableConfig } from 'drizzle-orm/sqlite-core';
 
 /**
- * Plugin that maps Drizzle schema column names to their actual SQL column names
- * 
- * Drizzle schemas use camelCase in TypeScript but may have snake_case in SQL.
- * This plugin ensures Kysely uses the correct column names.
+ * Schema-aware CamelCasePlugin that uses Drizzle schema for column name mapping.
+ *
+ * Extends CamelCasePlugin to handle non-standard column names that don't follow
+ * simple camelCase ↔ snake_case conversion. For example, a JS property `userId`
+ * mapped to SQL column `user_identifier` would be handled correctly.
+ *
+ * Falls back to standard CamelCasePlugin behavior for columns not in the schema.
  */
-export class DrizzleSchemaPlugin implements KyselyPlugin {
-  private columnMap: Map<string, Map<string, string>>;
+export class SchemaPlugin extends CamelCasePlugin {
+  private jsToSql: Map<string, string>;
+  private sqlToJs: Map<string, string>;
 
   constructor(schema: Record<string, SQLiteTableWithColumns<any>>) {
-    this.columnMap = new Map();
-    
-    for (const [tableName, table] of Object.entries(schema)) {
+    super();
+    this.jsToSql = new Map();
+    this.sqlToJs = new Map();
+
+    for (const [, table] of Object.entries(schema)) {
       const tableConfig = getTableConfig(table);
-      const columns = new Map<string, string>();
-      
-      for (const column of tableConfig.columns) {
-        // Map from the property name (camelCase) to the actual column name
-        columns.set(column.name, column.name);
+      const sqlColumnNames = new Set(tableConfig.columns.map(c => c.name));
+
+      for (const [propertyName, value] of Object.entries(table)) {
+        if (
+          value &&
+          typeof value === 'object' &&
+          'name' in value &&
+          typeof value.name === 'string' &&
+          sqlColumnNames.has(value.name)
+        ) {
+          this.jsToSql.set(propertyName, value.name);
+          this.sqlToJs.set(value.name, propertyName);
+        }
       }
-      
-      this.columnMap.set(tableConfig.name, columns);
     }
   }
 
-  transformQuery(args: PluginTransformQueryArgs): RootOperationNode {
-    // For now, we rely on CamelCasePlugin for the transformation
-    // This plugin is kept for potential future schema-aware transformations
-    return args.node;
+  protected override snakeCase(str: string): string {
+    return this.jsToSql.get(str) ?? super.snakeCase(str);
   }
 
-  async transformResult(args: PluginTransformResultArgs): Promise<QueryResult<UnknownRow>> {
-    return args.result;
+  protected override camelCase(str: string): string {
+    return this.sqlToJs.get(str) ?? super.camelCase(str);
   }
 }
 
@@ -135,11 +146,21 @@ export class DateSerializePlugin implements KyselyPlugin {
 }
 
 /**
- * Create all recommended plugins for use with Drizzle schemas
+ * Create all recommended plugins for use with Drizzle schemas.
+ *
+ * When camelCase is true, includes SchemaPlugin (which extends CamelCasePlugin)
+ * for schema-aware column name mapping. When false, only includes DateSerializePlugin.
  */
-export function createDrizzlePlugins(schema: Record<string, SQLiteTableWithColumns<any>>): KyselyPlugin[] {
-  return [
-    new DrizzleSchemaPlugin(schema),
-    new DateSerializePlugin(),
-  ];
+export function createDrizzlePlugins(
+  schema: Record<string, SQLiteTableWithColumns<any>>,
+  camelCase = true
+): KyselyPlugin[] {
+  const plugins: KyselyPlugin[] = [];
+
+  if (camelCase) {
+    plugins.push(new SchemaPlugin(schema));
+  }
+
+  plugins.push(new DateSerializePlugin());
+  return plugins;
 }

@@ -201,7 +201,7 @@ class PluginState {
     label: string
   ): Promise<void> {
     try {
-      const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
+      const schemaPath = db.schemaImport ? resolveImportPath(db.filePath, db.schemaImport) : null;
       if (schemaPath) {
         const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
         if (Object.keys(schema).length > 0) {

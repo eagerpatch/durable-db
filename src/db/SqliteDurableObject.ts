@@ -536,6 +536,54 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
+   * Execute a query and return results in Outerbase Studio format.
+   */
+  private executeStudioQuery(sql: string) {
+    const cursor = this.sql.exec(sql);
+    const columnSet = new Set<string>();
+    const headers = cursor.columnNames.map((colName) => {
+      let name = colName;
+      for (let i = 0; i < 20; i++) {
+        if (!columnSet.has(name)) break;
+        name = '__' + colName + '_' + i;
+      }
+      columnSet.add(name);
+      return { name, displayName: colName, originalType: 'text' as const, type: undefined };
+    });
+    return {
+      headers,
+      rows: Array.from(cursor.raw()).map((r: unknown[]) =>
+        headers.reduce<Record<string, unknown>>((obj, h, idx) => {
+          obj[h.name] = r[idx];
+          return obj;
+        }, {})
+      ),
+      stat: {
+        queryDurationMs: 0,
+        rowsAffected: 0,
+        rowsRead: cursor.rowsRead,
+        rowsWritten: cursor.rowsWritten,
+      },
+    };
+  }
+
+  /**
+   * RPC method for Outerbase Studio integration.
+   * Called by the studio() function from the worker to execute queries.
+   */
+  async __studio(cmd: { type: string; statement?: string; statements?: string[] }) {
+    await this.ensureMigrations();
+
+    if (cmd.type === 'query' && cmd.statement) {
+      return this.executeStudioQuery(cmd.statement);
+    } else if (cmd.type === 'transaction' && cmd.statements) {
+      return this.ctx.storage.transactionSync(() => {
+        return cmd.statements!.map((s) => this.executeStudioQuery(s));
+      });
+    }
+  }
+
+  /**
    * Override fetch to ensure migrations run before any request.
    * When browsable is enabled, delegates to BrowsableHandler for SQL endpoints.
    */

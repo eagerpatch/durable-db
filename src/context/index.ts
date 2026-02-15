@@ -1,4 +1,3 @@
-import { env } from 'cloudflare:workers';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /**
@@ -35,12 +34,11 @@ const contextStorage = new AsyncLocalStorage<RequestContext<any, any>>();
  * ```
  */
 export function getContext<TEnv = unknown, TSession = unknown>(): RequestContext<TEnv, TSession> {
-  return {
-    session: {
-      tenantId: 'demo-tenant',
-    },
-    env,
-  } as RequestContext<TEnv, TSession>;
+  const store = contextStorage.getStore();
+  if (!store) {
+    throw new Error('getContext() called outside of request context. Wrap your handler in runWithContext().');
+  }
+  return store as RequestContext<TEnv, TSession>;
 }
 
 /**

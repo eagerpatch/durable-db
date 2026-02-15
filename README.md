@@ -233,7 +233,11 @@ Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery
 
 ## Calling Actions from Your Worker
 
-Wrap your request handler in `runWithContext()` to provide the environment and session. Then call actions like regular async functions:
+Database actions need a request context to know which environment and tenant to use. There are two ways to provide it:
+
+### Standalone mode: `runWithContext()`
+
+Wrap your request handler in `runWithContext()` to provide the environment and session:
 
 ```ts
 import { runWithContext } from '@shoplayer/database/context';
@@ -262,6 +266,28 @@ export default {
   },
 };
 ```
+
+### Framework integration: `setContextResolver()`
+
+If your framework already has its own request-scoped context (e.g. RWSDK's `getRequestInfo()`), use `setContextResolver()` to bridge the two context systems instead of wrapping every request:
+
+```ts
+import { setContextResolver } from '@shoplayer/database/context';
+import { getRequestInfo } from 'rwsdk/worker';
+import { env } from 'cloudflare:workers';
+
+setContextResolver(() => ({
+  env,
+  request: getRequestInfo().request,
+  session: { tenantId: getRequestInfo().ctx.session!.shop },
+}));
+```
+
+The resolver is called at the moment a database operation needs context — by which point request middleware (auth, session, etc.) has already completed. This avoids a second AsyncLocalStorage layer when the framework already provides one.
+
+When both are available, `runWithContext()` (ALS) takes priority over the resolver.
+
+### How it works
 
 Behind the scenes, each action call is an RPC call to the correct Durable Object instance. The Vite plugin generates stubs that handle instance routing, argument validation, and DO communication transparently.
 
@@ -853,7 +879,7 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 | `./db` | `src/db/` | `defineDatabase()`, `SqliteDurableObject`, Kysely plugins |
 | `./vite` | `src/vite/databasePlugin.ts` | Vite plugin (`shoplayerDatabasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
-| `./context` | `src/context/` | AsyncLocalStorage-based request context (`runWithContext`, `getContext`) |
+| `./context` | `src/context/` | Request context (`runWithContext`, `getContext`, `setContextResolver`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callActionInValidated`) |
 | `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `shoplayer-db` binary |
@@ -862,9 +888,10 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 
 ```
 Worker fetch()
-  -> runWithContext({ env, request, session })
+  -> runWithContext() or setContextResolver()    // Provide request context
     -> createUser({ name, email })              // Looks like a normal function call
       -> ArkType validates args
+      -> getContext()                            // ALS store → resolver → throw
       -> Check AsyncLocalStorage for DO-local short path
       -> If same DO: direct handler call (no RPC)
       -> If cross-DO: env.BINDING.idFromName(instanceKey) -> stub.rpc()

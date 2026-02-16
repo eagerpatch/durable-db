@@ -79,9 +79,6 @@ importers:
       '@shoplayer/database':
         specifier: workspace:*
         version: link:../..
-      drizzle-orm:
-        specifier: ^0.38.0
-        version: 0.38.4(@cloudflare/workers-types@4.20260131.0)(@types/better-sqlite3@7.6.13)(@types/react@19.2.10)(better-sqlite3@11.10.0)(kysely@0.28.11)(react@19.2.4)
       react:
         specifier: 19.2.4
         version: 19.2.4
@@ -125,9 +122,6 @@ importers:
       '@shoplayer/database':
         specifier: workspace:*
         version: link:../..
-      drizzle-orm:
-        specifier: ^0.38.0
-        version: 0.38.4(@cloudflare/workers-types@4.20260131.0)(@types/better-sqlite3@7.6.13)(@types/react@19.2.10)(better-sqlite3@11.10.0)(kysely@0.28.11)(react@19.2.4)
     devDependencies:
       '@cloudflare/vite-plugin':
         specifier: ^1.0.0
@@ -5749,15 +5743,6 @@ snapshots:
       '@types/react': 19.2.10
       better-sqlite3: 11.10.0
       kysely: 0.27.6
-      react: 19.2.4
-
-  drizzle-orm@0.38.4(@cloudflare/workers-types@4.20260131.0)(@types/better-sqlite3@7.6.13)(@types/react@19.2.10)(better-sqlite3@11.10.0)(kysely@0.28.11)(react@19.2.4):
-    optionalDependencies:
-      '@cloudflare/workers-types': 4.20260131.0
-      '@types/better-sqlite3': 7.6.13
-      '@types/react': 19.2.10
-      better-sqlite3: 11.10.0
-      kysely: 0.28.11
       react: 19.2.4
 
   dts-resolver@2.1.3: {}

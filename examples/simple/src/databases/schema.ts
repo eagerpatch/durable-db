@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer } from '@shoplayer/database/schema';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),

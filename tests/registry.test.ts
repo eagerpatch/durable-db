@@ -276,4 +276,52 @@ describe('callAction', () => {
     expect(rpcSpy).toHaveBeenCalledWith('logMetric', { metric: 'cpu' }, { instanceKey: 'test-shop' });
     expect(analyticsHandler).not.toHaveBeenCalled();
   });
+
+  it('uses RPC when dbTransports is not set (backwards compat)', async () => {
+    registerAction('analytics', 'trackCompat', {
+      validator: (args) => args,
+      handler: vi.fn(),
+    });
+
+    const rpcSpy = vi.fn().mockResolvedValue({ ok: true });
+    const mockStub = { rpc: rpcSpy };
+    const mockId = { id: 'a-id' };
+
+    const ctx = createMockContext('main');
+    // No dbTransports set
+    ctx.env = {
+      ANALYTICS_DO: {
+        idFromName: vi.fn().mockReturnValue(mockId),
+        get: vi.fn().mockReturnValue(mockStub),
+      },
+    };
+
+    const result = await callAction({}, 'analytics', 'trackCompat', { x: 1 }, ctx);
+    expect(result).toEqual({ ok: true });
+    expect(rpcSpy).toHaveBeenCalled();
+  });
+
+  it('uses RPC for cross-db when dbTransports says rpc', async () => {
+    registerAction('analytics', 'trackRpc', {
+      validator: (args) => args,
+      handler: vi.fn(),
+    });
+
+    const rpcSpy = vi.fn().mockResolvedValue({ tracked: true });
+    const mockStub = { rpc: rpcSpy };
+    const mockId = { id: 'a-id' };
+
+    const ctx = createMockContext('main');
+    ctx.dbTransports = { analytics: 'rpc' };
+    ctx.env = {
+      ANALYTICS_DO: {
+        idFromName: vi.fn().mockReturnValue(mockId),
+        get: vi.fn().mockReturnValue(mockStub),
+      },
+    };
+
+    const result = await callAction({}, 'analytics', 'trackRpc', {}, ctx);
+    expect(result).toEqual({ tracked: true });
+    expect(rpcSpy).toHaveBeenCalled();
+  });
 });

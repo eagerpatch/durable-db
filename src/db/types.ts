@@ -26,6 +26,9 @@ export interface DatabaseConfig<
    *  - false: always disabled (default)
    *  - 'development': enabled only in dev mode */
   browsable?: boolean | 'development';
+  /** Transport for action stubs: 'rpc' (default) or 'websocket'.
+   *  WebSocket uses Cloudflare's 20:1 message billing ratio for cheaper high-volume calls. */
+  transport?: 'rpc' | 'websocket';
 }
 
 /**
@@ -136,6 +139,8 @@ export interface DatabaseInfo {
   schemaTableNames: string[];
   /** Whether the DO should expose a browsable SQL endpoint */
   browsable: boolean | 'development';
+  /** Transport for action stubs */
+  transport: 'rpc' | 'websocket';
   /** Loaded migrations - Map of name -> chunks (each chunk is array of SQL statements) */
   migrations?: Map<string, string[][]>;
 }

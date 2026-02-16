@@ -17,6 +17,7 @@ const mockDatabase: DatabaseInfo = {
   bindingName: 'MAIN_DATABASE_DO',
   instance: 'per-tenant',
   browsable: false,
+  transport: 'rpc',
   migrationsDir: './migrations',
   schemaImport: './schema',
   schemaTableNames: ['users'],
@@ -28,6 +29,14 @@ const globalDatabase: DatabaseInfo = {
   className: 'AnalyticsDO',
   bindingName: 'ANALYTICS_DO',
   instance: 'global',
+};
+
+const wsDatabase: DatabaseInfo = {
+  ...mockDatabase,
+  name: 'events',
+  className: 'EventsDatabaseDO',
+  bindingName: 'EVENTS_DATABASE_DO',
+  transport: 'websocket',
 };
 
 const createUserAction: ActionInfo = {
@@ -178,6 +187,40 @@ describe('generateDurableObjectsModule', () => {
     const code = generateDurableObjectsModule([dbWithMigrations], '@shoplayer/database/registry');
     expect(code).toContain('001_init');
     expect(code).toContain('chunks');
+  });
+
+  it('generates webSocketMessage method when transport is websocket', () => {
+    const code = generateDurableObjectsModule([wsDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('async webSocketMessage(ws, message)');
+    expect(code).toContain('decodeRequest');
+    expect(code).toContain('encodeResponse');
+  });
+
+  it('imports transport module when any db uses websocket', () => {
+    const code = generateDurableObjectsModule([wsDatabase], '@shoplayer/database/registry');
+    expect(code).toMatch(/import\s*\{[^}]*decodeRequest[^}]*\}\s*from\s*["']@shoplayer\/database\/transport["']/);
+    expect(code).toMatch(/import\s*\{[^}]*encodeResponse[^}]*\}\s*from\s*["']@shoplayer\/database\/transport["']/);
+  });
+
+  it('does not import transport module when no db uses websocket', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).not.toContain('@shoplayer/database/transport');
+  });
+
+  it('still generates rpc method for websocket databases', () => {
+    const code = generateDurableObjectsModule([wsDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('async rpc(method, args, rpcContext)');
+    expect(code).toContain('async webSocketMessage(ws, message)');
+  });
+
+  it('does not generate webSocketMessage for rpc databases', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
+    expect(code).not.toContain('webSocketMessage');
+  });
+
+  it('generates dbTransports in ctx object', () => {
+    const code = generateDurableObjectsModule([mockDatabase, wsDatabase], '@shoplayer/database/registry');
+    expect(code).toContain('dbTransports');
   });
 });
 
@@ -377,5 +420,50 @@ export const SOME_CONSTANT = 42;
     });
 
     expect(result!.map).toBeDefined();
+  });
+
+  it('generates WebSocketTransport call for websocket databases', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      database: wsDatabase,
+      dbName: 'events',
+      code,
+      actionsInFile: [{
+        ...createUserAction,
+        databaseName: 'events',
+      }],
+    });
+
+    expect(result!.code).toContain('WebSocketTransport');
+    expect(result!.code).toContain('wsTransport.call');
+    expect(result!.code).not.toContain('stub.rpc');
+  });
+
+  it('imports WebSocketTransport for websocket databases', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      database: wsDatabase,
+      dbName: 'events',
+      code,
+      actionsInFile: [{
+        ...createUserAction,
+        databaseName: 'events',
+      }],
+    });
+
+    expect(result!.code).toMatch(/import\s*\{[^}]*WebSocketTransport[^}]*\}\s*from\s*["']@shoplayer\/database\/transport["']/);
+  });
+
+  it('does not import WebSocketTransport for rpc databases', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).not.toContain('WebSocketTransport');
   });
 });

@@ -116,6 +116,13 @@ function buildBindingNamesObject(databases: DatabaseInfo[]): t.ObjectExpression 
   return t.objectExpression(properties);
 }
 
+function buildDbTransportsObject(databases: DatabaseInfo[]): t.ObjectExpression {
+  const properties = databases.map((db) =>
+    t.objectProperty(t.stringLiteral(db.name), t.stringLiteral(db.transport))
+  );
+  return t.objectExpression(properties);
+}
+
 // ============================================================================
 // Code Generation
 // ============================================================================
@@ -138,9 +145,11 @@ export function generateDurableObjectsModule(
   isDev: boolean = false
 ): string {
   const bindingNamesExpr = buildBindingNamesObject(databases);
+  const dbTransportsExpr = buildDbTransportsObject(databases);
   const anyBrowsable = databases.some(
     (db) => db.browsable === true || (db.browsable === 'development' && isDev)
   );
+  const anyWebSocket = databases.some((db) => db.transport === 'websocket');
 
   const imports: t.ImportDeclaration[] = [
     createNamedImport(['SqliteDurableObject'], '@shoplayer/database/db'),
@@ -152,9 +161,15 @@ export function generateDurableObjectsModule(
     imports.push(createNamedImport(['Browsable'], '@outerbase/browsable-durable-object'));
   }
 
+  if (anyWebSocket) {
+    imports.push(
+      createNamedImport(['decodeRequest', 'encodeResponse'], '@shoplayer/database/transport')
+    );
+  }
+
   const statements: t.Statement[] = [...imports];
   for (const db of databases) {
-    statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, isDev));
+    statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, dbTransportsExpr, isDev));
   }
 
   const program = t.program(statements);
@@ -217,27 +232,33 @@ function buildMigrationGuardMethod(
 function buildDurableObjectStatements(
   db: DatabaseInfo,
   bindingNamesExpr: t.ObjectExpression,
+  dbTransportsExpr: t.ObjectExpression,
   isDev: boolean
 ): t.Statement[] {
   const isBrowsable = db.browsable === true || (db.browsable === 'development' && isDev);
-  const rpcMethod = buildRpcMethod(db, bindingNamesExpr);
+  const rpcMethod = buildRpcMethod(db, bindingNamesExpr, dbTransportsExpr);
   const migrationsProperty = t.classProperty(
     t.identifier('migrations'),
     buildMigrationsObject(db.migrations)
   );
 
+  const classMethods: t.ClassMethod[] = [rpcMethod];
+
+  // Add webSocketMessage handler when transport is websocket
+  if (db.transport === 'websocket') {
+    classMethods.push(buildWebSocketMessageMethod(db, bindingNamesExpr, dbTransportsExpr));
+  }
+
   if (!isBrowsable) {
-    // Simple case: class ClassName extends SqliteDurableObject { migrations; rpc() }
     const classDecl = t.classDeclaration(
       t.identifier(db.className),
       t.identifier('SqliteDurableObject'),
-      t.classBody([migrationsProperty, rpcMethod])
+      t.classBody([migrationsProperty, ...classMethods])
     );
     return [t.exportNamedDeclaration(classDecl)];
   }
 
-  // Browsable case:
-  // const _ClassName_Base = Browsable()(class extends SqliteDurableObject { migrations = {...}; });
+  // Browsable case
   const baseName = `_${db.className}_Base`;
   const innerClass = t.classExpression(
     null,
@@ -252,23 +273,44 @@ function buildDurableObjectStatements(
     t.variableDeclarator(t.identifier(baseName), browsableWrapped),
   ]);
 
-  // export class ClassName extends _ClassName_Base { fetch, __studio, rpc }
   const classDecl = t.classDeclaration(
     t.identifier(db.className),
     t.identifier(baseName),
     t.classBody([
       buildMigrationGuardMethod('fetch', [t.identifier('request')]),
       buildMigrationGuardMethod('__studio', [t.identifier('cmd')]),
-      rpcMethod,
+      ...classMethods,
     ])
   );
 
   return [baseDecl, t.exportNamedDeclaration(classDecl)];
 }
 
+/**
+ * Build the ctx object expression used inside DO methods (rpc, webSocketMessage).
+ */
+function buildDoCtxObject(
+  dbNameLiteral: t.StringLiteral,
+  bindingNamesExpr: t.ObjectExpression,
+  dbTransportsExpr: t.ObjectExpression,
+  instanceKeyExpr: t.Expression
+): t.ObjectExpression {
+  return t.objectExpression([
+    t.objectProperty(
+      t.identifier('env'),
+      t.memberExpression(t.thisExpression(), t.identifier('env'))
+    ),
+    t.objectProperty(t.identifier('dbName'), dbNameLiteral),
+    t.objectProperty(t.identifier('dbBindingNames'), bindingNamesExpr),
+    t.objectProperty(t.identifier('dbTransports'), dbTransportsExpr),
+    t.objectProperty(t.identifier('instanceKey'), instanceKeyExpr),
+  ]);
+}
+
 function buildRpcMethod(
   db: DatabaseInfo,
-  bindingNamesExpr: t.ObjectExpression
+  bindingNamesExpr: t.ObjectExpression,
+  dbTransportsExpr: t.ObjectExpression
 ): t.ClassMethod {
   const dbNameLiteral = t.stringLiteral(db.name);
 
@@ -346,31 +388,25 @@ function buildRpcMethod(
       ])
     ),
 
-    // const ctx = { env: this.env, dbName: "...", dbBindingNames: {...}, instanceKey: ... };
+    // const ctx = { env: this.env, dbName: "...", dbBindingNames: {...}, dbTransports: {...}, instanceKey: ... };
     t.variableDeclaration('const', [
       t.variableDeclarator(
         t.identifier('ctx'),
-        t.objectExpression([
-          t.objectProperty(
-            t.identifier('env'),
-            t.memberExpression(t.thisExpression(), t.identifier('env'))
-          ),
-          t.objectProperty(t.identifier('dbName'), dbNameLiteral),
-          t.objectProperty(t.identifier('dbBindingNames'), bindingNamesExpr),
-          t.objectProperty(
-            t.identifier('instanceKey'),
-            t.logicalExpression(
-              '??',
-              t.optionalMemberExpression(
-                t.identifier('rpcContext'),
-                t.identifier('instanceKey'),
-                false,
-                true
-              ),
-              t.stringLiteral('global')
-            )
-          ),
-        ])
+        buildDoCtxObject(
+          dbNameLiteral,
+          bindingNamesExpr,
+          dbTransportsExpr,
+          t.logicalExpression(
+            '??',
+            t.optionalMemberExpression(
+              t.identifier('rpcContext'),
+              t.identifier('instanceKey'),
+              false,
+              true
+            ),
+            t.stringLiteral('global')
+          )
+        )
       ),
     ]),
 
@@ -414,6 +450,249 @@ function buildRpcMethod(
     false, // static
     false, // generator
     true   // async
+  );
+}
+
+/**
+ * Build the webSocketMessage method for WebSocket-enabled DOs.
+ *
+ * Generates:
+ *   async webSocketMessage(ws, message) {
+ *     await this.ensureMigrations();
+ *     const request = decodeRequest(typeof message === "string" ? message : new TextDecoder().decode(message));
+ *     const { id, action: method, args, instanceKey: reqInstanceKey } = request;
+ *     try {
+ *       const entry = getAction("dbName", method);
+ *       if (!entry) { ws.send(encodeResponse({ id, ok: false, error: "Unknown action" })); return; }
+ *       const validated = entry.validator(args);
+ *       if (validated instanceof type.errors) { ws.send(encodeResponse({ id, ok: false, error: validated.summary })); return; }
+ *       const ctx = { ... };
+ *       const result = await runWithDoContext({ ... }, async () => entry.handler(this.db, validated, ctx));
+ *       ws.send(encodeResponse({ id, ok: true, result }));
+ *     } catch (error) {
+ *       ws.send(encodeResponse({ id, ok: false, error: error instanceof Error ? error.message : String(error) }));
+ *     }
+ *   }
+ */
+function buildWebSocketMessageMethod(
+  db: DatabaseInfo,
+  bindingNamesExpr: t.ObjectExpression,
+  dbTransportsExpr: t.ObjectExpression
+): t.ClassMethod {
+  const dbNameLiteral = t.stringLiteral(db.name);
+
+  // Helper: ws.send(encodeResponse({ id, ok, ... }))
+  function wsSendResponse(props: t.ObjectProperty[]): t.ExpressionStatement {
+    return t.expressionStatement(
+      t.callExpression(
+        t.memberExpression(t.identifier('ws'), t.identifier('send')),
+        [
+          t.callExpression(t.identifier('encodeResponse'), [
+            t.objectExpression(props),
+          ]),
+        ]
+      )
+    );
+  }
+
+  function errorResponseProps(errorExpr: t.Expression): t.ObjectProperty[] {
+    return [
+      t.objectProperty(t.identifier('id'), t.identifier('id')),
+      t.objectProperty(t.identifier('ok'), t.booleanLiteral(false)),
+      t.objectProperty(t.identifier('error'), errorExpr),
+    ];
+  }
+
+  const body = t.blockStatement([
+    // await this.ensureMigrations();
+    t.expressionStatement(
+      t.awaitExpression(
+        t.callExpression(
+          t.memberExpression(t.thisExpression(), t.identifier('ensureMigrations')),
+          []
+        )
+      )
+    ),
+
+    // const request = decodeRequest(typeof message === "string" ? message : new TextDecoder().decode(message));
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('request'),
+        t.callExpression(t.identifier('decodeRequest'), [
+          t.conditionalExpression(
+            t.binaryExpression(
+              '===',
+              t.unaryExpression('typeof', t.identifier('message')),
+              t.stringLiteral('string')
+            ),
+            t.identifier('message'),
+            t.callExpression(
+              t.memberExpression(
+                t.newExpression(t.identifier('TextDecoder'), []),
+                t.identifier('decode')
+              ),
+              [t.identifier('message')]
+            )
+          ),
+        ])
+      ),
+    ]),
+
+    // const { id, action: method, args, instanceKey: reqInstanceKey } = request;
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.objectPattern([
+          t.objectProperty(t.identifier('id'), t.identifier('id'), false, true),
+          t.objectProperty(t.identifier('action'), t.identifier('method')),
+          t.objectProperty(t.identifier('args'), t.identifier('args'), false, true),
+          t.objectProperty(t.identifier('instanceKey'), t.identifier('reqInstanceKey')),
+        ]),
+        t.identifier('request')
+      ),
+    ]),
+
+    // try { ... } catch (error) { ... }
+    t.tryStatement(
+      t.blockStatement([
+        // const entry = getAction("dbName", method);
+        t.variableDeclaration('const', [
+          t.variableDeclarator(
+            t.identifier('entry'),
+            t.callExpression(t.identifier('getAction'), [dbNameLiteral, t.identifier('method')])
+          ),
+        ]),
+
+        // if (!entry) { ws.send(...); return; }
+        t.ifStatement(
+          t.unaryExpression('!', t.identifier('entry')),
+          t.blockStatement([
+            wsSendResponse(errorResponseProps(
+              t.templateLiteral(
+                [
+                  t.templateElement({ raw: 'Unknown action: ', cooked: 'Unknown action: ' }, false),
+                  t.templateElement({ raw: '', cooked: '' }, true),
+                ],
+                [t.identifier('method')]
+              )
+            )),
+            t.returnStatement(null),
+          ])
+        ),
+
+        // const validated = entry.validator(args);
+        t.variableDeclaration('const', [
+          t.variableDeclarator(
+            t.identifier('validated'),
+            t.callExpression(
+              t.memberExpression(t.identifier('entry'), t.identifier('validator')),
+              [t.identifier('args')]
+            )
+          ),
+        ]),
+
+        // if (validated instanceof type.errors) { ws.send(...); return; }
+        t.ifStatement(
+          t.binaryExpression(
+            'instanceof',
+            t.identifier('validated'),
+            t.memberExpression(t.identifier('type'), t.identifier('errors'))
+          ),
+          t.blockStatement([
+            wsSendResponse(errorResponseProps(
+              t.memberExpression(t.identifier('validated'), t.identifier('summary'))
+            )),
+            t.returnStatement(null),
+          ])
+        ),
+
+        // const ctx = { ... };
+        t.variableDeclaration('const', [
+          t.variableDeclarator(
+            t.identifier('ctx'),
+            buildDoCtxObject(
+              dbNameLiteral,
+              bindingNamesExpr,
+              dbTransportsExpr,
+              t.logicalExpression(
+                '??',
+                t.identifier('reqInstanceKey'),
+                t.stringLiteral('global')
+              )
+            )
+          ),
+        ]),
+
+        // const result = await runWithDoContext({ ... }, async () => entry.handler(this.db, validated, ctx));
+        t.variableDeclaration('const', [
+          t.variableDeclarator(
+            t.identifier('result'),
+            t.awaitExpression(
+              t.callExpression(t.identifier('runWithDoContext'), [
+                t.objectExpression([
+                  t.objectProperty(
+                    t.identifier('db'),
+                    t.memberExpression(t.thisExpression(), t.identifier('db'))
+                  ),
+                  t.objectProperty(t.identifier('ctx'), t.identifier('ctx')),
+                  t.objectProperty(t.identifier('dbName'), dbNameLiteral),
+                  t.objectProperty(
+                    t.identifier('instanceKey'),
+                    t.memberExpression(t.identifier('ctx'), t.identifier('instanceKey'))
+                  ),
+                ]),
+                t.arrowFunctionExpression(
+                  [],
+                  t.callExpression(
+                    t.memberExpression(t.identifier('entry'), t.identifier('handler')),
+                    [
+                      t.memberExpression(t.thisExpression(), t.identifier('db')),
+                      t.identifier('validated'),
+                      t.identifier('ctx'),
+                    ]
+                  ),
+                  true
+                ),
+              ])
+            )
+          ),
+        ]),
+
+        // ws.send(encodeResponse({ id, ok: true, result }));
+        wsSendResponse([
+          t.objectProperty(t.identifier('id'), t.identifier('id'), false, true),
+          t.objectProperty(t.identifier('ok'), t.booleanLiteral(true)),
+          t.objectProperty(t.identifier('result'), t.identifier('result'), false, true),
+        ]),
+      ]),
+      t.catchClause(
+        t.identifier('error'),
+        t.blockStatement([
+          // ws.send(encodeResponse({ id, ok: false, error: error instanceof Error ? error.message : String(error) }));
+          wsSendResponse(errorResponseProps(
+            t.conditionalExpression(
+              t.binaryExpression(
+                'instanceof',
+                t.identifier('error'),
+                t.identifier('Error')
+              ),
+              t.memberExpression(t.identifier('error'), t.identifier('message')),
+              t.callExpression(t.identifier('String'), [t.identifier('error')])
+            )
+          )),
+        ])
+      )
+    ),
+  ]);
+
+  return t.classMethod(
+    'method',
+    t.identifier('webSocketMessage'),
+    [t.identifier('ws'), t.identifier('message')],
+    body,
+    false,
+    false,
+    false,
+    true // async
   );
 }
 
@@ -481,7 +760,7 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
       ? t.stringLiteral('global')
       : t.callExpression(t.identifier('getTenantId'), []);
 
-  return [
+  const commonStatements: t.Statement[] = [
     // const argsSchema = type({...});
     t.variableDeclaration('const', [
       t.variableDeclarator(
@@ -530,7 +809,34 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
         )
       ),
     ]),
+  ];
 
+  if (database.transport === 'websocket') {
+    return [
+      ...commonStatements,
+      // const wsTransport = new WebSocketTransport(stub);
+      t.variableDeclaration('const', [
+        t.variableDeclarator(
+          t.identifier('wsTransport'),
+          t.newExpression(t.identifier('WebSocketTransport'), [t.identifier('stub')])
+        ),
+      ]),
+      // return wsTransport.call("actionName", validatedArgs, instanceKey);
+      t.returnStatement(
+        t.callExpression(
+          t.memberExpression(t.identifier('wsTransport'), t.identifier('call')),
+          [
+            t.stringLiteral(action.exportName),
+            t.identifier('validatedArgs'),
+            t.identifier('instanceKey'),
+          ]
+        )
+      ),
+    ];
+  }
+
+  return [
+    ...commonStatements,
     // return stub.rpc(...)
     t.returnStatement(buildRpcCall(action)),
   ];
@@ -561,6 +867,10 @@ export function transformActionFile(options: TransformOptions) {
   ensureNamedImports(body, contextImport, ['getTenantId']);
   ensureNamedImports(body, 'cloudflare:workers', ['env']);
   ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction']);
+
+  if (database.transport === 'websocket') {
+    ensureNamedImports(body, '@shoplayer/database/transport', ['WebSocketTransport']);
+  }
 
   const out: t.Statement[] = [];
 

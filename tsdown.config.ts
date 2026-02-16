@@ -8,6 +8,7 @@ export default defineConfig({
     'src/vite/databasePlugin.ts',
     'src/vite/modules/index.ts',
     'src/registry.ts',
+    'src/transport/index.ts',
     'src/cli/index.ts',
     'src/cli/bin.ts',
   ],

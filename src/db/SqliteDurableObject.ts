@@ -528,12 +528,41 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
   /**
    * Override fetch to ensure migrations run before any request.
+   * Handles WebSocket upgrade requests for websocket transport.
    * Subclasses (e.g. Browsable-wrapped DOs) should call ensureMigrations()
    * before delegating to super.fetch().
    */
   async fetch(request: Request): Promise<Response> {
     await this.ensureMigrations();
+
+    if (request.headers.get('Upgrade') === 'websocket') {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      this.ctx.acceptWebSocket(server);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     return new Response('OK');
+  }
+
+  /**
+   * Handle incoming WebSocket messages.
+   * Subclasses (generated DO classes) override this to dispatch actions.
+   */
+  async webSocketMessage(_ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {}
+
+  /**
+   * Handle WebSocket close. Echoes close back to the client.
+   */
+  async webSocketClose(ws: WebSocket, code: number, reason: string, _wasClean: boolean): Promise<void> {
+    ws.close(code, reason);
+  }
+
+  /**
+   * Handle WebSocket error. Closes with error code.
+   */
+  async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
+    ws.close(1011, 'Unexpected error');
   }
 }
 

@@ -216,6 +216,7 @@ function extractDatabaseInfo(
   let migrationsDir = './migrations';
   let instance: 'per-tenant' | 'global' = 'per-tenant';
   let browsable: boolean | 'development' = false;
+  let transport: 'rpc' | 'websocket' = 'rpc';
   let schemaImport: string | null = null;
   const schemaTableNames: string[] = [];
 
@@ -242,6 +243,13 @@ function extractDatabaseInfo(
         browsable = prop.value.value;
       } else if (t.isStringLiteral(prop.value) && prop.value.value === 'development') {
         browsable = 'development';
+      }
+    }
+
+    if (key === 'transport' && t.isStringLiteral(prop.value)) {
+      const value = prop.value.value;
+      if (value === 'rpc' || value === 'websocket') {
+        transport = value;
       }
     }
 
@@ -274,6 +282,7 @@ function extractDatabaseInfo(
     bindingName: toScreamingSnakeCase(name) + '_DATABASE_DO',
     instance,
     browsable,
+    transport,
     migrationsDir,
     schemaImport,
     schemaTableNames,

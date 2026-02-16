@@ -1,5 +1,6 @@
 import { type } from 'arktype';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { WebSocketTransport } from './transport/websocket';
 
 // ============================================================================
 // Types
@@ -21,6 +22,7 @@ export interface RpcContext {
   env: Record<string, unknown>;
   dbName: string;
   dbBindingNames: Record<string, string>;
+  dbTransports?: Record<string, 'rpc' | 'websocket'>;
   instanceKey: string;
 }
 
@@ -30,6 +32,21 @@ export interface RpcContext {
 
 const actionsByDb = new Map<string, Map<string, ActionDefinition>>();
 const als = new AsyncLocalStorage<DoContext>();
+const wsTransportCache = new Map<string, WebSocketTransport>();
+
+function getOrCreateWsTransport(
+  bindingName: string,
+  instanceKey: string,
+  stub: { fetch: (input: RequestInfo) => Promise<Response> }
+): WebSocketTransport {
+  const cacheKey = `${bindingName}:${instanceKey}`;
+  let transport = wsTransportCache.get(cacheKey);
+  if (!transport) {
+    transport = new WebSocketTransport(stub);
+    wsTransportCache.set(cacheKey, transport);
+  }
+  return transport;
+}
 
 // ============================================================================
 // Registration
@@ -94,7 +111,7 @@ export async function callAction(
     return entry.handler(db, validated, ctx);
   }
 
-  // Cross DB: RPC to the other DO
+  // Cross DB: RPC or WebSocket to the other DO
   const bindingName = ctx.dbBindingNames[targetDb];
   if (!bindingName) {
     throw new Error(`[shoplayer-database] Missing binding for db: ${targetDb}`);
@@ -102,11 +119,17 @@ export async function callAction(
 
   const binding = ctx.env[bindingName] as {
     idFromName: (name: string) => unknown;
-    get: (id: unknown) => { rpc: (method: string, args: unknown, ctx: { instanceKey: string }) => Promise<unknown> };
+    get: (id: unknown) => { rpc: (method: string, args: unknown, ctx: { instanceKey: string }) => Promise<unknown>; fetch: (input: RequestInfo) => Promise<Response> };
   };
 
   const id = binding.idFromName(ctx.instanceKey);
   const stub = binding.get(id);
+
+  const transport = ctx.dbTransports?.[targetDb];
+  if (transport === 'websocket') {
+    const wsTransport = getOrCreateWsTransport(bindingName, ctx.instanceKey, stub);
+    return wsTransport.call(actionName, validated, ctx.instanceKey);
+  }
 
   return stub.rpc(actionName, validated, { instanceKey: ctx.instanceKey });
 }

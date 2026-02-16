@@ -325,6 +325,53 @@ describe('parser', () => {
       expect(result.database!.browsable).toBe(false);
     });
 
+    it('extracts transport: "websocket"', () => {
+      const code = `
+        import { defineDatabase } from '@shoplayer/database/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          migrationsDir: './migrations',
+          schema: { users },
+          transport: 'websocket',
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.js', code);
+      expect(result.database!.transport).toBe('websocket');
+    });
+
+    it('extracts transport: "rpc"', () => {
+      const code = `
+        import { defineDatabase } from '@shoplayer/database/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          migrationsDir: './migrations',
+          schema: { users },
+          transport: 'rpc',
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.js', code);
+      expect(result.database!.transport).toBe('rpc');
+    });
+
+    it('defaults transport to "rpc" when not specified', () => {
+      const code = `
+        import { defineDatabase } from '@shoplayer/database/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          migrationsDir: './migrations',
+          schema: { users },
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.js', code);
+      expect(result.database!.transport).toBe('rpc');
+    });
+
     it('handles global instance strategy', () => {
       const code = `
         import { defineDatabase } from '@shoplayer/database/db';

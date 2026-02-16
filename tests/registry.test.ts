@@ -4,8 +4,7 @@ import {
   getAction,
   getDoContext,
   runWithDoContext,
-  callActionInValidated,
-  callActionIn,
+  callAction,
   type ActionDefinition,
   type DoContext,
   type RpcContext,
@@ -133,16 +132,34 @@ describe('getDoContext and runWithDoContext', () => {
 });
 
 // ============================================================================
-// callActionInValidated
+// callAction
 // ============================================================================
 
-describe('callActionInValidated', () => {
+describe('callAction', () => {
+  it('validates args before calling handler', async () => {
+    let validatorCalled = false;
+    const action: ActionDefinition = {
+      validator: (args) => {
+        validatorCalled = true;
+        return args;
+      },
+      handler: async (db, args) => args,
+    };
+
+    registerAction('validationDb', 'validatedAction', action);
+
+    const ctx = createMockContext('validationDb');
+    await callAction({}, 'validationDb', 'validatedAction', { test: true }, ctx);
+
+    expect(validatorCalled).toBe(true);
+  });
+
   it('calls handler directly for same database', async () => {
     const action = createMockAction('sameDbAction');
     registerAction('sameDb', 'sameDbAction', action);
 
     const ctx = createMockContext('sameDb');
-    const result = await callActionInValidated({}, 'sameDb', 'sameDbAction', { foo: 'bar' }, ctx);
+    const result = await callAction({}, 'sameDb', 'sameDbAction', { foo: 'bar' }, ctx);
 
     expect(result).toEqual({ action: 'sameDbAction', args: { foo: 'bar' } });
   });
@@ -151,7 +168,7 @@ describe('callActionInValidated', () => {
     const ctx = createMockContext('main');
 
     await expect(
-      callActionInValidated({}, 'main', 'unknownAction', {}, ctx)
+      callAction({}, 'main', 'unknownAction', {}, ctx)
     ).rejects.toThrow('Action not registered');
   });
 
@@ -163,7 +180,7 @@ describe('callActionInValidated', () => {
     // otherDb is not in dbBindingNames
 
     await expect(
-      callActionInValidated({}, 'otherDb', 'crossAction', {}, ctx)
+      callAction({}, 'otherDb', 'crossAction', {}, ctx)
     ).rejects.toThrow('Missing binding');
   });
 
@@ -186,7 +203,7 @@ describe('callActionInValidated', () => {
       },
     };
 
-    const result = await callActionInValidated(
+    const result = await callAction(
       {},
       'analytics',
       'trackEvent',
@@ -216,7 +233,7 @@ describe('callActionInValidated', () => {
     };
 
     const result = await runWithDoContext(doContext, () =>
-      callActionInValidated(mockDb, 'main', 'internalAction', { key: 'value' }, ctx)
+      callAction(mockDb, 'main', 'internalAction', { key: 'value' }, ctx)
     );
 
     expect(result).toEqual({ ok: true });
@@ -252,55 +269,11 @@ describe('callActionInValidated', () => {
     };
 
     const result = await runWithDoContext(doContext, () =>
-      callActionInValidated({}, 'analytics', 'logMetric', { metric: 'cpu' }, ctx)
+      callAction({}, 'analytics', 'logMetric', { metric: 'cpu' }, ctx)
     );
 
     expect(result).toEqual({ logged: true });
     expect(rpcSpy).toHaveBeenCalledWith('logMetric', { metric: 'cpu' }, { instanceKey: 'test-shop' });
     expect(analyticsHandler).not.toHaveBeenCalled();
-  });
-});
-
-// ============================================================================
-// callActionIn
-// ============================================================================
-
-describe('callActionIn', () => {
-  it('validates args before calling handler', async () => {
-    let validatorCalled = false;
-    const action: ActionDefinition = {
-      validator: (args) => {
-        validatorCalled = true;
-        return args;
-      },
-      handler: async (db, args) => args,
-    };
-
-    registerAction('validationDb', 'validatedAction', action);
-
-    const ctx = createMockContext('validationDb');
-    await callActionIn({}, 'validationDb', 'validatedAction', { test: true }, ctx);
-
-    expect(validatorCalled).toBe(true);
-  });
-
-  it('throws on validation failure', async () => {
-    // This test would need arktype's type.errors to work properly
-    // For now, we can test that the validator is called
-    const action: ActionDefinition = {
-      validator: () => {
-        // Simulate validation error
-        const error = { summary: 'Invalid input' };
-        Object.setPrototypeOf(error, { constructor: { name: 'errors' } });
-        return error;
-      },
-      handler: async () => {},
-    };
-
-    registerAction('errorDb', 'errorAction', action);
-    const ctx = createMockContext('errorDb');
-
-    // Note: This test is simplified - real test would need proper arktype error
-    // await expect(callActionIn({}, 'errorDb', 'errorAction', {}, ctx)).rejects.toThrow('Invalid args');
   });
 });

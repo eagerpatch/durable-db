@@ -862,7 +862,7 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
 | `./context` | `src/context/` | Tenant ID context (`runWithTenantId`, `getTenantId`, `setTenantIdResolver`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
-| `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callActionInValidated`) |
+| `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callAction`) |
 | `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `shoplayer-db` binary |
 
 ### Request Flow

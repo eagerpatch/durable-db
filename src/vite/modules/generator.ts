@@ -445,7 +445,7 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
     ),
   ]);
 
-  // if (__do && __do.dbName === "dbName") { return callActionInValidated(...) }
+  // if (__do && __do.dbName === "dbName") { return callAction(...) }
   const fastIf = t.ifStatement(
     t.logicalExpression(
       '&&',
@@ -458,7 +458,7 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
     ),
     t.blockStatement([
       t.returnStatement(
-        t.callExpression(t.identifier('callActionInValidated'), [
+        t.callExpression(t.identifier('callAction'), [
           t.memberExpression(t.identifier('__do'), t.identifier('db')),
           t.stringLiteral(database.name),
           t.stringLiteral(action.exportName),
@@ -560,7 +560,7 @@ export function transformActionFile(options: TransformOptions) {
   ensureNamedImports(body, 'arktype', ['type']);
   ensureNamedImports(body, contextImport, ['getTenantId']);
   ensureNamedImports(body, 'cloudflare:workers', ['env']);
-  ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callActionInValidated']);
+  ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction']);
 
   const out: t.Statement[] = [];
 

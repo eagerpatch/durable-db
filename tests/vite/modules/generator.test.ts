@@ -264,7 +264,7 @@ export const createUser = action({
 
     expect(result!.code).toContain('registerAction');
     expect(result!.code).toContain('getDoContext');
-    expect(result!.code).toContain('callActionInValidated');
+    expect(result!.code).toContain('callAction');
   });
 
   it('generates registerAction call', () => {
@@ -287,7 +287,7 @@ export const createUser = action({
     });
 
     expect(result!.code).toContain('getDoContext()');
-    expect(result!.code).toContain('callActionInValidated');
+    expect(result!.code).toContain('callAction');
   });
 
   it('generates validation code', () => {

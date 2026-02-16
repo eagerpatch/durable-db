@@ -73,21 +73,25 @@ export function runWithDoContext<T>(store: DoContext, fn: () => T): T {
 // ============================================================================
 
 /**
- * Call an action with pre-validated args.
- * Used internally when running inside a DO (args already validated by stub).
+ * Call an action: validates args, then dispatches (direct call for same DB, RPC for cross-DB).
  */
-export async function callActionInValidated(
+export async function callAction(
   db: unknown,
   targetDb: string,
   actionName: string,
-  validatedArgs: unknown,
+  args: unknown,
   ctx: RpcContext
 ): Promise<unknown> {
   const entry = getOrThrow(targetDb, actionName);
 
+  const validated = entry.validator(args);
+  if (validated instanceof type.errors) {
+    throw new Error(`[shoplayer-database] Invalid args: ${validated.summary}`);
+  }
+
   // Same DB: direct call (no RPC hop)
   if (ctx.dbName === targetDb) {
-    return entry.handler(db, validatedArgs, ctx);
+    return entry.handler(db, validated, ctx);
   }
 
   // Cross DB: RPC to the other DO
@@ -104,26 +108,5 @@ export async function callActionInValidated(
   const id = binding.idFromName(ctx.instanceKey);
   const stub = binding.get(id);
 
-  return stub.rpc(actionName, validatedArgs, { instanceKey: ctx.instanceKey });
-}
-
-/**
- * Call an action with validation.
- * Used by userland code or when args haven't been validated yet.
- */
-export async function callActionIn(
-  db: unknown,
-  targetDb: string,
-  actionName: string,
-  args: unknown,
-  ctx: RpcContext
-): Promise<unknown> {
-  const entry = getOrThrow(targetDb, actionName);
-
-  const validated = entry.validator(args);
-  if (validated instanceof type.errors) {
-    throw new Error(`[shoplayer-database] Invalid args: ${validated.summary}`);
-  }
-
-  return callActionInValidated(db, targetDb, actionName, validated, ctx);
+  return stub.rpc(actionName, validated, { instanceKey: ctx.instanceKey });
 }

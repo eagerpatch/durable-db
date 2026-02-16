@@ -284,7 +284,7 @@ export const createUser = action({
 
       // Should include DO context check for short path
       expect(transformed!.code).toMatch(/getDoContext/);
-      expect(transformed!.code).toMatch(/callActionInValidated/);
+      expect(transformed!.code).toMatch(/callAction/);
       expect(transformed!.code).toMatch(/__do/);
     });
   });

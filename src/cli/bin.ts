@@ -38,9 +38,6 @@ program
         if (r.hasChanges) {
           hasChanges = true;
           console.log(`✓ ${r.database}: ${r.migrationName} (${r.statements.length} statements)`);
-          if (r.wasReset) {
-            console.log(`  ⚠ Dev state was reset due to production snapshot change`);
-          }
         } else {
           console.log(`· ${r.database}: no changes`);
         }

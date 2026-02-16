@@ -11,8 +11,6 @@ export interface DatabaseDevState {
   prodSnapshotHash: string;
   /** Timestamp of last push */
   lastPush: string | null;
-  /** Number of dev migrations generated */
-  devMigrationCount: number;
 }
 
 export interface DevState {
@@ -146,7 +144,6 @@ export function getDatabaseDevState(
     state.databases[dbName] = {
       prodSnapshotHash,
       lastPush: null,
-      devMigrationCount: 0,
     };
   }
   return state.databases[dbName];
@@ -204,22 +201,20 @@ export function loadDevMigrations(projectRoot: string, dbName: string): Map<stri
 export function saveDevMigration(
   projectRoot: string,
   dbName: string,
-  migrationNumber: number,
+  name: string,
   statements: string[]
 ): string {
   const paths = getDevPaths(projectRoot);
   const migrationsDir = paths.migrationsDir(dbName);
-  
+
   // Ensure directory exists
   fs.mkdirSync(migrationsDir, { recursive: true });
-  
-  // Generate migration name with zero-padded number
-  const name = `${String(migrationNumber).padStart(4, '0')}_dev`;
+
   const filePath = path.join(migrationsDir, `${name}.sql`);
-  
+
   const content = statements.map(s => s.endsWith(';') ? s : `${s};`).join('\n\n');
   fs.writeFileSync(filePath, content);
-  
+
   return name;
 }
 

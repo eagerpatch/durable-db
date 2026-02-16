@@ -15,8 +15,8 @@ export type ArgsSchema = Record<string, unknown>;
 export interface DatabaseConfig<
   TSchema extends Record<string, SQLiteTableWithColumns<any>>,
 > {
-  /** Path to migrations directory, relative to the database file */
-  migrationsDir: string;
+  /** Path to migrations directory, relative to the database file. Default: './migrations' */
+  migrationsDir?: string;
   /** Drizzle schema tables */
   schema: TSchema;
   /** Instance strategy - 'per-tenant' (default) or 'global' */

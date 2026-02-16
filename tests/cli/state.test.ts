@@ -78,7 +78,6 @@ describe('CLI state management', () => {
           main: {
             prodSnapshotHash: 'abc',
             lastPush: '2024-01-01T00:00:00Z',
-            devMigrationCount: 2,
           },
         },
       };
@@ -112,7 +111,6 @@ describe('CLI state management', () => {
 
       expect(dbState.prodSnapshotHash).toBe('hash123');
       expect(dbState.lastPush).toBeNull();
-      expect(dbState.devMigrationCount).toBe(0);
       expect(state.databases['main']).toBe(dbState);
     });
 
@@ -121,13 +119,11 @@ describe('CLI state management', () => {
       state.databases['main'] = {
         prodSnapshotHash: 'existing',
         lastPush: '2024-01-01',
-        devMigrationCount: 5,
       };
 
       const dbState = getDatabaseDevState(state, 'main', 'newhash');
 
       expect(dbState.prodSnapshotHash).toBe('existing'); // Not overwritten
-      expect(dbState.devMigrationCount).toBe(5);
     });
   });
 
@@ -142,7 +138,6 @@ describe('CLI state management', () => {
       state.databases['main'] = {
         prodSnapshotHash: 'hash123',
         lastPush: null,
-        devMigrationCount: 0,
       };
 
       expect(hasProdSnapshotChanged(state, 'main', 'hash123')).toBe(false);
@@ -153,7 +148,6 @@ describe('CLI state management', () => {
       state.databases['main'] = {
         prodSnapshotHash: 'oldhash',
         lastPush: null,
-        devMigrationCount: 0,
       };
 
       expect(hasProdSnapshotChanged(state, 'main', 'newhash')).toBe(true);
@@ -167,26 +161,26 @@ describe('CLI state management', () => {
         'CREATE INDEX idx_users ON users(id)',
       ];
 
-      const name = saveDevMigration(tempDir, 'main', 1, statements);
+      const name = saveDevMigration(tempDir, 'main', 'dev_abc123', statements);
       const migrations = loadDevMigrations(tempDir, 'main');
 
-      expect(name).toBe('0001_dev');
+      expect(name).toBe('dev_abc123');
       expect(migrations.size).toBe(1);
-      expect(migrations.has('0001_dev')).toBe(true);
-      
-      const chunks = migrations.get('0001_dev')!;
+      expect(migrations.has('dev_abc123')).toBe(true);
+
+      const chunks = migrations.get('dev_abc123')!;
       expect(chunks.length).toBe(1);
       expect(chunks[0]).toContain('CREATE TABLE users (id TEXT PRIMARY KEY)');
     });
 
     it('loads migrations in sorted order', () => {
-      saveDevMigration(tempDir, 'main', 3, ['SELECT 3']);
-      saveDevMigration(tempDir, 'main', 1, ['SELECT 1']);
-      saveDevMigration(tempDir, 'main', 2, ['SELECT 2']);
+      saveDevMigration(tempDir, 'main', 'dev_ccc', ['SELECT 3']);
+      saveDevMigration(tempDir, 'main', 'dev_aaa', ['SELECT 1']);
+      saveDevMigration(tempDir, 'main', 'dev_bbb', ['SELECT 2']);
 
       const migrations = loadDevMigrations(tempDir, 'main');
 
-      expect(Array.from(migrations.keys())).toEqual(['0001_dev', '0002_dev', '0003_dev']);
+      expect(Array.from(migrations.keys())).toEqual(['dev_aaa', 'dev_bbb', 'dev_ccc']);
     });
 
     it('returns empty map for non-existent database', () => {
@@ -195,7 +189,7 @@ describe('CLI state management', () => {
     });
 
     it('clears dev migrations', () => {
-      saveDevMigration(tempDir, 'main', 1, ['SELECT 1']);
+      saveDevMigration(tempDir, 'main', 'dev_test', ['SELECT 1']);
       expect(loadDevMigrations(tempDir, 'main').size).toBe(1);
 
       clearDevMigrations(tempDir, 'main');
@@ -206,7 +200,7 @@ describe('CLI state management', () => {
   describe('clearDatabaseDevState', () => {
     it('removes all database dev files', () => {
       // Create some dev state
-      saveDevMigration(tempDir, 'main', 1, ['SELECT 1']);
+      saveDevMigration(tempDir, 'main', 'dev_test', ['SELECT 1']);
       saveDevSnapshot(tempDir, 'main', { tables: {} });
 
       const paths = getDevPaths(tempDir);

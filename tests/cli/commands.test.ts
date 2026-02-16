@@ -203,7 +203,6 @@ export const { action } = defineDatabase({
       state.databases['testdb'] = {
         prodSnapshotHash: 'hash',
         lastPush: '2024-01-01',
-        devMigrationCount: 1,
       };
       const { saveDevState } = await import('../../src/cli/state');
       saveDevState(tempDir, state);
@@ -411,7 +410,6 @@ export const { action } = defineDatabase({
     state.databases['main'] = {
       prodSnapshotHash: 'oldhash', // Intentionally wrong hash
       lastPush: '2024-01-01',
-      devMigrationCount: 1,
     };
     saveDevState(tempDir, state);
 

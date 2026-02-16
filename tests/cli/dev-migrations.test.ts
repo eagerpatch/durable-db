@@ -17,20 +17,18 @@ describe('dev migrations integration', () => {
   });
 
   describe('dev migration naming', () => {
-    it('generates migration names with zero-padded numbers', () => {
-      const name1 = saveDevMigration(tempDir, 'main', 1, ['SELECT 1']);
-      const name2 = saveDevMigration(tempDir, 'main', 99, ['SELECT 99']);
-      const name3 = saveDevMigration(tempDir, 'main', 1000, ['SELECT 1000']);
+    it('uses the provided name directly', () => {
+      const name1 = saveDevMigration(tempDir, 'main', 'dev_abc123', ['SELECT 1']);
+      const name2 = saveDevMigration(tempDir, 'main', 'dev_def456', ['SELECT 2']);
 
-      expect(name1).toBe('0001_dev');
-      expect(name2).toBe('0099_dev');
-      expect(name3).toBe('1000_dev');
+      expect(name1).toBe('dev_abc123');
+      expect(name2).toBe('dev_def456');
     });
 
     it('dev migrations sort after any prod migration timestamp', () => {
       // Prod migrations typically have timestamps like 20241217143000
-      // Dev migrations have names like 0001_dev, 0002_dev, etc.
-      // When prefixed with _dev_, they become _dev_0001_dev, _dev_0002_dev
+      // Dev migrations have content-hash names like dev_abc123
+      // When prefixed with _dev_, they become _dev_dev_abc123
       // This ensures they sort AFTER prod migrations in the combined map
 
       const prodMigrations = [
@@ -38,19 +36,19 @@ describe('dev migrations integration', () => {
         '20241218093000_add_users',
       ];
 
-      saveDevMigration(tempDir, 'main', 1, ['SELECT 1']);
-      saveDevMigration(tempDir, 'main', 2, ['SELECT 2']);
-      
+      saveDevMigration(tempDir, 'main', 'dev_abc123', ['SELECT 1']);
+      saveDevMigration(tempDir, 'main', 'dev_def456', ['SELECT 2']);
+
       const devMigrations = loadDevMigrations(tempDir, 'main');
 
       // Simulate merging like the Vite plugin does
       const allMigrations = new Map<string, string[][]>();
-      
+
       // Add prod migrations (simulated)
       for (const name of prodMigrations) {
         allMigrations.set(name, [['-- prod migration']]);
       }
-      
+
       // Add dev migrations with prefix
       for (const [name, chunks] of devMigrations) {
         allMigrations.set(`_dev_${name}`, chunks);
@@ -58,32 +56,32 @@ describe('dev migrations integration', () => {
 
       // Verify sort order
       const sortedNames = Array.from(allMigrations.keys()).sort();
-      
+
       expect(sortedNames).toEqual([
         '20241217143000_initial',
         '20241218093000_add_users',
-        '_dev_0001_dev',
-        '_dev_0002_dev',
+        '_dev_dev_abc123',
+        '_dev_dev_def456',
       ]);
     });
   });
 
   describe('dev migration isolation', () => {
     it('keeps dev migrations separate per database', () => {
-      saveDevMigration(tempDir, 'db1', 1, ['SELECT 1']);
-      saveDevMigration(tempDir, 'db2', 1, ['SELECT 2']);
-      saveDevMigration(tempDir, 'db2', 2, ['SELECT 3']);
+      saveDevMigration(tempDir, 'db1', 'dev_aaa', ['SELECT 1']);
+      saveDevMigration(tempDir, 'db2', 'dev_bbb', ['SELECT 2']);
+      saveDevMigration(tempDir, 'db2', 'dev_ccc', ['SELECT 3']);
 
       const db1Migrations = loadDevMigrations(tempDir, 'db1');
       const db2Migrations = loadDevMigrations(tempDir, 'db2');
 
       expect(db1Migrations.size).toBe(1);
       expect(db2Migrations.size).toBe(2);
-      
+
       // Verify correct content
-      expect(db1Migrations.get('0001_dev')![0]).toContain('SELECT 1');
-      expect(db2Migrations.get('0001_dev')![0]).toContain('SELECT 2');
-      expect(db2Migrations.get('0002_dev')![0]).toContain('SELECT 3');
+      expect(db1Migrations.get('dev_aaa')![0]).toContain('SELECT 1');
+      expect(db2Migrations.get('dev_bbb')![0]).toContain('SELECT 2');
+      expect(db2Migrations.get('dev_ccc')![0]).toContain('SELECT 3');
     });
   });
 
@@ -92,7 +90,7 @@ describe('dev migrations integration', () => {
       const paths = getDevPaths(tempDir);
 
       // Save some dev state to create the directory structure
-      saveDevMigration(tempDir, 'main', 1, ['SELECT 1']);
+      saveDevMigration(tempDir, 'main', 'dev_test', ['SELECT 1']);
 
       expect(fs.existsSync(paths.migrationsDir('main'))).toBe(true);
       expect(paths.cacheDir).toContain('.cache/@shoplayer/database');

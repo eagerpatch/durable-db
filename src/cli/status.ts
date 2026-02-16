@@ -2,7 +2,6 @@ import * as path from 'node:path';
 import {
   loadDevState,
   loadDevMigrations,
-  loadDevSnapshot,
   getDevPaths,
 } from './state';
 import {
@@ -12,7 +11,6 @@ import {
   generateMigrationStatements,
   snapshotsEqual,
   hashSnapshot,
-  type Snapshot,
 } from '../migrations';
 import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
 import { parseDatabaseFile } from '../vite/modules/parser';
@@ -165,18 +163,14 @@ async function getDatabaseStatus(
     status.prodSnapshotChanged = true;
   }
 
-  // Determine the "from" snapshot - either dev snapshot or prod snapshot
-  const devSnapshot = loadDevSnapshot(projectRoot, db.name) as Snapshot | null;
-  const fromSnapshot = devSnapshot ?? prodSnapshot;
-
   // Generate current schema snapshot
   const currentSnapshot = await generateSnapshotFromSchema(schema);
 
-  // Check for changes against dev snapshot (what push would do)
-  if (!snapshotsEqual(fromSnapshot, currentSnapshot)) {
+  // Check for changes against prod snapshot (matches what push would do)
+  if (!snapshotsEqual(prodSnapshot, currentSnapshot)) {
     status.hasUncommittedChanges = true;
     try {
-      status.pendingStatements = await generateMigrationStatements(fromSnapshot, currentSnapshot);
+      status.pendingStatements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
     } catch (error) {
       if (verbose) {
         console.warn(`[db:status] Failed to generate pending statements for ${db.name}: ${error}`);

@@ -1,23 +1,15 @@
 import * as path from 'node:path';
-import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
 import {
-  loadDevState,
-  saveDevState,
-  getDatabaseDevState,
-  hasProdSnapshotChanged,
-  clearDatabaseDevState,
   saveDevMigration,
-  loadDevSnapshot,
-  saveDevSnapshot,
-  getDevPaths,
+  loadDevMigrations,
+  clearDevMigrations,
 } from './state';
 import {
   loadSnapshot,
   generateSnapshotFromSchema,
   generateMigrationStatements,
   snapshotsEqual,
-  hashSnapshot,
-  type Snapshot,
 } from '../migrations';
 import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
 import { parseDatabaseFile } from '../vite/modules/parser';
@@ -39,8 +31,6 @@ export interface PushResult {
   hasChanges: boolean;
   statements: string[];
   migrationName: string | null;
-  /** Whether the dev state was reset due to prod snapshot change */
-  wasReset: boolean;
 }
 
 // ============================================================================
@@ -52,9 +42,10 @@ export interface PushResult {
  *
  * This command:
  * 1. Discovers all databases in the project
- * 2. For each database, compares current schema to dev snapshot
- * 3. If changes detected, generates a new dev migration
- * 4. Updates dev snapshot
+ * 2. For each database, diffs production snapshot against current schema
+ * 3. If changes detected, generates a single squashed dev migration
+ * 4. Uses content-hash naming so the same schema always produces the same
+ *    migration name — the DO skips it if already applied
  *
  * Dev migrations are stored in node_modules/.cache/@shoplayer/database/
  * and are ephemeral - they're cleared when running `db:generate` or `db:reset`
@@ -63,13 +54,9 @@ export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
   const { projectRoot = process.cwd(), databasesDir = 'src/databases', verbose = false } = ctx;
   const results: PushResult[] = [];
 
-  // Load global dev state
-  const devState = loadDevState(projectRoot);
-  const paths = getDevPaths(projectRoot);
-
   // Discover databases
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
-  
+
   if (files.length === 0) {
     if (verbose) {
       console.log('[db:push] No databases found');
@@ -86,24 +73,23 @@ export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
       continue;
     }
 
-    const db = parsed.database;
-    const result = await pushDatabase(projectRoot, db, devState, verbose);
+    const result = await pushDatabase(projectRoot, parsed.database, verbose);
     results.push(result);
   }
-
-  // Save updated dev state
-  saveDevState(projectRoot, devState);
 
   return results;
 }
 
 /**
  * Push a single database
+ *
+ * Always diffs from the production snapshot to the current schema,
+ * producing a single squashed dev migration with a deterministic
+ * content-hash name.
  */
 async function pushDatabase(
   projectRoot: string,
   db: DatabaseInfo,
-  devState: ReturnType<typeof loadDevState>,
   verbose: boolean
 ): Promise<PushResult> {
   const result: PushResult = {
@@ -111,7 +97,6 @@ async function pushDatabase(
     hasChanges: false,
     statements: [],
     migrationName: null,
-    wasReset: false,
   };
 
   // Skip if no schema defined
@@ -147,40 +132,20 @@ async function pushDatabase(
     return result;
   }
 
-  // Load production snapshot
+  // Always diff from production snapshot to current schema
   const prodMigrationsDir = path.resolve(path.dirname(db.filePath), db.migrationsDir);
   const prodSnapshot = loadSnapshot(prodMigrationsDir);
-  const prodSnapshotHash = hashSnapshot(prodSnapshot);
-
-  // Check if prod snapshot changed (someone else committed migrations)
-  if (hasProdSnapshotChanged(devState, db.name, prodSnapshotHash)) {
-    if (verbose) {
-      console.log(`[db:push] Production snapshot changed for ${db.name}, resetting dev state`);
-    }
-    clearDatabaseDevState(projectRoot, db.name);
-    result.wasReset = true;
-  }
-
-  // Get/initialize database dev state
-  const dbDevState = getDatabaseDevState(devState, db.name, prodSnapshotHash);
-
-  // Determine the "from" snapshot - either dev snapshot or prod snapshot
-  const devSnapshot = loadDevSnapshot(projectRoot, db.name) as Snapshot | null;
-  const fromSnapshot = devSnapshot ?? prodSnapshot;
-
-  // Generate current schema snapshot
   const currentSnapshot = await generateSnapshotFromSchema(schema);
 
-  // Check if there are changes
-  if (snapshotsEqual(fromSnapshot, currentSnapshot)) {
+  if (snapshotsEqual(prodSnapshot, currentSnapshot)) {
     if (verbose) {
       console.log(`[db:push] No changes for ${db.name}`);
     }
     return result;
   }
 
-  // Generate migration statements
-  const statements = await generateMigrationStatements(fromSnapshot, currentSnapshot);
+  // Generate migration statements (prod → current)
+  const statements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
 
   if (statements.length === 0) {
     if (verbose) {
@@ -189,19 +154,34 @@ async function pushDatabase(
     return result;
   }
 
-  // Increment migration counter and save
-  dbDevState.devMigrationCount++;
-  dbDevState.lastPush = new Date().toISOString();
-
-  const migrationName = saveDevMigration(
-    projectRoot,
-    db.name,
-    dbDevState.devMigrationCount,
-    statements
+  // Dev migrations use IF NOT EXISTS for safety — the squashed migration
+  // may overlay tables from a previous dev migration the DO already applied
+  const safeStatements = statements.map(s =>
+    s.replace(/\bCREATE TABLE\b(?!\s+IF\s+NOT\s+EXISTS)/gi, 'CREATE TABLE IF NOT EXISTS')
+     .replace(/\bCREATE INDEX\b(?!\s+IF\s+NOT\s+EXISTS)/gi, 'CREATE INDEX IF NOT EXISTS')
+     .replace(/\bCREATE UNIQUE INDEX\b(?!\s+IF\s+NOT\s+EXISTS)/gi, 'CREATE UNIQUE INDEX IF NOT EXISTS')
   );
 
-  // Save updated dev snapshot
-  saveDevSnapshot(projectRoot, db.name, currentSnapshot);
+  // Deterministic name based on content hash — same schema always
+  // produces the same migration name, so the DO skips it on restart
+  const hash = crypto.createHash('sha256')
+    .update(safeStatements.join('\n'))
+    .digest('hex')
+    .slice(0, 8);
+  const migrationName = `dev_${hash}`;
+
+  // If this exact migration already exists, skip regeneration
+  const existingMigrations = loadDevMigrations(projectRoot, db.name);
+  if (existingMigrations.has(migrationName)) {
+    if (verbose) {
+      console.log(`[db:push] Migration ${migrationName} already exists for ${db.name}, skipping`);
+    }
+    return result;
+  }
+
+  // Clear old dev migrations and save the new squashed migration
+  clearDevMigrations(projectRoot, db.name);
+  saveDevMigration(projectRoot, db.name, migrationName, safeStatements);
 
   result.hasChanges = true;
   result.statements = statements;
@@ -222,16 +202,13 @@ export async function pushOne(ctx: PushContext = {}, dbName: string): Promise<Pu
   const { projectRoot = process.cwd(), databasesDir = 'src/databases', verbose = false } = ctx;
 
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
-  
+
   for (const file of files) {
     const code = readFile(file.absolutePath);
     const parsed = parseDatabaseFile(file.absolutePath, code);
 
     if (parsed.database?.name === dbName) {
-      const devState = loadDevState(projectRoot);
-      const result = await pushDatabase(projectRoot, parsed.database, devState, verbose);
-      saveDevState(projectRoot, devState);
-      return result;
+      return await pushDatabase(projectRoot, parsed.database, verbose);
     }
   }
 

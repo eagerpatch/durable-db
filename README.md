@@ -910,10 +910,11 @@ Run a single test file:
 npx vitest run tests/db/defineDatabase.test.ts
 ```
 
-Run the example app:
+Run the example apps:
 
 ```bash
-cd example && pnpm dev
+cd examples/simple && pnpm dev
+cd examples/rwsdk && pnpm dev
 ```
 
 ### Project Structure
@@ -946,5 +947,7 @@ src/
       generator.ts           # DO class and stub code generation
       wrangler.ts            # wrangler.jsonc auto-patching
 tests/              # Mirrors src/ structure
-example/            # Example Cloudflare Worker app
+examples/
+  simple/           # Basic Cloudflare Worker example
+  rwsdk/            # Multi-tenant analytics API with RWSDK + WebSocket transport
 ```

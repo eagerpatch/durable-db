@@ -20,14 +20,15 @@ Run a single test file:
 npx vitest run tests/db/defineDatabase.test.ts
 ```
 
-Run the example app:
+Run the example apps:
 ```bash
-cd example && pnpm dev
+cd examples/simple && pnpm dev
+cd examples/rwsdk && pnpm dev
 ```
 
 ## Monorepo Structure
 
-pnpm workspace with `example/` as a separate package. The root package is the library itself.
+pnpm workspace with `examples/*` as separate packages. The root package is the library itself.
 
 ## Architecture
 

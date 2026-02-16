@@ -1,124 +1,99 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /**
- * The context object available during request handling
+ * AsyncLocalStorage instance for tenant ID
  */
-export interface RequestContext<TEnv = unknown, TSession = unknown> {
-  /** The Cloudflare environment bindings */
-  env: TEnv;
-  /** The incoming request */
-  request: Request;
-  /** Session data (typically includes tenant info) */
-  session: TSession;
-}
+const tenantIdStorage = new AsyncLocalStorage<string>();
 
 /**
- * AsyncLocalStorage instance for request context
+ * Custom tenant ID resolver for framework integration.
+ * When set, getTenantId() falls back to this if no ALS store is found.
  */
-const contextStorage = new AsyncLocalStorage<RequestContext<any, any>>();
+let tenantIdResolver: (() => string) | null = null;
 
 /**
- * Custom context resolver for framework integration.
- * When set, getContext() falls back to this if no ALS store is found.
- */
-let contextResolver: (() => RequestContext<any, any>) | null = null;
-
-/**
- * Configure a custom context resolver for framework integration.
+ * Configure a custom tenant ID resolver for framework integration.
  *
  * When running inside a framework that already has its own request-scoped context
  * (e.g. RWSDK's `getRequestInfo()`), use this to bridge the two context systems
- * instead of wrapping every request in `runWithContext()`.
+ * instead of wrapping every request in `runWithTenantId()`.
  *
- * The resolver is called at the moment a database operation needs context —
+ * The resolver is called at the moment a database operation needs the tenant ID —
  * by which point request middleware (auth, session, etc.) has already completed.
  *
  * @example
  * ```ts
- * import { setContextResolver } from '@shoplayer/database/context';
+ * import { setTenantIdResolver } from '@shoplayer/database/context';
  * import { getRequestInfo } from 'rwsdk/worker';
- * import { env } from 'cloudflare:workers';
  *
- * setContextResolver(() => ({
- *   env,
- *   request: getRequestInfo().request,
- *   session: { tenantId: getRequestInfo().ctx.session!.shop },
- * }));
+ * setTenantIdResolver(() => getRequestInfo().ctx.session!.shop);
  * ```
  */
-export function setContextResolver(resolver: (() => RequestContext<any, any>) | null): void {
-  contextResolver = resolver;
+export function setTenantIdResolver(resolver: (() => string) | null): void {
+  tenantIdResolver = resolver;
 }
 
 /**
- * Get the current request context
+ * Get the current tenant ID
  *
  * Resolution order:
- * 1. AsyncLocalStorage store (standalone mode via `runWithContext()`)
- * 2. Custom resolver (framework integration via `setContextResolver()`)
+ * 1. AsyncLocalStorage store (standalone mode via `runWithTenantId()`)
+ * 2. Custom resolver (framework integration via `setTenantIdResolver()`)
  * 3. Throws if neither is available
  *
- * @throws Error if no context is available
+ * @throws Error if no tenant ID is available
  *
  * @example
  * ```ts
- * import { getContext } from '@shoplayer/database/context';
+ * import { getTenantId } from '@shoplayer/database/context';
  *
  * async function myHandler() {
- *   const ctx = getContext();
- *   const tenantId = ctx.session.tenantId;
+ *   const tenantId = getTenantId();
  *   // ...
  * }
  * ```
  */
-export function getContext<TEnv = unknown, TSession = unknown>(): RequestContext<TEnv, TSession> {
-  const store = contextStorage.getStore();
-  if (store) return store as RequestContext<TEnv, TSession>;
+export function getTenantId(): string {
+  const store = tenantIdStorage.getStore();
+  if (store !== undefined) return store;
 
-  if (contextResolver) return contextResolver() as RequestContext<TEnv, TSession>;
+  if (tenantIdResolver) return tenantIdResolver();
 
-  throw new Error('getContext() called outside of request context. Use runWithContext() or setContextResolver().');
+  throw new Error('getTenantId() called outside of request context. Use runWithTenantId() or setTenantIdResolver().');
 }
 
 /**
- * Run a function with the given request context
+ * Run a function with the given tenant ID
  *
- * All database actions called within the callback will have access to this context.
+ * All database actions called within the callback will have access to this tenant ID.
  *
  * @example
  * ```ts
- * import { runWithContext } from '@shoplayer/database/context';
+ * import { runWithTenantId } from '@shoplayer/database/context';
  *
  * export default {
  *   async fetch(request: Request, env: Env) {
- *     return runWithContext(
- *       {
- *         env,
- *         request,
- *         session: { tenantId: 'my-tenant' },
- *       },
- *       async () => {
- *         // Call your actions here
- *         const user = await createUser({ name: 'John', email: 'john@example.com' });
- *         return Response.json(user);
- *       }
- *     );
+ *     return runWithTenantId('my-tenant', async () => {
+ *       // Call your actions here
+ *       const user = await createUser({ name: 'John', email: 'john@example.com' });
+ *       return Response.json(user);
+ *     });
  *   },
  * };
  * ```
  */
-export function runWithContext<T, TEnv = unknown, TSession = unknown>(
-  context: RequestContext<TEnv, TSession>,
+export function runWithTenantId<T>(
+  tenantId: string,
   fn: () => T | Promise<T>
 ): T | Promise<T> {
-  return contextStorage.run(context, fn);
+  return tenantIdStorage.run(tenantId, fn);
 }
 
 /**
- * Check if we're currently inside a request context
+ * Check if we're currently inside a request context with a tenant ID
  */
-export function hasContext(): boolean {
-  return contextStorage.getStore() !== undefined || contextResolver !== null;
+export function hasTenantId(): boolean {
+  return tenantIdStorage.getStore() !== undefined || tenantIdResolver !== null;
 }
 
 /**

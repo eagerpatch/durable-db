@@ -22,14 +22,12 @@ export interface TransformOptions {
   database: DatabaseInfo;
   actionsInFile: ActionInfo[];
   contextImport: string;
-  tenantIdPath: string;
   registryImport: string;
 }
 
 interface StubConfig {
   action: ActionInfo;
   database: DatabaseInfo;
-  tenantIdPath: string;
 }
 
 // ============================================================================
@@ -46,13 +44,6 @@ export function parseExpression(code: string): t.Expression {
   const stmt = ast.program.body[0];
   if (t.isExpressionStatement(stmt)) return stmt.expression;
   throw new Error(`Expected expression, got ${stmt?.type ?? 'unknown'}`);
-}
-
-function parseMemberPath(base: t.Expression, path: string): t.Expression {
-  return path.split('.').reduce<t.Expression>(
-    (obj, prop) => t.memberExpression(obj, t.identifier(prop)),
-    base
-  );
 }
 
 // ============================================================================
@@ -482,13 +473,13 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
 }
 
 function buildStubBodyStatements(config: StubConfig): t.Statement[] {
-  const { action, database, tenantIdPath } = config;
+  const { action, database } = config;
 
   const bindingExpr = t.memberExpression(t.identifier('env'), t.identifier(database.bindingName));
   const instanceKeyExpr =
     database.instance === 'global'
       ? t.stringLiteral('global')
-      : parseMemberPath(t.identifier('ctx'), tenantIdPath);
+      : t.callExpression(t.identifier('getTenantId'), []);
 
   return [
     // const argsSchema = type({...});
@@ -512,22 +503,6 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
 
     // DO-local short path
     ...buildDoShortPath(config),
-
-    // const ctx = getContext();
-    t.variableDeclaration('const', [
-      t.variableDeclarator(
-        t.identifier('ctx'),
-        t.callExpression(t.identifier('getContext'), [])
-      ),
-    ]),
-
-    // const env = ctx.env;
-    t.variableDeclaration('const', [
-      t.variableDeclarator(
-        t.identifier('env'),
-        t.memberExpression(t.identifier('ctx'), t.identifier('env'))
-      ),
-    ]),
 
     // const instanceKey = ...
     t.variableDeclaration('const', [
@@ -573,7 +548,6 @@ export function transformActionFile(options: TransformOptions) {
     database,
     actionsInFile,
     contextImport,
-    tenantIdPath,
     registryImport,
   } = options;
 
@@ -584,7 +558,8 @@ export function transformActionFile(options: TransformOptions) {
   const body = ast.program.body;
 
   ensureNamedImports(body, 'arktype', ['type']);
-  ensureNamedImports(body, contextImport, ['getContext']);
+  ensureNamedImports(body, contextImport, ['getTenantId']);
+  ensureNamedImports(body, 'cloudflare:workers', ['env']);
   ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callActionInValidated']);
 
   const out: t.Statement[] = [];
@@ -652,7 +627,7 @@ export function transformActionFile(options: TransformOptions) {
       const funcDecl = t.functionDeclaration(
         t.identifier(exportName),
         [t.identifier('args')],
-        t.blockStatement(buildStubBodyStatements({ action, database, tenantIdPath })),
+        t.blockStatement(buildStubBodyStatements({ action, database })),
         false,
         true
       );

@@ -190,7 +190,6 @@ describe('transformActionFile', () => {
     dbName: 'main',
     database: mockDatabase,
     contextImport: '@shoplayer/database/context',
-    tenantIdPath: 'session.tenantId',
     registryImport: '@shoplayer/database/registry',
   };
 
@@ -241,7 +240,18 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toMatch(/import\s*\{[^}]*getContext[^}]*\}\s*from\s*["']@shoplayer\/database\/context["']/);
+    expect(result!.code).toMatch(/import\s*\{[^}]*getTenantId[^}]*\}\s*from\s*["']@shoplayer\/database\/context["']/);
+  });
+
+  it('adds cloudflare:workers env import', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toMatch(/import\s*\{[^}]*env[^}]*\}\s*from\s*["']cloudflare:workers["']/);
   });
 
   it('adds registry imports', () => {
@@ -315,7 +325,7 @@ export const createUser = action({
     expect(result!.code).toContain('instanceKey = "global"');
   });
 
-  it('uses tenantIdPath for per-tenant databases', () => {
+  it('uses getTenantId() for per-tenant databases', () => {
     const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
     const result = transformActionFile({
       ...defaultOptions,
@@ -323,7 +333,7 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toContain('ctx.session.tenantId');
+    expect(result!.code).toContain('getTenantId()');
   });
 
   it('transforms multiple actions', () => {

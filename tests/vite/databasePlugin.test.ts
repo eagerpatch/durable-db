@@ -43,7 +43,6 @@ describe('shoplayerDatabasePlugin', () => {
         contextImport: 'my-app/context',
         registryImport: 'my-app/registry',
         databasesDir: 'lib/db',
-        tenantIdPath: 'user.tenantId',
         autoMigrations: false,
       });
       expect(customPlugin.name).toBe('shoplayer-database');

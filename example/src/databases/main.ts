@@ -1,4 +1,4 @@
-import { defineDatabase } from '../../../src/db';
+import { defineDatabase } from '@shoplayer/database/db';
 import { users, posts } from './schema';
 
 export const { action } = defineDatabase({

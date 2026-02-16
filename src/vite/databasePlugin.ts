@@ -25,8 +25,6 @@ export interface DatabasePluginOptions {
   registryImport?: string;
   /** Directory containing database definitions. Default: 'src/databases' */
   databasesDir?: string;
-  /** Property path to tenant ID in context. Default: 'session.tenantId' */
-  tenantIdPath?: string;
   /** Auto-generate migrations. Default: 'development' */
   autoMigrations?: boolean | 'development';
 }
@@ -35,7 +33,6 @@ interface ResolvedOptions {
   contextImport: string;
   registryImport: string;
   databasesDir: string;
-  tenantIdPath: string;
   autoMigrations: boolean | 'development';
 }
 
@@ -263,7 +260,6 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     contextImport: options.contextImport ?? '@shoplayer/database/context',
     registryImport: options.registryImport ?? '@shoplayer/database/registry',
     databasesDir: options.databasesDir ?? 'src/databases',
-    tenantIdPath: options.tenantIdPath ?? 'session.tenantId',
     autoMigrations: options.autoMigrations ?? 'development',
   });
 
@@ -355,7 +351,6 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
         database,
         actionsInFile: parsed.actions,
         contextImport: state.options.contextImport,
-        tenantIdPath: state.options.tenantIdPath,
         registryImport: state.options.registryImport,
       });
 

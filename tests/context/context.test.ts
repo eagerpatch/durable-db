@@ -1,198 +1,120 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { getContext, runWithContext, hasContext, setContextResolver } from '../../src/context';
+import { getTenantId, runWithTenantId, hasTenantId, setTenantIdResolver } from '../../src/context';
 
 describe('context', () => {
-  describe('runWithContext', () => {
-    it('makes context available within callback', () => {
-      const mockEnv = { MY_BINDING: 'test' };
-      const mockRequest = new Request('https://example.com');
-      const mockSession = { tenantId: 'test-tenant' };
-
-      runWithContext(
-        { env: mockEnv, request: mockRequest, session: mockSession },
-        () => {
-          const ctx = getContext();
-          expect(ctx.env).toBe(mockEnv);
-          expect(ctx.request).toBe(mockRequest);
-          expect(ctx.session).toBe(mockSession);
-        }
-      );
+  describe('runWithTenantId', () => {
+    it('makes tenant ID available within callback', () => {
+      runWithTenantId('test-tenant', () => {
+        expect(getTenantId()).toBe('test-tenant');
+      });
     });
 
     it('returns the result of the callback', () => {
-      const result = runWithContext(
-        { env: {}, request: new Request('https://example.com'), session: {} },
-        () => 42
-      );
+      const result = runWithTenantId('test-tenant', () => 42);
 
       expect(result).toBe(42);
     });
 
     it('returns promise result from async callback', async () => {
-      const result = await runWithContext(
-        { env: {}, request: new Request('https://example.com'), session: {} },
-        async () => {
-          await Promise.resolve();
-          return 'async result';
-        }
-      );
+      const result = await runWithTenantId('test-tenant', async () => {
+        await Promise.resolve();
+        return 'async result';
+      });
 
       expect(result).toBe('async result');
     });
 
     it('propagates errors from callback', () => {
       expect(() =>
-        runWithContext(
-          { env: {}, request: new Request('https://example.com'), session: {} },
-          () => {
-            throw new Error('test error');
-          }
-        )
+        runWithTenantId('test-tenant', () => {
+          throw new Error('test error');
+        })
       ).toThrow('test error');
     });
 
     it('propagates rejected promises from async callback', async () => {
       await expect(
-        runWithContext(
-          { env: {}, request: new Request('https://example.com'), session: {} },
-          async () => {
-            throw new Error('async error');
-          }
-        )
+        runWithTenantId('test-tenant', async () => {
+          throw new Error('async error');
+        })
       ).rejects.toThrow('async error');
     });
 
     it('allows nested contexts', () => {
-      const outerEnv = { outer: true };
-      const innerEnv = { inner: true };
+      runWithTenantId('outer-tenant', () => {
+        expect(getTenantId()).toBe('outer-tenant');
 
-      runWithContext(
-        { env: outerEnv, request: new Request('https://example.com'), session: {} },
-        () => {
-          expect(getContext().env).toBe(outerEnv);
+        runWithTenantId('inner-tenant', () => {
+          expect(getTenantId()).toBe('inner-tenant');
+        });
 
-          runWithContext(
-            { env: innerEnv, request: new Request('https://inner.com'), session: {} },
-            () => {
-              expect(getContext().env).toBe(innerEnv);
-            }
-          );
-
-          // After inner context, outer context is restored
-          expect(getContext().env).toBe(outerEnv);
-        }
-      );
+        // After inner context, outer context is restored
+        expect(getTenantId()).toBe('outer-tenant');
+      });
     });
   });
 
-  describe('getContext', () => {
-    it('throws when called outside of runWithContext', () => {
-      expect(() => getContext()).toThrow('getContext() called outside of request context');
+  describe('getTenantId', () => {
+    it('throws when called outside of runWithTenantId', () => {
+      expect(() => getTenantId()).toThrow('getTenantId() called outside of request context');
     });
 
-    it('returns typed context', () => {
-      interface MyEnv {
-        DATABASE: string;
-      }
-      interface MySession {
-        userId: string;
-      }
-
-      runWithContext<void, MyEnv, MySession>(
-        {
-          env: { DATABASE: 'db' },
-          request: new Request('https://example.com'),
-          session: { userId: '123' },
-        },
-        () => {
-          const ctx = getContext<MyEnv, MySession>();
-          // TypeScript should know these types
-          expect(ctx.env.DATABASE).toBe('db');
-          expect(ctx.session.userId).toBe('123');
-        }
-      );
+    it('returns the tenant ID string', () => {
+      runWithTenantId('my-tenant-123', () => {
+        expect(getTenantId()).toBe('my-tenant-123');
+      });
     });
   });
 
-  describe('setContextResolver', () => {
+  describe('setTenantIdResolver', () => {
     afterEach(() => {
-      setContextResolver(null);
+      setTenantIdResolver(null);
     });
 
-    it('provides context via resolver when no ALS store', () => {
-      const mockEnv = { RESOLVED: true };
-      const mockRequest = new Request('https://example.com');
-      const mockSession = { tenantId: 'resolved-tenant' };
+    it('provides tenant ID via resolver when no ALS store', () => {
+      setTenantIdResolver(() => 'resolved-tenant');
 
-      setContextResolver(() => ({ env: mockEnv, request: mockRequest, session: mockSession }));
-
-      const ctx = getContext();
-      expect(ctx.env).toBe(mockEnv);
-      expect(ctx.session).toBe(mockSession);
+      expect(getTenantId()).toBe('resolved-tenant');
     });
 
     it('ALS store takes priority over resolver', () => {
-      const alsEnv = { source: 'als' };
-      const resolverEnv = { source: 'resolver' };
+      setTenantIdResolver(() => 'resolver-tenant');
 
-      setContextResolver(() => ({
-        env: resolverEnv,
-        request: new Request('https://example.com'),
-        session: {},
-      }));
-
-      runWithContext(
-        { env: alsEnv, request: new Request('https://example.com'), session: {} },
-        () => {
-          expect(getContext().env).toBe(alsEnv);
-        }
-      );
+      runWithTenantId('als-tenant', () => {
+        expect(getTenantId()).toBe('als-tenant');
+      });
     });
 
     it('can be cleared by passing null', () => {
-      setContextResolver(() => ({
-        env: {},
-        request: new Request('https://example.com'),
-        session: {},
-      }));
+      setTenantIdResolver(() => 'some-tenant');
 
-      setContextResolver(null);
+      setTenantIdResolver(null);
 
-      expect(() => getContext()).toThrow('getContext() called outside of request context');
+      expect(() => getTenantId()).toThrow('getTenantId() called outside of request context');
     });
 
-    it('hasContext returns true when resolver is set', () => {
-      setContextResolver(() => ({
-        env: {},
-        request: new Request('https://example.com'),
-        session: {},
-      }));
+    it('hasTenantId returns true when resolver is set', () => {
+      setTenantIdResolver(() => 'some-tenant');
 
-      expect(hasContext()).toBe(true);
+      expect(hasTenantId()).toBe(true);
     });
   });
 
-  describe('hasContext', () => {
-    it('returns false outside of runWithContext', () => {
-      expect(hasContext()).toBe(false);
+  describe('hasTenantId', () => {
+    it('returns false outside of runWithTenantId', () => {
+      expect(hasTenantId()).toBe(false);
     });
 
-    it('returns true inside runWithContext', () => {
-      runWithContext(
-        { env: {}, request: new Request('https://example.com'), session: {} },
-        () => {
-          expect(hasContext()).toBe(true);
-        }
-      );
+    it('returns true inside runWithTenantId', () => {
+      runWithTenantId('test-tenant', () => {
+        expect(hasTenantId()).toBe(true);
+      });
     });
 
-    it('returns false after runWithContext completes', () => {
-      runWithContext(
-        { env: {}, request: new Request('https://example.com'), session: {} },
-        () => {}
-      );
+    it('returns false after runWithTenantId completes', () => {
+      runWithTenantId('test-tenant', () => {});
 
-      expect(hasContext()).toBe(false);
+      expect(hasTenantId()).toBe(false);
     });
   });
 });

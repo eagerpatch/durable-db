@@ -38,7 +38,7 @@ pnpm workspace with `example/` as a separate package. The root package is the li
 | `./db` | `src/db/` | `defineDatabase()` API, `SqliteDurableObject` base class, Kysely plugins |
 | `./vite` | `src/vite/databasePlugin.ts` | Vite plugin entry (`shoplayerDatabasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
-| `./context` | `src/context/` | AsyncLocalStorage-based request context (`runWithContext`) |
+| `./context` | `src/context/` | AsyncLocalStorage-based tenant ID context (`runWithTenantId`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action name → handler registry for RPC dispatch |
 | `./cli` | `src/cli/` | CLI commands (push, generate, status, reset) and `shoplayer-db` binary |

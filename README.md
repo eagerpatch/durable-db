@@ -113,7 +113,7 @@ export default defineConfig({
 
 ```ts
 // src/worker.ts
-import { runWithContext } from '@shoplayer/database/context';
+import { runWithTenantId } from '@shoplayer/database/context';
 import { createUser } from './databases/actions/createUser';
 
 // Export the generated Durable Object class
@@ -121,13 +121,10 @@ export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any) {
-    return runWithContext(
-      { env, request, session: { tenantId: 'my-tenant' } },
-      async () => {
-        const user = await createUser({ name: 'Alice', email: 'alice@example.com' });
-        return Response.json(user);
-      }
-    );
+    return runWithTenantId('my-tenant', async () => {
+      const user = await createUser({ name: 'Alice', email: 'alice@example.com' });
+      return Response.json(user);
+    });
   },
 };
 ```
@@ -233,59 +230,47 @@ Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery
 
 ## Calling Actions from Your Worker
 
-Database actions need a request context to know which environment and tenant to use. There are two ways to provide it:
+Database actions need a tenant ID to know which Durable Object instance to use. There are two ways to provide it:
 
-### Standalone mode: `runWithContext()`
+### Standalone mode: `runWithTenantId()`
 
-Wrap your request handler in `runWithContext()` to provide the environment and session:
+Wrap your request handler in `runWithTenantId()` to provide the tenant ID:
 
 ```ts
-import { runWithContext } from '@shoplayer/database/context';
+import { runWithTenantId } from '@shoplayer/database/context';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
 
 export default {
   async fetch(request: Request, env: any) {
-    return runWithContext(
-      {
-        env,
-        request,
-        session: { tenantId: 'example-tenant' },
-      },
-      async () => {
-        if (request.method === 'POST') {
-          const body = await request.json();
-          const user = await createUser({ name: body.name, email: body.email });
-          return Response.json(user);
-        }
-
-        const users = await listUsers({ limit: 10, offset: 0 });
-        return Response.json(users);
+    return runWithTenantId('example-tenant', async () => {
+      if (request.method === 'POST') {
+        const body = await request.json();
+        const user = await createUser({ name: body.name, email: body.email });
+        return Response.json(user);
       }
-    );
+
+      const users = await listUsers({ limit: 10, offset: 0 });
+      return Response.json(users);
+    });
   },
 };
 ```
 
-### Framework integration: `setContextResolver()`
+### Framework integration: `setTenantIdResolver()`
 
-If your framework already has its own request-scoped context (e.g. RWSDK's `getRequestInfo()`), use `setContextResolver()` to bridge the two context systems instead of wrapping every request:
+If your framework already has its own request-scoped context (e.g. RWSDK's `getRequestInfo()`), use `setTenantIdResolver()` to bridge the two context systems instead of wrapping every request:
 
 ```ts
-import { setContextResolver } from '@shoplayer/database/context';
+import { setTenantIdResolver } from '@shoplayer/database/context';
 import { getRequestInfo } from 'rwsdk/worker';
-import { env } from 'cloudflare:workers';
 
-setContextResolver(() => ({
-  env,
-  request: getRequestInfo().request,
-  session: { tenantId: getRequestInfo().ctx.session!.shop },
-}));
+setTenantIdResolver(() => getRequestInfo().ctx.session!.shop);
 ```
 
-The resolver is called at the moment a database operation needs context — by which point request middleware (auth, session, etc.) has already completed. This avoids a second AsyncLocalStorage layer when the framework already provides one.
+The resolver is called at the moment a database operation needs the tenant ID — by which point request middleware (auth, session, etc.) has already completed. This avoids a second AsyncLocalStorage layer when the framework already provides one.
 
-When both are available, `runWithContext()` (ALS) takes priority over the resolver.
+When both are available, `runWithTenantId()` (ALS) takes priority over the resolver.
 
 ### How it works
 
@@ -652,7 +637,6 @@ shoplayerDatabasePlugin({
   contextImport: '@shoplayer/database/context',  // Import path for context module
   registryImport: '@shoplayer/database/registry', // Import path for registry module
   databasesDir: 'src/databases',                  // Where database files live
-  tenantIdPath: 'session.tenantId',                     // Path to tenant ID in context
   autoMigrations: 'development',                  // Auto-run push in dev mode
 });
 ```
@@ -661,10 +645,9 @@ shoplayerDatabasePlugin({
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `contextImport` | `string` | `'@shoplayer/database/context'` | Import path for the request context module |
+| `contextImport` | `string` | `'@shoplayer/database/context'` | Import path for the context module |
 | `registryImport` | `string` | `'@shoplayer/database/registry'` | Import path for the action registry module |
 | `databasesDir` | `string` | `'src/databases'` | Directory containing database definitions |
-| `tenantIdPath` | `string` | `'session.tenantId'` | Property path to the tenant ID in the request context |
 | `autoMigrations` | `boolean \| 'development'` | `'development'` | Auto-push schema changes on dev server start |
 
 ### What the plugin does
@@ -786,7 +769,7 @@ Using `browsable: 'development'` is recommended -- it enables the endpoint only 
 
 ### `per-tenant` (default)
 
-Each tenant gets its own Durable Object instance, keyed by the tenant identifier from the request context.
+Each tenant gets its own Durable Object instance, keyed by the tenant ID provided via `runWithTenantId()` or `setTenantIdResolver()`.
 
 ```ts
 defineDatabase({
@@ -795,8 +778,6 @@ defineDatabase({
   instance: 'per-tenant',
 });
 ```
-
-The tenant ID is extracted from the request context using the path configured in the Vite plugin's `tenantIdPath` option (default: `session.tenantId`).
 
 ### `global`
 
@@ -879,7 +860,7 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 | `./db` | `src/db/` | `defineDatabase()`, `SqliteDurableObject`, Kysely plugins |
 | `./vite` | `src/vite/databasePlugin.ts` | Vite plugin (`shoplayerDatabasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
-| `./context` | `src/context/` | Request context (`runWithContext`, `getContext`, `setContextResolver`) |
+| `./context` | `src/context/` | Tenant ID context (`runWithTenantId`, `getTenantId`, `setTenantIdResolver`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callActionInValidated`) |
 | `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `shoplayer-db` binary |
@@ -888,19 +869,19 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 
 ```
 Worker fetch()
-  -> runWithContext() or setContextResolver()    // Provide request context
-    -> createUser({ name, email })              // Looks like a normal function call
+  -> runWithTenantId() or setTenantIdResolver()  // Provide tenant ID
+    -> createUser({ name, email })               // Looks like a normal function call
       -> ArkType validates args
-      -> getContext()                            // ALS store → resolver → throw
+      -> getTenantId()                           // ALS store → resolver → throw
       -> Check AsyncLocalStorage for DO-local short path
       -> If same DO: direct handler call (no RPC)
       -> If cross-DO: env.BINDING.idFromName(instanceKey) -> stub.rpc()
         -> DO.rpc(method, args, rpcContext)
-          -> ensureMigrations()                 // Run pending migrations if any
+          -> ensureMigrations()                  // Run pending migrations if any
           -> getAction(dbName, method)           // Look up handler in registry
           -> Validate args with ArkType
-          -> runWithDoContext(...)               // Set up AsyncLocalStorage
-            -> handler(db, validatedArgs, ctx)  // Your action code runs here
+          -> runWithDoContext(...)                // Set up AsyncLocalStorage
+            -> handler(db, validatedArgs, ctx)   // Your action code runs here
 ```
 
 ### Kysely Plugins

@@ -84,14 +84,13 @@ export const getUser = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 
       expect(transformed).not.toBeNull();
       expect(transformed!.code).toMatch(/export async function createUser/);
       expect(transformed!.code).toMatch(/export async function getUser/);
-      expect(transformed!.code).toMatch(/getContext/);
+      expect(transformed!.code).toMatch(/getTenantId/);
       expect(transformed!.code).toMatch(/registerAction/);
       expect(transformed!.code).toMatch(/MAIN_DATABASE_DO/);
 
@@ -209,12 +208,11 @@ export const createUser = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 
-      // Should use ctx.session.tenantId for instance key
-      expect(transformed!.code).toMatch(/ctx\.session\.tenantId/);
+      // Should use getTenantId() for instance key
+      expect(transformed!.code).toMatch(/getTenantId\(\)/);
     });
 
     it('generates correct stub for global database', () => {
@@ -246,7 +244,6 @@ export const logEvent = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 
@@ -282,7 +279,6 @@ export const createUser = action({
         database: parsed.database!,
         actionsInFile: parsed.actions,
         contextImport: '@shoplayer/database/context',
-        tenantIdPath: 'session.tenantId',
         registryImport: '@shoplayer/database/registry',
       });
 

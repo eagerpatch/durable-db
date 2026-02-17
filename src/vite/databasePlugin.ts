@@ -25,6 +25,8 @@ export interface DatabasePluginOptions {
   registryImport?: string;
   /** Directory containing database definitions. Default: 'src/databases' */
   databasesDir?: string;
+  /** Directory for production migrations, relative to project root. Default: 'migrations' */
+  migrationsDir?: string;
   /** Auto-generate migrations. Default: 'development' */
   autoMigrations?: boolean | 'development';
 }
@@ -33,6 +35,7 @@ interface ResolvedOptions {
   contextImport: string;
   registryImport: string;
   databasesDir: string;
+  migrationsDir: string;
   autoMigrations: boolean | 'development';
 }
 
@@ -118,6 +121,7 @@ class PluginState {
       const parsed = parseDatabaseFile(file.absolutePath, code);
 
       if (parsed.database) {
+        parsed.database.migrationsDir = path.resolve(this.projectRoot, this.options.migrationsDir, parsed.database.name);
         this.databases.set(parsed.database.name, parsed.database);
         this.registerDatabaseFile(file.absolutePath, parsed.database.name);
         await this.loadMigrations(parsed.database);
@@ -133,7 +137,7 @@ class PluginState {
   }
 
   private async loadMigrations(db: DatabaseInfo): Promise<void> {
-    const migrationsDir = path.resolve(path.dirname(db.filePath), db.migrationsDir);
+    const migrationsDir = db.migrationsDir;
     const isDev = this.config.command === 'serve';
     const shouldAutoMigrate =
       this.options.autoMigrations === true ||
@@ -260,6 +264,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
     contextImport: options.contextImport ?? '@shoplayer/database/context',
     registryImport: options.registryImport ?? '@shoplayer/database/registry',
     databasesDir: options.databasesDir ?? 'src/databases',
+    migrationsDir: options.migrationsDir ?? 'migrations',
     autoMigrations: options.autoMigrations ?? 'development',
   });
 

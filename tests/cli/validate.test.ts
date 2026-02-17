@@ -39,7 +39,6 @@ import { defineDatabase } from '@shoplayer/database/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users },
 });
 `
@@ -50,15 +49,13 @@ export const { action } = defineDatabase({
         `
 import { defineDatabase } from '@shoplayer/database/db';
 
-export const { action } = defineDatabase({
-  migrationsDir: './migrations',
-});
+export const { action } = defineDatabase({});
 `
       );
     }
 
-    // Create migrations directory
-    const migrationsDir = path.join(databasesDir, 'migrations');
+    // Create migrations directory (convention: {root}/migrations/{name}/)
+    const migrationsDir = path.join(tempDir, 'migrations', name);
     fs.mkdirSync(migrationsDir, { recursive: true });
 
     // Write migration files
@@ -241,9 +238,7 @@ export const { action } = defineDatabase({
       `
 import { defineDatabase } from '@shoplayer/database/db';
 
-export const { action } = defineDatabase({
-  migrationsDir: './other-migrations',
-});
+export const { action } = defineDatabase({});
 `
     );
 

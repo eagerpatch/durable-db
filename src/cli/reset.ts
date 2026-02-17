@@ -16,6 +16,7 @@ import { parseDatabaseFile } from '../vite/modules/parser';
 export interface ResetContext {
   projectRoot?: string;
   databasesDir?: string;
+  migrationsDir?: string;
   verbose?: boolean;
 }
 

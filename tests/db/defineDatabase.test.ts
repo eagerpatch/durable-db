@@ -5,7 +5,6 @@ describe('db', () => {
   describe('defineDatabase', () => {
     it('returns an object with action function', () => {
       const { action } = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
       });
 
@@ -14,7 +13,6 @@ describe('db', () => {
 
     it('action returns a function', () => {
       const { action } = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
       });
 
@@ -28,7 +26,6 @@ describe('db', () => {
 
     it('validates args using arktype', async () => {
       const { action } = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
       });
 
@@ -43,7 +40,6 @@ describe('db', () => {
 
     it('throws error when action called without transformation', async () => {
       const { action } = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
       });
 
@@ -60,7 +56,6 @@ describe('db', () => {
 
     it('supports complex args schemas', async () => {
       const { action } = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
       });
 
@@ -86,7 +81,6 @@ describe('db', () => {
 
     it('supports optional args', async () => {
       const { action } = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
       });
 
@@ -106,13 +100,11 @@ describe('db', () => {
 
     it('supports different instance strategies', () => {
       const perShop = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
         instance: 'per-tenant',
       });
 
       const global = defineDatabase({
-        migrationsDir: './migrations',
         schema: {},
         instance: 'global',
       });
@@ -124,14 +116,13 @@ describe('db', () => {
     it('accepts drizzle schema tables', () => {
       // Mock schema object (real drizzle tables are complex)
       const mockSchema = {
-        users: { 
+        users: {
           name: { columnName: 'name' },
           email: { columnName: 'email' },
         } as any,
       };
 
       const { action } = defineDatabase({
-        migrationsDir: './migrations',
         schema: mockSchema,
       });
 

@@ -213,7 +213,6 @@ function extractDatabaseInfo(
   }
 
   // Default values
-  let migrationsDir = './migrations';
   let instance: 'per-tenant' | 'global' = 'per-tenant';
   let browsable: boolean | 'development' = false;
   let transport: 'rpc' | 'websocket' = 'rpc';
@@ -226,10 +225,6 @@ function extractDatabaseInfo(
     }
 
     const key = prop.key.name;
-
-    if (key === 'migrationsDir' && t.isStringLiteral(prop.value)) {
-      migrationsDir = prop.value.value;
-    }
 
     if (key === 'instance' && t.isStringLiteral(prop.value)) {
       const value = prop.value.value;
@@ -283,7 +278,7 @@ function extractDatabaseInfo(
     instance,
     browsable,
     transport,
-    migrationsDir,
+    migrationsDir: '',
     schemaImport,
     schemaTableNames,
   };

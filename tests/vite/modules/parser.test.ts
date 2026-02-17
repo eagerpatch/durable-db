@@ -158,7 +158,6 @@ describe('parser', () => {
         import { users, posts } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users, posts },
           instance: 'per-tenant',
         });
@@ -171,7 +170,7 @@ describe('parser', () => {
       expect(result.database!.className).toBe('MainDatabaseDO');
       expect(result.database!.bindingName).toBe('MAIN_DATABASE_DO');
       expect(result.database!.instance).toBe('per-tenant');
-      expect(result.database!.migrationsDir).toBe('./migrations');
+      expect(result.database!.migrationsDir).toBe('');
       expect(result.database!.schemaImport).toBe('./schema');
       expect(result.database!.schemaTableNames).toEqual(['users', 'posts']);
     });
@@ -182,7 +181,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
         });
 
@@ -217,7 +215,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
         });
 
@@ -245,7 +242,6 @@ describe('parser', () => {
         import { helperFn } from './helpers';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users, posts },
         });
       `;
@@ -268,7 +264,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
           browsable: true,
         });
@@ -284,7 +279,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
           browsable: false,
         });
@@ -300,7 +294,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
           browsable: 'development',
         });
@@ -316,7 +309,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
         });
       `;
@@ -331,7 +323,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
           transport: 'websocket',
         });
@@ -347,7 +338,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
           transport: 'rpc',
         });
@@ -363,7 +353,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
         });
       `;
@@ -378,7 +367,6 @@ describe('parser', () => {
         import { settings } from './schema';
 
         export const { action } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { settings },
           instance: 'global',
         });
@@ -395,7 +383,6 @@ describe('parser', () => {
         import { users } from './schema';
 
         export const { action: createAction } = defineDatabase({
-          migrationsDir: './migrations',
           schema: { users },
         });
 

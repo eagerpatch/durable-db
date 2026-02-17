@@ -28,6 +28,7 @@ import type { DatabaseInfo } from '../db';
 export interface GenerateContext {
   projectRoot?: string;
   databasesDir?: string;
+  migrationsDir?: string;
   verbose?: boolean;
 }
 
@@ -66,7 +67,7 @@ export async function generate(
   ctx: GenerateContext = {},
   options: GenerateOptions = {}
 ): Promise<GenerateResult[]> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
   const { name: customName, database: targetDb } = options;
   const results: GenerateResult[] = [];
 
@@ -75,7 +76,7 @@ export async function generate(
 
   // Discover databases
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
-  
+
   if (files.length === 0) {
     if (verbose) {
       console.log('[db:generate] No databases found');
@@ -93,6 +94,7 @@ export async function generate(
     }
 
     const db = parsed.database;
+    db.migrationsDir = path.resolve(projectRoot, migrationsDir, db.name);
 
     // Skip if targeting specific database
     if (targetDb && db.name !== targetDb) {
@@ -169,7 +171,7 @@ async function generateDatabase(
   }
 
   // Load production snapshot
-  const migrationsDir = path.resolve(path.dirname(db.filePath), db.migrationsDir);
+  const migrationsDir = db.migrationsDir;
   const prodSnapshot = loadSnapshot(migrationsDir);
 
   // Generate current schema snapshot

@@ -20,11 +20,13 @@ program
   .command('push')
   .description('Push schema changes to dev migrations')
   .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+  .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
   .option('-v, --verbose', 'Verbose output')
   .action(async (options) => {
     try {
       const results = await push({
         databasesDir: options.databasesDir,
+        migrationsDir: options.migrationsDir,
         verbose: options.verbose,
       });
 
@@ -57,12 +59,14 @@ program
   .description('Generate production migration from schema changes')
   .option('--database <db>', 'Only generate for this database')
   .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+  .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
   .option('-v, --verbose', 'Verbose output')
   .action(async (name, options) => {
     try {
       const results = await generate(
         {
           databasesDir: options.databasesDir,
+          migrationsDir: options.migrationsDir,
           verbose: options.verbose,
         },
         {
@@ -101,11 +105,13 @@ program
   .command('status')
   .description('Show database migration status')
   .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+  .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
   .option('-v, --verbose', 'Verbose output')
   .action(async (options) => {
     try {
       const result = await status({
         databasesDir: options.databasesDir,
+        migrationsDir: options.migrationsDir,
         verbose: options.verbose,
       });
 
@@ -122,6 +128,7 @@ program
   .option('--keep-epoch', 'Only clear dev migrations, keep the same epoch')
   .option('--database <db>', 'Only reset this database')
   .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+  .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
   .option('-v, --verbose', 'Verbose output')
   .action(async (options) => {
     try {
@@ -159,11 +166,13 @@ program
   .option('--database <db>', 'Only validate this database')
   .option('--no-dev', 'Skip dev migrations, only validate production')
   .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+  .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
   .option('-v, --verbose', 'Show each migration as it is applied')
   .action(async (options) => {
     try {
       const results = await validate({
         databasesDir: options.databasesDir,
+        migrationsDir: options.migrationsDir,
         verbose: options.verbose,
         noDev: !options.dev,
         database: options.database,

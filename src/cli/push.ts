@@ -23,6 +23,7 @@ import type { DatabaseInfo } from '../db';
 export interface PushContext {
   projectRoot?: string;
   databasesDir?: string;
+  migrationsDir?: string;
   verbose?: boolean;
 }
 
@@ -51,7 +52,7 @@ export interface PushResult {
  * and are ephemeral - they're cleared when running `db:generate` or `db:reset`
  */
 export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
   const results: PushResult[] = [];
 
   // Discover databases
@@ -73,6 +74,7 @@ export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
       continue;
     }
 
+    parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
     const result = await pushDatabase(projectRoot, parsed.database, verbose);
     results.push(result);
   }
@@ -133,8 +135,7 @@ async function pushDatabase(
   }
 
   // Always diff from production snapshot to current schema
-  const prodMigrationsDir = path.resolve(path.dirname(db.filePath), db.migrationsDir);
-  const prodSnapshot = loadSnapshot(prodMigrationsDir);
+  const prodSnapshot = loadSnapshot(db.migrationsDir);
   const currentSnapshot = await generateSnapshotFromSchema(schema);
 
   if (snapshotsEqual(prodSnapshot, currentSnapshot)) {
@@ -199,7 +200,7 @@ async function pushDatabase(
  * Useful when you only want to push one specific database
  */
 export async function pushOne(ctx: PushContext = {}, dbName: string): Promise<PushResult | null> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
 
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
 
@@ -208,6 +209,7 @@ export async function pushOne(ctx: PushContext = {}, dbName: string): Promise<Pu
     const parsed = parseDatabaseFile(file.absolutePath, code);
 
     if (parsed.database?.name === dbName) {
+      parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
       return await pushDatabase(projectRoot, parsed.database, verbose);
     }
   }

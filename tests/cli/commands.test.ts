@@ -52,14 +52,13 @@ import { defineDatabase } from '@shoplayer/database/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users },
 });
 `
     );
 
-    // Create migrations directory with existing migrations
-    const migrationsDir = path.join(dbDir, 'migrations');
+    // Create migrations directory with existing migrations (convention: {root}/migrations/{name}/)
+    const migrationsDir = path.join(tempDir, 'migrations', name);
     fs.mkdirSync(migrationsDir, { recursive: true });
 
     for (let i = 0; i < existingMigrations.length; i++) {
@@ -280,9 +279,7 @@ export const { action } = defineDatabase({
         `
 import { defineDatabase } from '@shoplayer/database/db';
 
-export const { action } = defineDatabase({
-  migrationsDir: './migrations',
-});
+export const { action } = defineDatabase({});
 `
       );
 
@@ -330,14 +327,13 @@ import { defineDatabase } from '@shoplayer/database/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users },
 });
 `
     );
 
-    // Create migrations directory with initial snapshot
-    const migrationsDir = path.join(databasesDir, 'migrations');
+    // Create migrations directory with initial snapshot (convention: {root}/migrations/{name}/)
+    const migrationsDir = path.join(tempDir, 'migrations', 'main');
     fs.mkdirSync(migrationsDir, { recursive: true });
     fs.writeFileSync(
       path.join(migrationsDir, '_snapshot.json'),
@@ -379,13 +375,12 @@ import { defineDatabase } from '@shoplayer/database/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users },
 });
 `
     );
 
-    const migrationsDir = path.join(databasesDir, 'migrations');
+    const migrationsDir = path.join(tempDir, 'migrations', 'main');
     fs.mkdirSync(migrationsDir, { recursive: true });
     fs.writeFileSync(
       path.join(migrationsDir, '_snapshot.json'),

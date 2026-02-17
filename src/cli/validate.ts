@@ -15,6 +15,7 @@ import { loadDevMigrations } from './state';
 export interface ValidateContext {
   projectRoot?: string;
   databasesDir?: string;
+  migrationsDir?: string;
   verbose?: boolean;
   /** Skip dev migrations, only validate prod */
   noDev?: boolean;
@@ -127,6 +128,7 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
   const {
     projectRoot = process.cwd(),
     databasesDir = 'src/databases',
+    migrationsDir = 'migrations',
     verbose = false,
     noDev = false,
     database: onlyDatabase,
@@ -163,6 +165,7 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
     if (!parsed.database) continue;
 
     const db = parsed.database;
+    db.migrationsDir = path.resolve(projectRoot, migrationsDir, db.name);
 
     if (onlyDatabase && db.name !== onlyDatabase) continue;
 
@@ -202,7 +205,7 @@ async function validateDatabase(
   };
 
   // ---- Path A: Migration replay ----
-  const prodMigrationsDir = path.resolve(path.dirname(db.filePath), db.migrationsDir);
+  const prodMigrationsDir = db.migrationsDir;
   const prodMigrations = loadMigrationFiles(prodMigrationsDir);
 
   let devMigrations = new Map<string, string[][]>();

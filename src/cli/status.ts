@@ -24,6 +24,7 @@ import type { DatabaseInfo } from '../db';
 export interface StatusContext {
   projectRoot?: string;
   databasesDir?: string;
+  migrationsDir?: string;
   verbose?: boolean;
 }
 
@@ -66,7 +67,7 @@ export interface StatusResult {
  * - What SQL would be generated
  */
 export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
 
   const devState = loadDevState(projectRoot);
   const result: StatusResult = {
@@ -76,7 +77,7 @@ export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
 
   // Discover databases
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
-  
+
   if (files.length === 0) {
     if (verbose) {
       console.log('[db:status] No databases found');
@@ -93,6 +94,7 @@ export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
       continue;
     }
 
+    parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
     const dbStatus = await getDatabaseStatus(projectRoot, parsed.database, devState, verbose);
     result.databases.push(dbStatus);
   }
@@ -121,7 +123,7 @@ async function getDatabaseStatus(
   };
 
   // Count production migrations
-  const prodMigrationsDir = path.resolve(path.dirname(db.filePath), db.migrationsDir);
+  const prodMigrationsDir = db.migrationsDir;
   const prodMigrations = loadMigrationFiles(prodMigrationsDir);
   status.prodMigrationCount = prodMigrations.size;
 

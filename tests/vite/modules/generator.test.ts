@@ -18,7 +18,7 @@ const mockDatabase: DatabaseInfo = {
   instance: 'per-tenant',
   browsable: false,
   transport: 'rpc',
-  migrationsDir: './migrations',
+  migrationsDir: '',
   schemaImport: './schema',
   schemaTableNames: ['users'],
 };

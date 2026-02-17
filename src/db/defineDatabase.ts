@@ -22,7 +22,6 @@ import type {
  * import { users, posts } from './schema';
  *
  * export const { action } = defineDatabase({
- *   migrationsDir: './migrations',
  *   schema: { users, posts },
  * });
  *

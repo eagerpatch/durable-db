@@ -38,7 +38,6 @@ import { defineDatabase } from '@shoplayer/database/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users },
 });
 
@@ -117,7 +116,6 @@ export const getUser = action({
       const mainCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: {},
 });
 export const mainAction = action({
@@ -131,7 +129,6 @@ export const mainAction = action({
       const analyticsCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
-  migrationsDir: './migrations/analytics',
   schema: {},
   instance: 'global',
 });
@@ -183,7 +180,6 @@ export const logEvent = action({
       const mainCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: {},
   instance: 'per-tenant',
 });
@@ -219,7 +215,6 @@ export const createUser = action({
       const analyticsCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: {},
   instance: 'global',
 });
@@ -255,7 +250,6 @@ export const logEvent = action({
       const mainCode = `
 import { defineDatabase } from '@shoplayer/database/db';
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: {},
 });
 export const createUser = action({

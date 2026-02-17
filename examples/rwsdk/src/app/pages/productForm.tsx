@@ -13,7 +13,7 @@ export const ProductForm = () => {
     setStatus("Creating...");
 
     try {
-      const res = await fetch("/api/products", {
+      const res = await fetch(`/api/products${window.location.search}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

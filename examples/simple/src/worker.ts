@@ -5,15 +5,18 @@ import { listUsers } from './databases/actions/listUsers';
 import { getUserWithPosts } from './databases/actions/getUsersWithPosts';
 import { getUser } from './databases/actions/getUser';
 
-// In a real app, this would resolve from authentication/session
-setTenantIdResolver(() => 'example-tenant');
-
 // Export Durable Object classes - the plugin generates these
 export * from 'virtual:eagerpatch/durable-db/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any): Promise<Response> {
     const url = new URL(request.url);
+
+    // Resolve tenant from ?tenant= query param or X-Tenant-ID header
+    const tenantId = url.searchParams.get('tenant')
+      ?? request.headers.get('X-Tenant-ID')
+      ?? 'default';
+    setTenantIdResolver(() => tenantId);
 
     // Outerbase Studio UI at /studio
     if (url.pathname === '/studio') {

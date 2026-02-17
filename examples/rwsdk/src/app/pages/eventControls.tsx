@@ -20,7 +20,7 @@ export const EventControls = () => {
   const fireEvent = async () => {
     setStatus("Tracking...");
     try {
-      const res = await fetch("/api/events", {
+      const res = await fetch(`/api/events${window.location.search}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -47,7 +47,7 @@ export const EventControls = () => {
         payload: JSON.stringify({ index: i, timestamp: Date.now() }),
       }));
 
-      const res = await fetch("/api/events/batch", {
+      const res = await fetch(`/api/events/batch${window.location.search}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ events }),

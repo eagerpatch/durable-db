@@ -24,10 +24,11 @@ export type AppContext = {};
 export default defineApp([
   setCommonHeaders(),
   ({ request }) => {
+    const url = new URL(request.url);
     const tenantId =
+      url.searchParams.get("tenant") ??
       request.headers.get("X-Tenant-ID") ??
-      new URL(request.url).searchParams.get("tenant") ??
-      "demo-shop";
+      "default";
     setTenantIdResolver(() => tenantId);
   },
 

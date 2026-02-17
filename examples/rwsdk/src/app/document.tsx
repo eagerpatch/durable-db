@@ -1,3 +1,5 @@
+import { Nav } from "./nav";
+
 export const Document: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => (
@@ -56,11 +58,7 @@ export const Document: React.FC<{ children: React.ReactNode }> = ({
     <body>
       <div id="root">
         <div className="container">
-          <nav>
-            <a href="/">Home</a>
-            <a href="/products">Products</a>
-            <a href="/events">Events</a>
-          </nav>
+          <Nav />
           {children}
         </div>
       </div>

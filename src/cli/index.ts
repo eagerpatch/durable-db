@@ -2,27 +2,22 @@
 // CLI Module Exports
 // ============================================================================
 //
-// This module provides composable functions for database management.
-// It's designed to be consumed by higher-level CLI tools
-// rather than used directly.
+// This module provides both a composable Commander command and
+// programmatic functions for database management.
 //
-// Example usage:
+// Mount the full CLI in your own Commander program:
 //
-//   import { command } from 'commander';
-//   import * as db from '@eagerpatch/durable-db/cli';
+//   import { createDbCommand } from '@eagerpatch/durable-db/cli';
+//   program.addCommand(createDbCommand());
 //
-//   program
-//     .command('db:push')
-//     .description('Push schema changes to dev migrations')
-//     .action(async () => {
-//       const results = await db.push({ projectRoot: process.cwd() });
-//       for (const r of results) {
-//         if (r.hasChanges) {
-//           console.log(`✓ ${r.database}: ${r.statements.length} statements`);
-//         }
-//       }
-//     });
+// Or use the programmatic API directly:
 //
+//   import { push, status } from '@eagerpatch/durable-db/cli';
+//   const results = await push({ projectRoot: process.cwd() });
+//
+
+// Composable Commander command
+export { createDbCommand } from './command';
 
 // State management
 export {

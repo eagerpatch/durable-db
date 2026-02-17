@@ -40,7 +40,7 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 | `./db` | `src/db/` | `defineDatabase()` API, `SqliteDurableObject` base class, Kysely plugins |
 | `./vite` | `src/vite/databasePlugin.ts` | Vite plugin entry (`databasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
-| `./context` | `src/context/` | Tenant ID context (`runWithTenantId`, `setTenantIdResolver`) |
+| `./context` | `src/context/` | Tenant ID context (`setTenantIdResolver`, `getTenantId`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action name → handler registry for RPC dispatch |
 | `./cli` | `src/cli/` | CLI commands (push, generate, status, reset, validate) and `db` binary |

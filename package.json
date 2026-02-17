@@ -50,10 +50,14 @@
     "./cli": {
       "types": "./dist/cli/index.d.ts",
       "import": "./dist/cli/index.js"
+    },
+    "./virtual": {
+      "types": "./virtual.d.ts"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "virtual.d.ts"
   ],
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"

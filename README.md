@@ -118,8 +118,8 @@ import { createUser } from './databases/actions/createUser';
 // In a real app, resolve from authentication/session
 setTenantIdResolver(() => 'my-tenant');
 
-// Export the generated Durable Object class
-export { MainDatabaseDO } from 'virtual:eagerpatch/durable-db/__durableObjects';
+// Export the generated Durable Object classes
+export * from 'virtual:eagerpatch/durable-db/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any) {
@@ -127,6 +127,16 @@ export default {
     return Response.json(user);
   },
 };
+```
+
+For TypeScript support, add `@eagerpatch/durable-db/virtual` to your `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "types": ["@eagerpatch/durable-db/virtual"]
+  }
+}
 ```
 
 ### 7. Push schema and run
@@ -657,10 +667,10 @@ For each `defineDatabase()` call, the plugin generates a class based on the file
 | `analytics.ts` | `AnalyticsDatabaseDO` | `ANALYTICS_DATABASE_DO` |
 | `user-data.ts` | `UserDataDatabaseDO` | `USER_DATA_DATABASE_DO` |
 
-Export the generated class from your worker entry point:
+Export the generated classes from your worker entry point:
 
 ```ts
-export { MainDatabaseDO } from 'virtual:eagerpatch/durable-db/__durableObjects';
+export * from 'virtual:eagerpatch/durable-db/__durableObjects';
 ```
 
 ### Action Transformation

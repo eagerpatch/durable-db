@@ -17,8 +17,7 @@ import { batchTrackEvents } from "./databases/actions/batchTrackEvents";
 import { getEventCounts } from "./databases/actions/getEventCounts";
 
 // Export Durable Object classes - the plugin generates these
-// @ts-ignore
-export { MainDatabaseDO, EventsDatabaseDO } from "virtual:eagerpatch/durable-db/__durableObjects";
+export * from "virtual:eagerpatch/durable-db/__durableObjects";
 
 export type AppContext = {};
 

@@ -44,7 +44,7 @@ pnpm add @eagerpatch/durable-db
 
 ```ts
 // src/databases/schema.ts
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer } from '@eagerpatch/durable-db/schema';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -112,18 +112,19 @@ export default defineConfig({
 
 ```ts
 // src/worker.ts
-import { runWithTenantId } from '@eagerpatch/durable-db/context';
+import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
 import { createUser } from './databases/actions/createUser';
+
+// In a real app, resolve from authentication/session
+setTenantIdResolver(() => 'my-tenant');
 
 // Export the generated Durable Object class
 export { MainDatabaseDO } from 'virtual:eagerpatch/databases/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any) {
-    return runWithTenantId('my-tenant', async () => {
-      const user = await createUser({ name: 'Alice', email: 'alice@example.com' });
-      return Response.json(user);
-    });
+    const user = await createUser({ name: 'Alice', email: 'alice@example.com' });
+    return Response.json(user);
   },
 };
 ```
@@ -229,36 +230,33 @@ Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery
 
 ## Calling Actions from Your Worker
 
-Database actions need a tenant ID to know which Durable Object instance to use. There are two ways to provide it:
-
-### Standalone mode: `runWithTenantId()`
-
-Wrap your request handler in `runWithTenantId()` to provide the tenant ID:
+For `per-tenant` databases, actions need a tenant ID to know which Durable Object instance to use. Call `setTenantIdResolver()` once at startup to provide it:
 
 ```ts
-import { runWithTenantId } from '@eagerpatch/durable-db/context';
+import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
 
+// In a real app, resolve from authentication/session
+setTenantIdResolver(() => 'example-tenant');
+
 export default {
   async fetch(request: Request, env: any) {
-    return runWithTenantId('example-tenant', async () => {
-      if (request.method === 'POST') {
-        const body = await request.json();
-        const user = await createUser({ name: body.name, email: body.email });
-        return Response.json(user);
-      }
+    if (request.method === 'POST') {
+      const body = await request.json();
+      const user = await createUser({ name: body.name, email: body.email });
+      return Response.json(user);
+    }
 
-      const users = await listUsers({ limit: 10, offset: 0 });
-      return Response.json(users);
-    });
+    const users = await listUsers({ limit: 10, offset: 0 });
+    return Response.json(users);
   },
 };
 ```
 
-### Framework integration: `setTenantIdResolver()`
+### Framework integration
 
-If your framework already has its own request-scoped context (e.g. RWSDK's `getRequestInfo()`), use `setTenantIdResolver()` to bridge the two context systems instead of wrapping every request:
+If your framework has request-scoped context (e.g. RWSDK's `getRequestInfo()`), use the resolver to bridge the two:
 
 ```ts
 import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
@@ -267,9 +265,7 @@ import { getRequestInfo } from 'rwsdk/worker';
 setTenantIdResolver(() => getRequestInfo().ctx.session!.shop);
 ```
 
-The resolver is called at the moment a database operation needs the tenant ID — by which point request middleware (auth, session, etc.) has already completed. This avoids a second AsyncLocalStorage layer when the framework already provides one.
-
-When both are available, `runWithTenantId()` (ALS) takes priority over the resolver.
+The resolver is called at the moment a database operation needs the tenant ID — by which point request middleware (auth, session, etc.) has already completed.
 
 ### How it works
 
@@ -761,7 +757,7 @@ Using `browsable: 'development'` is recommended -- it enables the endpoint only 
 
 ### `per-tenant` (default)
 
-Each tenant gets its own Durable Object instance, keyed by the tenant ID provided via `runWithTenantId()` or `setTenantIdResolver()`.
+Each tenant gets its own Durable Object instance, keyed by the tenant ID provided via `setTenantIdResolver()`.
 
 ```ts
 defineDatabase({
@@ -850,28 +846,30 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 | `./db` | `src/db/` | `defineDatabase()`, `SqliteDurableObject`, Kysely plugins |
 | `./vite` | `src/vite/databasePlugin.ts` | Vite plugin (`databasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
-| `./context` | `src/context/` | Tenant ID context (`runWithTenantId`, `getTenantId`, `setTenantIdResolver`) |
+| `./context` | `src/context/` | Tenant ID context (`setTenantIdResolver`, `getTenantId`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callAction`) |
+| `./schema` | `src/schema.ts` | Re-exports Drizzle SQLite schema builders (`sqliteTable`, `text`, `integer`, etc.) |
 | `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `db` binary |
 
 ### Request Flow
 
 ```
+setTenantIdResolver(...)                         // Configure once at startup
+
 Worker fetch()
-  -> runWithTenantId() or setTenantIdResolver()  // Provide tenant ID
-    -> createUser({ name, email })               // Looks like a normal function call
-      -> ArkType validates args
-      -> getTenantId()                           // ALS store → resolver → throw
-      -> Check AsyncLocalStorage for DO-local short path
-      -> If same DO: direct handler call (no RPC)
-      -> If cross-DO: env.BINDING.idFromName(instanceKey) -> stub.rpc()
-        -> DO.rpc(method, args, rpcContext)
-          -> ensureMigrations()                  // Run pending migrations if any
-          -> getAction(dbName, method)           // Look up handler in registry
-          -> Validate args with ArkType
-          -> runWithDoContext(...)                // Set up AsyncLocalStorage
-            -> handler(db, validatedArgs, ctx)   // Your action code runs here
+  -> createUser({ name, email })                 // Looks like a normal function call
+    -> ArkType validates args
+    -> getTenantId()                             // Calls resolver → throw if unset
+    -> Check DO context for direct-call short path
+    -> If same DO: direct handler call (no RPC)
+    -> If cross-DO: env.BINDING.idFromName(instanceKey) -> stub.rpc()
+      -> DO.rpc(method, args, rpcContext)
+        -> ensureMigrations()                    // Run pending migrations if any
+        -> getAction(dbName, method)             // Look up handler in registry
+        -> Validate args with ArkType
+        -> runWithDoContext(...)                  // Set up DO-local context
+          -> handler(db, validatedArgs, ctx)     // Your action code runs here
 ```
 
 ### Kysely Plugins
@@ -919,7 +917,7 @@ src/
     reset.ts        # Reset command implementation
     validate.ts     # Validate command implementation
     state.ts        # Dev state persistence (epoch, snapshots, counters)
-  context/          # AsyncLocalStorage-based request context
+  context/          # Tenant ID resolver context
   db/               # Core database abstractions
     SqliteDurableObject.ts   # Base DO class with migrations + PITR
     defineDatabase.ts        # defineDatabase() API

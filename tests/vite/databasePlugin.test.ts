@@ -43,18 +43,7 @@ describe('databasePlugin', () => {
         contextImport: 'my-app/context',
         registryImport: 'my-app/registry',
         databasesDir: 'lib/db',
-        autoMigrations: false,
       });
-      expect(customPlugin.name).toBe('durable-db');
-    });
-
-    it('accepts autoMigrations: true', () => {
-      const customPlugin = databasePlugin({ autoMigrations: true });
-      expect(customPlugin.name).toBe('durable-db');
-    });
-
-    it('accepts autoMigrations: development', () => {
-      const customPlugin = databasePlugin({ autoMigrations: 'development' });
       expect(customPlugin.name).toBe('durable-db');
     });
   });
@@ -101,16 +90,16 @@ describe('resolveId', () => {
     plugin = databasePlugin();
   });
 
-  it('resolves virtual:eagerpatch/databases/__durableObjects', async () => {
+  it('resolves virtual:eagerpatch/durable-db/__durableObjects', async () => {
     const resolveId = plugin.resolveId as Function;
-    const result = await resolveId('virtual:eagerpatch/databases/__durableObjects');
-    expect(result).toBe('\0virtual:eagerpatch/databases/__durableObjects.js');
+    const result = await resolveId('virtual:eagerpatch/durable-db/__durableObjects');
+    expect(result).toBe('\0virtual:eagerpatch/durable-db/__durableObjects.js');
   });
 
-  it('resolves eagerpatch/databases/__durableObjects without prefix', async () => {
+  it('resolves eagerpatch/durable-db/__durableObjects without prefix', async () => {
     const resolveId = plugin.resolveId as Function;
-    const result = await resolveId('eagerpatch/databases/__durableObjects');
-    expect(result).toBe('\0virtual:eagerpatch/databases/__durableObjects.js');
+    const result = await resolveId('eagerpatch/durable-db/__durableObjects');
+    expect(result).toBe('\0virtual:eagerpatch/durable-db/__durableObjects.js');
   });
 
   it('returns null for registry (now a real module)', async () => {
@@ -232,7 +221,7 @@ describe('concurrent initialization', () => {
 
     // Fire both hooks concurrently — both call state.initialize()
     const [loadResult, transformResult] = await Promise.all([
-      load('\0virtual:eagerpatch/databases/__durableObjects.js'),
+      load('\0virtual:eagerpatch/durable-db/__durableObjects.js'),
       transform.call(
         { resolve: async () => null },
         'export const x = 1;',

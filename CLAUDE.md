@@ -49,7 +49,7 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 
 1. **User defines** Drizzle schema in `src/databases/schema.ts` and database + actions in `src/databases/*.ts`
 2. **Vite plugin** discovers database files, parses them with Babel AST, extracts `defineDatabase()` calls and action exports
-3. **Code generation** produces a virtual module (`virtual:eagerpatch/databases/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
+3. **Code generation** produces a virtual module (`virtual:eagerpatch/durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
 4. **Action call transformation**: internal calls → direct handler call (no RPC), cross-DB calls → RPC via `ctx.env`
 5. **RPC stubs** are generated so workers can call actions like regular async functions
 6. **wrangler.jsonc** is auto-patched with Durable Object bindings
@@ -65,7 +65,6 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 
 - `databasesDir`: directory containing database files (default: `'src/databases'`)
 - `migrationsDir`: directory for production migrations, relative to project root (default: `'migrations'`). Each database gets a subdirectory (e.g. `migrations/main/`)
-- `autoMigrations`: auto-push schema changes (default: `'development'`)
 - `contextImport` / `registryImport`: override import paths for framework integrations
 
 ### Action System

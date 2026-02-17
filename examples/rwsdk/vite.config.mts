@@ -7,7 +7,6 @@ export default defineConfig({
   plugins: [
     databasePlugin({
       databasesDir: "./src/databases",
-      autoMigrations: false,
     }),
     cloudflare({
       viteEnvironment: { name: "worker" },

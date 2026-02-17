@@ -3,11 +3,11 @@ import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import type { DatabaseInfo, ActionInfo } from '../db';
 import { debugVite } from '../utils/debug';
 
-import { discoverDatabaseFiles, readFile, resolveImportPath } from './modules/discovery';
+import { discoverDatabaseFiles, readFile } from './modules/discovery';
 import { parseDatabaseFile } from './modules/parser';
 import { patchWranglerConfig } from './modules/wrangler';
 import { generateDurableObjectsModule, transformActionFile } from './modules/generator';
-import { loadMigrationFiles, generateMigration, buildAndLoadSchema } from '../migrations/generator';
+import { loadMigrationFiles } from '../migrations/generator';
 
 // ============================================================================
 // Types
@@ -22,8 +22,6 @@ export interface DatabasePluginOptions {
   databasesDir?: string;
   /** Directory for production migrations, relative to project root. Default: 'migrations' */
   migrationsDir?: string;
-  /** Auto-generate migrations. Default: 'development' */
-  autoMigrations?: boolean | 'development';
 }
 
 interface ResolvedOptions {
@@ -31,15 +29,14 @@ interface ResolvedOptions {
   registryImport: string;
   databasesDir: string;
   migrationsDir: string;
-  autoMigrations: boolean | 'development';
 }
 
 // ============================================================================
 // Virtual Module IDs
 // ============================================================================
 
-const DURABLE_OBJECTS_ID = 'eagerpatch/databases/__durableObjects';
-const VIRTUAL_DO_MODULE_ID = '\0virtual:eagerpatch/databases/__durableObjects.js';
+const DURABLE_OBJECTS_ID = 'eagerpatch/durable-db/__durableObjects';
+const VIRTUAL_DO_MODULE_ID = '\0virtual:eagerpatch/durable-db/__durableObjects.js';
 
 // ============================================================================
 // State Management
@@ -134,31 +131,6 @@ class PluginState {
   private async loadMigrations(db: DatabaseInfo): Promise<void> {
     const migrationsDir = db.migrationsDir;
     const isDev = this.config.command === 'serve';
-    const shouldAutoMigrate =
-      this.options.autoMigrations === true ||
-      (this.options.autoMigrations === 'development' && isDev);
-
-    // In dev mode, use the new push system for dev migrations
-    if (isDev && shouldAutoMigrate && db.schemaImport && db.schemaTableNames.length > 0) {
-      try {
-        // Dynamic import to avoid circular dependencies
-        const { pushOne } = await import('../cli/push');
-        const result = await pushOne(
-          { projectRoot: this.projectRoot, databasesDir: this.options.databasesDir, verbose: false },
-          db.name
-        );
-        if (result?.hasChanges) {
-          debugVite('Dev migration for %s: %s (%d statements)', db.name, result.migrationName, result.statements.length);
-        }
-      } catch (error) {
-        // Fallback to old behavior if push fails
-        debugVite('Could not push migrations for %s: %O', db.name, error);
-        await this.generateMigrationFromSchema(db, migrationsDir, 'Fallback migration generation');
-      }
-    } else if (shouldAutoMigrate && db.schemaImport && db.schemaTableNames.length > 0) {
-      // In build mode, use generateMigration (writes to prod migrations)
-      await this.generateMigrationFromSchema(db, migrationsDir, 'Auto-generate migrations');
-    }
 
     // Load production migrations
     db.migrations = loadMigrationFiles(migrationsDir);
@@ -185,27 +157,6 @@ class PluginState {
 
     if (db.migrations.size > 0) {
       debugVite('Total %d migration(s) for %s', db.migrations.size, db.name);
-    }
-  }
-
-  private async generateMigrationFromSchema(
-    db: DatabaseInfo,
-    migrationsDir: string,
-    label: string
-  ): Promise<void> {
-    try {
-      const schemaPath = db.schemaImport ? resolveImportPath(db.filePath, db.schemaImport) : null;
-      if (schemaPath) {
-        const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
-        if (Object.keys(schema).length > 0) {
-          const result = await generateMigration({ migrationsDir, schema, write: true });
-          if (result.hasChanges) {
-            debugVite('Generated migration for %s: %s (%d statements)', db.name, result.migrationName, result.statements.length);
-          }
-        }
-      }
-    } catch (error) {
-      debugVite('%s failed for %s: %O', label, db.name, error);
     }
   }
 
@@ -254,7 +205,6 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
     registryImport: options.registryImport ?? '@eagerpatch/durable-db/registry',
     databasesDir: options.databasesDir ?? 'src/databases',
     migrationsDir: options.migrationsDir ?? 'migrations',
-    autoMigrations: options.autoMigrations ?? 'development',
   });
 
   return {

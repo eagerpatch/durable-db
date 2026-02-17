@@ -18,7 +18,7 @@ import { getEventCounts } from "./databases/actions/getEventCounts";
 
 // Export Durable Object classes - the plugin generates these
 // @ts-ignore
-export { MainDatabaseDO, EventsDatabaseDO } from "virtual:eagerpatch/databases/__durableObjects";
+export { MainDatabaseDO, EventsDatabaseDO } from "virtual:eagerpatch/durable-db/__durableObjects";
 
 export type AppContext = {};
 

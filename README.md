@@ -119,7 +119,7 @@ import { createUser } from './databases/actions/createUser';
 setTenantIdResolver(() => 'my-tenant');
 
 // Export the generated Durable Object class
-export { MainDatabaseDO } from 'virtual:eagerpatch/databases/__durableObjects';
+export { MainDatabaseDO } from 'virtual:eagerpatch/durable-db/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any) {
@@ -497,7 +497,7 @@ const validateResults = await db.validate({}, { includeDev: true });
 
 Dev migrations are ephemeral migration files used during development for fast iteration.
 
-- **Created by**: `db push` or the Vite plugin's `autoMigrations` feature
+- **Created by**: `db push`
 - **Location**: `node_modules/.cache/@eagerpatch/durable-db/databases/<dbName>/migrations/`
 - **Naming**: Sequential -- `0001_dev.sql`, `0002_dev.sql`, etc.
 - **Lifecycle**: Cleared when you run `db generate` (consolidated into production) or `db reset`
@@ -625,7 +625,6 @@ import { databasePlugin } from '@eagerpatch/durable-db/vite';
 databasePlugin({
   databasesDir: 'src/databases',   // Where database files live
   migrationsDir: 'migrations',     // Where production migrations live
-  autoMigrations: 'development',   // Auto-run push in dev mode
 });
 ```
 
@@ -635,7 +634,6 @@ databasePlugin({
 |--------|------|---------|-------------|
 | `databasesDir` | `string` | `'src/databases'` | Directory containing database definition files |
 | `migrationsDir` | `string` | `'migrations'` | Directory for production migrations, relative to project root. Each database gets a subdirectory (e.g. `migrations/main/`) |
-| `autoMigrations` | `boolean \| 'development'` | `'development'` | Auto-push schema changes on dev server start. Set to `true` to also auto-generate in build mode, or `false` to disable |
 | `contextImport` | `string` | `'@eagerpatch/durable-db/context'` | Import path for the context module (for framework integrations) |
 | `registryImport` | `string` | `'@eagerpatch/durable-db/registry'` | Import path for the action registry module (for framework integrations) |
 
@@ -644,7 +642,7 @@ databasePlugin({
 1. **Discovery**: Finds all `defineDatabase()` files in your databases directory (excludes `schema.ts`, `_*.ts`, `.d.ts`)
 2. **AST Parsing**: Uses Babel to extract database config and action definitions (no regexes)
 3. **Migration Loading**: Loads production migrations from disk; in dev mode also loads dev migrations from cache
-4. **Code Generation**: Produces a virtual module (`virtual:eagerpatch/databases/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods
+4. **Code Generation**: Produces a virtual module (`virtual:eagerpatch/durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods
 5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker
 6. **Wrangler Patching**: Automatically updates `wrangler.jsonc` with Durable Object bindings and SQLite migration entries
 7. **HMR**: Watches database files and invalidates the virtual module on change
@@ -662,7 +660,7 @@ For each `defineDatabase()` call, the plugin generates a class based on the file
 Export the generated class from your worker entry point:
 
 ```ts
-export { MainDatabaseDO } from 'virtual:eagerpatch/databases/__durableObjects';
+export { MainDatabaseDO } from 'virtual:eagerpatch/durable-db/__durableObjects';
 ```
 
 ### Action Transformation

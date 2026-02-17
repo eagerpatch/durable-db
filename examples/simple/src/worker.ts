@@ -10,7 +10,7 @@ setTenantIdResolver(() => 'example-tenant');
 
 // Export Durable Object classes - the plugin generates these
 // @ts-ignore
-export { MainDatabaseDO } from 'virtual:eagerpatch/databases/__durableObjects';
+export { MainDatabaseDO } from 'virtual:eagerpatch/durable-db/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any): Promise<Response> {

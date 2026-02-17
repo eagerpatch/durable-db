@@ -68,7 +68,7 @@ export function getAction(dbName: string, actionName: string): ActionDefinition 
 function getOrThrow(dbName: string, actionName: string): ActionDefinition {
   const entry = getAction(dbName, actionName);
   if (!entry) {
-    throw new Error(`[shoplayer-database] Action not registered: ${dbName}/${actionName}`);
+    throw new Error(`[db] Action not registered: ${dbName}/${actionName}`);
   }
   return entry;
 }
@@ -103,7 +103,7 @@ export async function callAction(
 
   const validated = entry.validator(args);
   if (validated instanceof type.errors) {
-    throw new Error(`[shoplayer-database] Invalid args: ${validated.summary}`);
+    throw new Error(`[db] Invalid args: ${validated.summary}`);
   }
 
   // Same DB: direct call (no RPC hop)
@@ -114,7 +114,7 @@ export async function callAction(
   // Cross DB: RPC or WebSocket to the other DO
   const bindingName = ctx.dbBindingNames[targetDb];
   if (!bindingName) {
-    throw new Error(`[shoplayer-database] Missing binding for db: ${targetDb}`);
+    throw new Error(`[db] Missing binding for db: ${targetDb}`);
   }
 
   const binding = ctx.env[bindingName] as {

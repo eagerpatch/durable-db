@@ -3,7 +3,7 @@ export const Home = () => {
     <div>
       <h1>Multi-tenant Analytics API</h1>
       <p className="text-muted mb-6">
-        A demo of <code className="mono">@shoplayer/database</code> with RWSDK,
+        A demo of <code className="mono">@eagerpatch/durable-db</code> with RWSDK,
         showing two databases with different transports.
       </p>
 

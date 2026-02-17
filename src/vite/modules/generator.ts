@@ -152,7 +152,7 @@ export function generateDurableObjectsModule(
   const anyWebSocket = databases.some((db) => db.transport === 'websocket');
 
   const imports: t.ImportDeclaration[] = [
-    createNamedImport(['SqliteDurableObject'], '@shoplayer/database/db'),
+    createNamedImport(['SqliteDurableObject'], '@eagerpatch/durable-db/db'),
     createNamedImport(['type'], 'arktype'),
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
   ];
@@ -163,7 +163,7 @@ export function generateDurableObjectsModule(
 
   if (anyWebSocket) {
     imports.push(
-      createNamedImport(['decodeRequest', 'encodeResponse'], '@shoplayer/database/transport/protocol')
+      createNamedImport(['decodeRequest', 'encodeResponse'], '@eagerpatch/durable-db/transport/protocol')
     );
   }
 
@@ -341,7 +341,7 @@ function buildRpcMethod(
           t.newExpression(t.identifier('Error'), [
             t.templateLiteral(
               [
-                t.templateElement({ raw: `[shoplayer-database] Unknown action "`, cooked: `[shoplayer-database] Unknown action "` }, false),
+                t.templateElement({ raw: `[db] Unknown action "`, cooked: `[db] Unknown action "` }, false),
                 t.templateElement({ raw: `" for db "${db.name}" (was it imported?)`, cooked: `" for db "${db.name}" (was it imported?)` }, true),
               ],
               [t.identifier('method')]
@@ -374,7 +374,7 @@ function buildRpcMethod(
           t.newExpression(t.identifier('Error'), [
             t.templateLiteral(
               [
-                t.templateElement({ raw: `[shoplayer-database] Invalid args for "`, cooked: `[shoplayer-database] Invalid args for "` }, false),
+                t.templateElement({ raw: `[db] Invalid args for "`, cooked: `[db] Invalid args for "` }, false),
                 t.templateElement({ raw: `": `, cooked: `": ` }, false),
                 t.templateElement({ raw: '', cooked: '' }, true),
               ],
@@ -869,7 +869,7 @@ export function transformActionFile(options: TransformOptions) {
   ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction']);
 
   if (database.transport === 'websocket') {
-    ensureNamedImports(body, '@shoplayer/database/transport/websocket', ['WebSocketTransport']);
+    ensureNamedImports(body, '@eagerpatch/durable-db/transport/websocket', ['WebSocketTransport']);
   }
 
   const out: t.Statement[] = [];

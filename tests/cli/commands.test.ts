@@ -16,7 +16,7 @@ describe('CLI commands', () => {
 
   beforeEach(() => {
     // Create a temp directory that simulates a project root
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-cli-commands-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-cli-commands-'));
     nodeModulesDir = path.join(tempDir, 'node_modules');
     databasesDir = path.join(tempDir, 'src/databases');
     
@@ -48,7 +48,7 @@ describe('CLI commands', () => {
     fs.writeFileSync(
       path.join(dbDir, `${name}.ts`),
       `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -277,7 +277,7 @@ export const { action } = defineDatabase({
       fs.writeFileSync(
         path.join(databasesDir, 'noschema.ts'),
         `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 
 export const { action } = defineDatabase({});
 `
@@ -301,7 +301,7 @@ describe('CLI workflow scenarios', () => {
   let databasesDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-workflow-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-workflow-'));
     databasesDir = path.join(tempDir, 'src/databases');
     
     fs.mkdirSync(path.join(tempDir, 'node_modules'), { recursive: true });
@@ -323,7 +323,7 @@ describe('CLI workflow scenarios', () => {
     fs.writeFileSync(
       path.join(databasesDir, 'main.ts'),
       `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -371,7 +371,7 @@ export const { action } = defineDatabase({
     fs.writeFileSync(
       path.join(databasesDir, 'main.ts'),
       `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({

@@ -9,7 +9,7 @@ describe('migrations', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-migrations-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-migrations-'));
   });
 
   afterEach(() => {

@@ -1,4 +1,4 @@
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users, posts } from './schema';
 
 export const { action } = defineDatabase({

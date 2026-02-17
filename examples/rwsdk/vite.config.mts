@@ -1,12 +1,12 @@
 import { defineConfig } from "vite";
 import { redwood } from "rwsdk/vite";
 import { cloudflare } from "@cloudflare/vite-plugin";
-import { shoplayerDatabasePlugin } from "@shoplayer/database/vite";
+import { databasePlugin } from "@eagerpatch/durable-db/vite";
 
 export default defineConfig({
   plugins: [
-    shoplayerDatabasePlugin({
-      contextImport: "@shoplayer/database/context",
+    databasePlugin({
+      contextImport: "@eagerpatch/durable-db/context",
       databasesDir: "./src/databases",
       autoMigrations: false,
     }),

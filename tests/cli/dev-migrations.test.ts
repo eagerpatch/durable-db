@@ -8,7 +8,7 @@ describe('dev migrations integration', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-dev-mig-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-dev-mig-'));
     fs.mkdirSync(path.join(tempDir, 'node_modules'), { recursive: true });
   });
 
@@ -93,7 +93,7 @@ describe('dev migrations integration', () => {
       saveDevMigration(tempDir, 'main', 'dev_test', ['SELECT 1']);
 
       expect(fs.existsSync(paths.migrationsDir('main'))).toBe(true);
-      expect(paths.cacheDir).toContain('.cache/@shoplayer/database');
+      expect(paths.cacheDir).toContain('.cache/@eagerpatch/durable-db');
       expect(paths.migrationsDir('main')).toContain('databases/main/migrations');
     });
   });

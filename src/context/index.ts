@@ -11,7 +11,7 @@ let tenantIdResolver: (() => string) | null = null;
  *
  * @example
  * ```ts
- * import { setTenantIdResolver } from '@shoplayer/database/context';
+ * import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
  * import { getRequestInfo } from 'rwsdk/worker';
  *
  * setTenantIdResolver(() => getRequestInfo().ctx.session!.shop);
@@ -28,7 +28,7 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
  *
  * @example
  * ```ts
- * import { getTenantId } from '@shoplayer/database/context';
+ * import { getTenantId } from '@eagerpatch/durable-db/context';
  *
  * async function myHandler() {
  *   const tenantId = getTenantId();

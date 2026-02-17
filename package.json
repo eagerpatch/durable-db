@@ -1,9 +1,9 @@
 {
-  "name": "@shoplayer/database",
+  "name": "@eagerpatch/durable-db",
   "version": "0.0.1",
   "type": "module",
   "bin": {
-    "shoplayer-db": "./dist/cli/bin.js"
+    "db": "./dist/cli/bin.js"
   },
   "exports": {
     ".": {

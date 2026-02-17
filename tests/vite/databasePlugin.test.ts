@@ -2,21 +2,21 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { shoplayerDatabasePlugin } from '../../src/vite/databasePlugin';
+import { databasePlugin } from '../../src/vite/databasePlugin';
 import type { Plugin, ResolvedConfig } from 'vite';
 
 // ============================================================================
 // Plugin Configuration
 // ============================================================================
 
-describe('shoplayerDatabasePlugin', () => {
+describe('databasePlugin', () => {
   let tempDir: string;
   let plugin: Plugin;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-plugin-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-plugin-'));
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
-    plugin = shoplayerDatabasePlugin();
+    plugin = databasePlugin();
   });
 
   afterEach(() => {
@@ -25,7 +25,7 @@ describe('shoplayerDatabasePlugin', () => {
 
   describe('metadata', () => {
     it('has correct name', () => {
-      expect(plugin.name).toBe('shoplayer-database');
+      expect(plugin.name).toBe('durable-db');
     });
 
     it('enforces pre', () => {
@@ -39,23 +39,23 @@ describe('shoplayerDatabasePlugin', () => {
 
   describe('options', () => {
     it('accepts all options', () => {
-      const customPlugin = shoplayerDatabasePlugin({
+      const customPlugin = databasePlugin({
         contextImport: 'my-app/context',
         registryImport: 'my-app/registry',
         databasesDir: 'lib/db',
         autoMigrations: false,
       });
-      expect(customPlugin.name).toBe('shoplayer-database');
+      expect(customPlugin.name).toBe('durable-db');
     });
 
     it('accepts autoMigrations: true', () => {
-      const customPlugin = shoplayerDatabasePlugin({ autoMigrations: true });
-      expect(customPlugin.name).toBe('shoplayer-database');
+      const customPlugin = databasePlugin({ autoMigrations: true });
+      expect(customPlugin.name).toBe('durable-db');
     });
 
     it('accepts autoMigrations: development', () => {
-      const customPlugin = shoplayerDatabasePlugin({ autoMigrations: 'development' });
-      expect(customPlugin.name).toBe('shoplayer-database');
+      const customPlugin = databasePlugin({ autoMigrations: 'development' });
+      expect(customPlugin.name).toBe('durable-db');
     });
   });
 
@@ -98,24 +98,24 @@ describe('resolveId', () => {
   let plugin: Plugin;
 
   beforeEach(() => {
-    plugin = shoplayerDatabasePlugin();
+    plugin = databasePlugin();
   });
 
-  it('resolves virtual:shoplayer/databases/__durableObjects', async () => {
+  it('resolves virtual:eagerpatch/databases/__durableObjects', async () => {
     const resolveId = plugin.resolveId as Function;
-    const result = await resolveId('virtual:shoplayer/databases/__durableObjects');
-    expect(result).toBe('\0virtual:shoplayer/databases/__durableObjects.js');
+    const result = await resolveId('virtual:eagerpatch/databases/__durableObjects');
+    expect(result).toBe('\0virtual:eagerpatch/databases/__durableObjects.js');
   });
 
-  it('resolves shoplayer/databases/__durableObjects without prefix', async () => {
+  it('resolves eagerpatch/databases/__durableObjects without prefix', async () => {
     const resolveId = plugin.resolveId as Function;
-    const result = await resolveId('shoplayer/databases/__durableObjects');
-    expect(result).toBe('\0virtual:shoplayer/databases/__durableObjects.js');
+    const result = await resolveId('eagerpatch/databases/__durableObjects');
+    expect(result).toBe('\0virtual:eagerpatch/databases/__durableObjects.js');
   });
 
   it('returns null for registry (now a real module)', async () => {
     const resolveId = plugin.resolveId as Function;
-    expect(await resolveId('@shoplayer/database/registry')).toBeNull();
+    expect(await resolveId('@eagerpatch/durable-db/registry')).toBeNull();
   });
 
   it('returns null for non-virtual imports', async () => {
@@ -135,10 +135,10 @@ describe('transform', () => {
   let plugin: Plugin;
 
   beforeEach(async () => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-transform-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-transform-'));
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
 
-    plugin = shoplayerDatabasePlugin();
+    plugin = databasePlugin();
 
     const configResolved = plugin.configResolved as Function;
     await configResolved({
@@ -210,7 +210,7 @@ describe('concurrent initialization', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-init-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-init-'));
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
   });
 
@@ -219,7 +219,7 @@ describe('concurrent initialization', () => {
   });
 
   it('does not initialize twice when load and transform race', async () => {
-    const plugin = shoplayerDatabasePlugin();
+    const plugin = databasePlugin();
 
     const configResolved = plugin.configResolved as Function;
     await configResolved({
@@ -232,7 +232,7 @@ describe('concurrent initialization', () => {
 
     // Fire both hooks concurrently — both call state.initialize()
     const [loadResult, transformResult] = await Promise.all([
-      load('\0virtual:shoplayer/databases/__durableObjects.js'),
+      load('\0virtual:eagerpatch/databases/__durableObjects.js'),
       transform.call(
         { resolve: async () => null },
         'export const x = 1;',

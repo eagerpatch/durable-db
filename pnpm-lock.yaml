@@ -82,7 +82,7 @@ importers:
 
   examples/rwsdk:
     dependencies:
-      '@shoplayer/database':
+      '@eagerpatch/durable-db':
         specifier: workspace:*
         version: link:../..
       react:
@@ -125,7 +125,7 @@ importers:
 
   examples/simple:
     dependencies:
-      '@shoplayer/database':
+      '@eagerpatch/durable-db':
         specifier: workspace:*
         version: link:../..
     devDependencies:

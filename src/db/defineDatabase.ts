@@ -12,13 +12,13 @@ import type {
 /**
  * Define a database with its schema and migrations.
  *
- * This function is transformed at build time by the Shoplayer Vite plugin.
+ * This function is transformed at build time by the durable-db Vite plugin.
  * At runtime, the actions returned will be RPC stubs that call into the
  * generated Durable Object.
  *
  * @example
  * ```ts
- * import { defineDatabase } from '@shoplayer/database/db';
+ * import { defineDatabase } from '@eagerpatch/durable-db/db';
  * import { users, posts } from './schema';
  *
  * export const { action } = defineDatabase({
@@ -66,7 +66,7 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
       // This error helps catch cases where the transform didn't run
       throw new Error(
         'Action called without transformation. ' +
-        'Make sure the shoplayer database plugin is configured in your Vite config.'
+        'Make sure the durable-db plugin is configured in your Vite config.'
       );
     };
 

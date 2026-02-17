@@ -12,7 +12,7 @@ describe('plugin integration', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-test-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-test-'));
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
   });
 
@@ -34,7 +34,7 @@ export const users = sqliteTable('users', {
       fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'schema.ts'), schemaCode);
 
       const mainCode = `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -82,8 +82,8 @@ export const getUser = action({
         dbName: parsed.database!.name,
         database: parsed.database!,
         actionsInFile: parsed.actions,
-        contextImport: '@shoplayer/database/context',
-        registryImport: '@shoplayer/database/registry',
+        contextImport: '@eagerpatch/durable-db/context',
+        registryImport: '@eagerpatch/durable-db/registry',
       });
 
       expect(transformed).not.toBeNull();
@@ -96,7 +96,7 @@ export const getUser = action({
       // 4. Generate DO module
       const doModule = generateDurableObjectsModule(
         [parsed.database!],
-        '@shoplayer/database/registry'
+        '@eagerpatch/durable-db/registry'
       );
 
       expect(doModule).toMatch(/class MainDatabaseDO extends SqliteDurableObject/);
@@ -114,7 +114,7 @@ export const getUser = action({
     it('handles multiple databases', () => {
       // Main database
       const mainCode = `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 export const { action } = defineDatabase({
   schema: {},
 });
@@ -127,7 +127,7 @@ export const mainAction = action({
 
       // Analytics database (global)
       const analyticsCode = `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 export const { action } = defineDatabase({
   schema: {},
   instance: 'global',
@@ -166,7 +166,7 @@ export const logEvent = action({
       expect(analyticsDb?.instance).toBe('global');
 
       // Generate DO module with both databases
-      const doModule = generateDurableObjectsModule(databases, '@shoplayer/database/registry');
+      const doModule = generateDurableObjectsModule(databases, '@eagerpatch/durable-db/registry');
 
       expect(doModule).toMatch(/class MainDatabaseDO/);
       expect(doModule).toMatch(/class AnalyticsDatabaseDO/);
@@ -178,7 +178,7 @@ export const logEvent = action({
 
     it('generates correct stub for per-tenant database', () => {
       const mainCode = `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 export const { action } = defineDatabase({
   schema: {},
   instance: 'per-tenant',
@@ -203,8 +203,8 @@ export const createUser = action({
         dbName: parsed.database!.name,
         database: parsed.database!,
         actionsInFile: parsed.actions,
-        contextImport: '@shoplayer/database/context',
-        registryImport: '@shoplayer/database/registry',
+        contextImport: '@eagerpatch/durable-db/context',
+        registryImport: '@eagerpatch/durable-db/registry',
       });
 
       // Should use getTenantId() for instance key
@@ -213,7 +213,7 @@ export const createUser = action({
 
     it('generates correct stub for global database', () => {
       const analyticsCode = `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 export const { action } = defineDatabase({
   schema: {},
   instance: 'global',
@@ -238,8 +238,8 @@ export const logEvent = action({
         dbName: parsed.database!.name,
         database: parsed.database!,
         actionsInFile: parsed.actions,
-        contextImport: '@shoplayer/database/context',
-        registryImport: '@shoplayer/database/registry',
+        contextImport: '@eagerpatch/durable-db/context',
+        registryImport: '@eagerpatch/durable-db/registry',
       });
 
       // Should use "global" as instance key
@@ -248,7 +248,7 @@ export const logEvent = action({
 
     it('generates correct imports for websocket transport database', () => {
       const eventsCode = `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 export const { action } = defineDatabase({
   schema: {},
   transport: 'websocket',
@@ -271,11 +271,11 @@ export const logEvent = action({
       // DO module should import from specific transport subpaths
       const doModule = generateDurableObjectsModule(
         [parsed.database!],
-        '@shoplayer/database/registry'
+        '@eagerpatch/durable-db/registry'
       );
 
-      expect(doModule).toContain('@shoplayer/database/transport/protocol');
-      expect(doModule).not.toMatch(/'@shoplayer\/database\/transport'/);
+      expect(doModule).toContain('@eagerpatch/durable-db/transport/protocol');
+      expect(doModule).not.toMatch(/'@eagerpatch\/durable-db\/transport'/);
 
       // Action file should import WebSocketTransport from specific subpath
       const transformed = transformActionFile({
@@ -283,17 +283,17 @@ export const logEvent = action({
         dbName: parsed.database!.name,
         database: parsed.database!,
         actionsInFile: parsed.actions,
-        contextImport: '@shoplayer/database/context',
-        registryImport: '@shoplayer/database/registry',
+        contextImport: '@eagerpatch/durable-db/context',
+        registryImport: '@eagerpatch/durable-db/registry',
       });
 
-      expect(transformed!.code).toContain('@shoplayer/database/transport/websocket');
-      expect(transformed!.code).not.toMatch(/'@shoplayer\/database\/transport'/);
+      expect(transformed!.code).toContain('@eagerpatch/durable-db/transport/websocket');
+      expect(transformed!.code).not.toMatch(/'@eagerpatch\/durable-db\/transport'/);
     });
 
     it('includes DO short path optimization', () => {
       const mainCode = `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 export const { action } = defineDatabase({
   schema: {},
 });
@@ -317,8 +317,8 @@ export const createUser = action({
         dbName: parsed.database!.name,
         database: parsed.database!,
         actionsInFile: parsed.actions,
-        contextImport: '@shoplayer/database/context',
-        registryImport: '@shoplayer/database/registry',
+        contextImport: '@eagerpatch/durable-db/context',
+        registryImport: '@eagerpatch/durable-db/registry',
       });
 
       // Should include DO context check for short path

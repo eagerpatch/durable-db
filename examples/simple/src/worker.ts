@@ -1,4 +1,4 @@
-import { setTenantIdResolver } from '@shoplayer/database/context';
+import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
 import { studio } from '@outerbase/browsable-durable-object';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
@@ -10,7 +10,7 @@ setTenantIdResolver(() => 'example-tenant');
 
 // Export Durable Object classes - the plugin generates these
 // @ts-ignore
-export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
+export { MainDatabaseDO } from 'virtual:eagerpatch/databases/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any): Promise<Response> {

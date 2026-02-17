@@ -1,4 +1,4 @@
-# @shoplayer/database
+# @eagerpatch/durable-db
 
 Zero-configuration database abstraction for Cloudflare Durable Objects with SQLite.
 
@@ -11,11 +11,11 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
 - [Writing Actions](#writing-actions)
 - [Calling Actions from Your Worker](#calling-actions-from-your-worker)
 - [CLI](#cli)
-  - [push](#shoplayer-db-push)
-  - [generate](#shoplayer-db-generate)
-  - [status](#shoplayer-db-status)
-  - [reset](#shoplayer-db-reset)
-  - [validate](#shoplayer-db-validate)
+  - [push](#db-push)
+  - [generate](#db-generate)
+  - [status](#db-status)
+  - [reset](#db-reset)
+  - [validate](#db-validate)
 - [Migration System](#migration-system)
   - [Dev Migrations](#dev-migrations)
   - [Production Migrations](#production-migrations)
@@ -37,7 +37,7 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
 ### 1. Install
 
 ```bash
-pnpm add @shoplayer/database
+pnpm add @eagerpatch/durable-db
 ```
 
 ### 2. Define your schema
@@ -58,7 +58,7 @@ export const users = sqliteTable('users', {
 
 ```ts
 // src/databases/main.ts
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -99,11 +99,11 @@ export const createUser = action({
 // vite.config.ts
 import { defineConfig } from 'vite';
 import { cloudflare } from '@cloudflare/vite-plugin';
-import { shoplayerDatabasePlugin } from '@shoplayer/database/vite';
+import { databasePlugin } from '@eagerpatch/durable-db/vite';
 
 export default defineConfig({
   plugins: [
-    shoplayerDatabasePlugin(),
+    databasePlugin(),
     cloudflare(),
   ],
 });
@@ -113,11 +113,11 @@ export default defineConfig({
 
 ```ts
 // src/worker.ts
-import { runWithTenantId } from '@shoplayer/database/context';
+import { runWithTenantId } from '@eagerpatch/durable-db/context';
 import { createUser } from './databases/actions/createUser';
 
 // Export the generated Durable Object class
-export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
+export { MainDatabaseDO } from 'virtual:eagerpatch/databases/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any) {
@@ -132,7 +132,7 @@ export default {
 ### 7. Push schema and run
 
 ```bash
-shoplayer-db push    # Create dev migrations from your schema
+db push    # Create dev migrations from your schema
 pnpm dev             # Start the dev server
 ```
 
@@ -143,7 +143,7 @@ pnpm dev             # Start the dev server
 Call `defineDatabase()` with a config object. The Vite plugin parses this at build time to generate a Durable Object class.
 
 ```ts
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users, posts } from './schema';
 
 export const { action } = defineDatabase({
@@ -237,7 +237,7 @@ Database actions need a tenant ID to know which Durable Object instance to use. 
 Wrap your request handler in `runWithTenantId()` to provide the tenant ID:
 
 ```ts
-import { runWithTenantId } from '@shoplayer/database/context';
+import { runWithTenantId } from '@eagerpatch/durable-db/context';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
 
@@ -262,7 +262,7 @@ export default {
 If your framework already has its own request-scoped context (e.g. RWSDK's `getRequestInfo()`), use `setTenantIdResolver()` to bridge the two context systems instead of wrapping every request:
 
 ```ts
-import { setTenantIdResolver } from '@shoplayer/database/context';
+import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
 import { getRequestInfo } from 'rwsdk/worker';
 
 setTenantIdResolver(() => getRequestInfo().ctx.session!.shop);
@@ -280,21 +280,21 @@ Behind the scenes, each action call is an RPC call to the correct Durable Object
 
 ## CLI
 
-The `shoplayer-db` CLI manages your migration lifecycle. All commands share these options:
+The `db` CLI manages your migration lifecycle. All commands share these options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-d, --databases-dir <dir>` | `src/databases` | Directory containing database definitions |
 | `-v, --verbose` | `false` | Show detailed output |
 
-### `shoplayer-db push`
+### `db push`
 
 Push schema changes to dev migrations. This is the command you run most often during development.
 
 ```bash
-shoplayer-db push
-shoplayer-db push --verbose
-shoplayer-db push --databases-dir ./src/db
+db push
+db push --verbose
+db push --databases-dir ./src/db
 ```
 
 **What it does:**
@@ -323,17 +323,17 @@ If a production snapshot change is detected:
 [db:push] main: 0001_dev (1 statement)
 ```
 
-Dev migrations are stored in `node_modules/.cache/@shoplayer/database/` and are never committed to git. They are loaded automatically by the Vite plugin in dev mode.
+Dev migrations are stored in `node_modules/.cache/@eagerpatch/durable-db/` and are never committed to git. They are loaded automatically by the Vite plugin in dev mode.
 
-### `shoplayer-db generate`
+### `db generate`
 
 Generate a production migration from your current schema changes. Run this when you're ready to commit.
 
 ```bash
-shoplayer-db generate
-shoplayer-db generate add_user_bio
-shoplayer-db generate --database main
-shoplayer-db generate --database main add_posts_table
+db generate
+db generate add_user_bio
+db generate --database main
+db generate --database main add_posts_table
 ```
 
 **Arguments:**
@@ -368,13 +368,13 @@ shoplayer-db generate --database main add_posts_table
 - Without name argument: `20240315123045.sql`
 - With name argument: `20240315123045_add_user_bio.sql`
 
-### `shoplayer-db status`
+### `db status`
 
 Show the current migration status for all databases without making any changes.
 
 ```bash
-shoplayer-db status
-shoplayer-db status --verbose
+db status
+db status --verbose
 ```
 
 **Output example:**
@@ -398,15 +398,15 @@ analytics
 
 Shows per-database: production migration count, dev migration count, whether there are uncommitted schema changes (pending SQL statements that haven't been pushed yet), and the last push timestamp.
 
-### `shoplayer-db reset`
+### `db reset`
 
 Reset dev state and (optionally) create fresh database instances.
 
 ```bash
-shoplayer-db reset
-shoplayer-db reset --keep-epoch
-shoplayer-db reset --database main
-shoplayer-db reset --database main --keep-epoch
+db reset
+db reset --keep-epoch
+db reset --database main
+db reset --database main --keep-epoch
 ```
 
 **Extra flags:**
@@ -431,15 +431,15 @@ shoplayer-db reset --database main --keep-epoch
 [db:reset] analytics: reset
 ```
 
-### `shoplayer-db validate`
+### `db validate`
 
 Dry-run all migrations against a local in-memory SQLite database to catch errors before deployment.
 
 ```bash
-shoplayer-db validate
-shoplayer-db validate --database main
-shoplayer-db validate --no-dev
-shoplayer-db validate --verbose
+db validate
+db validate --database main
+db validate --no-dev
+db validate --verbose
 ```
 
 **Extra flags:**
@@ -491,7 +491,7 @@ pnpm add -D libsql
 All CLI functions are also available for integration into other tools:
 
 ```ts
-import * as db from '@shoplayer/database/cli';
+import * as db from '@eagerpatch/durable-db/cli';
 
 const pushResults = await db.push({ verbose: true });
 const statusResults = await db.status();
@@ -508,10 +508,10 @@ const validateResults = await db.validate({}, { includeDev: true });
 
 Dev migrations are ephemeral migration files used during development for fast iteration.
 
-- **Created by**: `shoplayer-db push` or the Vite plugin's `autoMigrations` feature
-- **Location**: `node_modules/.cache/@shoplayer/database/databases/<dbName>/migrations/`
+- **Created by**: `db push` or the Vite plugin's `autoMigrations` feature
+- **Location**: `node_modules/.cache/@eagerpatch/durable-db/databases/<dbName>/migrations/`
 - **Naming**: Sequential -- `0001_dev.sql`, `0002_dev.sql`, etc.
-- **Lifecycle**: Cleared when you run `shoplayer-db generate` (consolidated into production) or `shoplayer-db reset`
+- **Lifecycle**: Cleared when you run `db generate` (consolidated into production) or `db reset`
 - **Never committed to git**
 
 The Vite plugin automatically loads dev migrations in dev mode and appends them after production migrations when generating the DO class.
@@ -520,7 +520,7 @@ The Vite plugin automatically loads dev migrations in dev mode and appends them 
 
 Production migrations are the canonical migrations committed to your repository.
 
-- **Created by**: `shoplayer-db generate`
+- **Created by**: `db generate`
 - **Location**: Your configured `migrationsDir` (e.g. `src/databases/migrations/`)
 - **Naming**: Timestamp-based -- `20240315123045.sql` or `20240315123045_description.sql`
 - **Lifecycle**: Permanent, committed to git, deployed to production
@@ -553,14 +553,14 @@ In development, each database instance key gets an epoch suffix to enable clean 
 | Production | `example-tenant` |
 | Development | `example-tenant__dev_m1a2b3c` |
 
-When you run `shoplayer-db reset` (without `--keep-epoch`), a new epoch is generated. This causes all subsequent DO accesses to create fresh instances, effectively giving you a clean database without data from previous iterations.
+When you run `db reset` (without `--keep-epoch`), a new epoch is generated. This causes all subsequent DO accesses to create fresh instances, effectively giving you a clean database without data from previous iterations.
 
-The epoch is a base36-encoded timestamp stored in `node_modules/.cache/@shoplayer/database/state.json`.
+The epoch is a base36-encoded timestamp stored in `node_modules/.cache/@eagerpatch/durable-db/state.json`.
 
 ### Dev State Structure
 
 ```
-node_modules/.cache/@shoplayer/database/
+node_modules/.cache/@eagerpatch/durable-db/
   state.json                          # Global state (epoch, per-db counters)
   databases/
     main/
@@ -596,24 +596,24 @@ The `state.json` file tracks:
 ```bash
 # 1. Edit your Drizzle schema
 # 2. Push changes to dev migrations
-shoplayer-db push
+db push
 
 # 3. Run the dev server -- migrations apply automatically on DO access
 pnpm dev
 
 # 4. Iterate: edit schema -> push -> refresh browser
 # 5. If you need a clean slate:
-shoplayer-db reset
+db reset
 ```
 
 **Ready to deploy:**
 
 ```bash
 # 1. Generate a production migration
-shoplayer-db generate add_user_profiles
+db generate add_user_profiles
 
 # 2. Validate before deploying
-shoplayer-db validate
+db validate
 
 # 3. Commit the migration file and updated snapshot
 git add src/databases/migrations/
@@ -624,18 +624,18 @@ git commit -m "Add user profiles migration"
 
 **Team collaboration:**
 
-When a teammate commits a production migration, `shoplayer-db push` automatically detects the snapshot hash change and resets your dev state for that database. Your next push rebuilds dev migrations cleanly on top of the new production baseline.
+When a teammate commits a production migration, `db push` automatically detects the snapshot hash change and resets your dev state for that database. Your next push rebuilds dev migrations cleanly on top of the new production baseline.
 
 ---
 
 ## Vite Plugin
 
 ```ts
-import { shoplayerDatabasePlugin } from '@shoplayer/database/vite';
+import { databasePlugin } from '@eagerpatch/durable-db/vite';
 
-shoplayerDatabasePlugin({
-  contextImport: '@shoplayer/database/context',  // Import path for context module
-  registryImport: '@shoplayer/database/registry', // Import path for registry module
+databasePlugin({
+  contextImport: '@eagerpatch/durable-db/context',  // Import path for context module
+  registryImport: '@eagerpatch/durable-db/registry', // Import path for registry module
   databasesDir: 'src/databases',                  // Where database files live
   autoMigrations: 'development',                  // Auto-run push in dev mode
 });
@@ -645,8 +645,8 @@ shoplayerDatabasePlugin({
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `contextImport` | `string` | `'@shoplayer/database/context'` | Import path for the context module |
-| `registryImport` | `string` | `'@shoplayer/database/registry'` | Import path for the action registry module |
+| `contextImport` | `string` | `'@eagerpatch/durable-db/context'` | Import path for the context module |
+| `registryImport` | `string` | `'@eagerpatch/durable-db/registry'` | Import path for the action registry module |
 | `databasesDir` | `string` | `'src/databases'` | Directory containing database definitions |
 | `autoMigrations` | `boolean \| 'development'` | `'development'` | Auto-push schema changes on dev server start |
 
@@ -655,7 +655,7 @@ shoplayerDatabasePlugin({
 1. **Discovery**: Finds all `defineDatabase()` files in your databases directory (excludes `schema.ts`, `_*.ts`, `.d.ts`)
 2. **AST Parsing**: Uses Babel to extract database config and action definitions (no regexes)
 3. **Migration Loading**: Loads production migrations from disk; in dev mode also loads dev migrations from cache
-4. **Code Generation**: Produces a virtual module (`virtual:shoplayer/databases/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods
+4. **Code Generation**: Produces a virtual module (`virtual:eagerpatch/databases/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods
 5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker
 6. **Wrangler Patching**: Automatically updates `wrangler.jsonc` with Durable Object bindings and SQLite migration entries
 7. **HMR**: Watches database files and invalidates the virtual module on change
@@ -673,7 +673,7 @@ For each `defineDatabase()` call, the plugin generates a class based on the file
 Export the generated class from your worker entry point:
 
 ```ts
-export { MainDatabaseDO } from 'virtual:shoplayer/databases/__durableObjects';
+export { MainDatabaseDO } from 'virtual:eagerpatch/databases/__durableObjects';
 ```
 
 ### Action Transformation
@@ -858,12 +858,12 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 | Export path | Source | Purpose |
 |---|---|---|
 | `./db` | `src/db/` | `defineDatabase()`, `SqliteDurableObject`, Kysely plugins |
-| `./vite` | `src/vite/databasePlugin.ts` | Vite plugin (`shoplayerDatabasePlugin`) |
+| `./vite` | `src/vite/databasePlugin.ts` | Vite plugin (`databasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
 | `./context` | `src/context/` | Tenant ID context (`runWithTenantId`, `getTenantId`, `setTenantIdResolver`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callAction`) |
-| `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `shoplayer-db` binary |
+| `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `db` binary |
 
 ### Request Flow
 

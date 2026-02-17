@@ -223,7 +223,7 @@ export interface MigrationAttemptInfo {
  *
  * @example
  * ```ts
- * import { SqliteDurableObject } from '@shoplayer/database/db';
+ * import { SqliteDurableObject } from '@eagerpatch/durable-db/db';
  *
  * export class MyDatabaseDO extends SqliteDurableObject {
  *   migrations = {

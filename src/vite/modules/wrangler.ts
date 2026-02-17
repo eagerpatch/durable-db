@@ -129,7 +129,7 @@ export function patchWranglerConfig(
   const configPath = findWranglerConfig(projectRoot);
 
   if (!configPath) {
-    console.warn('[shoplayer-database] wrangler.jsonc/json not found');
+    console.warn('[db] wrangler.jsonc/json not found');
     logRequiredConfig(databases);
     return { modified: false, configPath: null, error: null };
   }

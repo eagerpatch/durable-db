@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`@shoplayer/database` — a zero-configuration database abstraction for Cloudflare Durable Objects with SQLite. Uses Drizzle for schema definition, Kysely for queries, and ArkType for runtime validation. A Vite plugin handles build-time code generation (Durable Object classes, RPC stubs, migration embedding, wrangler config patching).
+`@eagerpatch/durable-db` — a zero-configuration database abstraction for Cloudflare Durable Objects with SQLite. Uses Drizzle for schema definition, Kysely for queries, and ArkType for runtime validation. A Vite plugin handles build-time code generation (Durable Object classes, RPC stubs, migration embedding, wrangler config patching).
 
 ## Commands
 
@@ -37,18 +37,18 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 | Export path | Source | Purpose |
 |---|---|---|
 | `./db` | `src/db/` | `defineDatabase()` API, `SqliteDurableObject` base class, Kysely plugins |
-| `./vite` | `src/vite/databasePlugin.ts` | Vite plugin entry (`shoplayerDatabasePlugin`) |
+| `./vite` | `src/vite/databasePlugin.ts` | Vite plugin entry (`databasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
 | `./context` | `src/context/` | AsyncLocalStorage-based tenant ID context (`runWithTenantId`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action name → handler registry for RPC dispatch |
-| `./cli` | `src/cli/` | CLI commands (push, generate, status, reset) and `shoplayer-db` binary |
+| `./cli` | `src/cli/` | CLI commands (push, generate, status, reset) and `db` binary |
 
 ### Core Flow
 
 1. **User defines** Drizzle schema in `src/databases/schema.ts` and database + actions in `src/databases/*.ts`
 2. **Vite plugin** discovers database files, parses them with Babel AST, extracts `defineDatabase()` calls and action exports
-3. **Code generation** produces a virtual module (`virtual:shoplayer/databases/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
+3. **Code generation** produces a virtual module (`virtual:eagerpatch/databases/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
 4. **Action call transformation**: internal calls → `this.actionName()`, cross-DB calls → RPC via `ctx.env`
 5. **RPC stubs** are generated so workers can call actions like regular async functions (context provided via AsyncLocalStorage)
 6. **wrangler.jsonc** is auto-patched with Durable Object bindings
@@ -60,8 +60,8 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 ### Migration System
 
 - Schema snapshots stored in `_snapshot.json` in the migrations directory
-- Dev migrations: ephemeral, stored in `node_modules/.cache/@shoplayer/database/`
-- Production migrations: `.sql` files in the configured `migrationsDir`, created via `shoplayer-db generate`
+- Dev migrations: ephemeral, stored in `node_modules/.cache/@eagerpatch/durable-db/`
+- Production migrations: `.sql` files in the configured `migrationsDir`, created via `db generate`
 - Dev epoch suffixing allows resetting local databases without conflicts
 
 ### Database Instance Strategies

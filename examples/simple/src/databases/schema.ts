@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from '@shoplayer/database/schema';
+import { sqliteTable, text, integer } from '@eagerpatch/durable-db/schema';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),

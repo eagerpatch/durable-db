@@ -16,7 +16,7 @@ describe('wrangler', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-wrangler-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-wrangler-'));
   });
 
   afterEach(() => {

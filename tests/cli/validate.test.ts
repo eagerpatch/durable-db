@@ -10,7 +10,7 @@ describe('validate command', () => {
   let databasesDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-validate-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-validate-'));
     databasesDir = path.join(tempDir, 'src/databases');
     fs.mkdirSync(path.join(tempDir, 'node_modules'), { recursive: true });
     fs.mkdirSync(databasesDir, { recursive: true });
@@ -35,7 +35,7 @@ describe('validate command', () => {
       fs.writeFileSync(
         path.join(databasesDir, `${name}.ts`),
         `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -47,7 +47,7 @@ export const { action } = defineDatabase({
       fs.writeFileSync(
         path.join(databasesDir, `${name}.ts`),
         `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 
 export const { action } = defineDatabase({});
 `
@@ -236,7 +236,7 @@ export const { action } = defineDatabase({});
     fs.writeFileSync(
       path.join(databasesDir, 'other.ts'),
       `
-import { defineDatabase } from '@shoplayer/database/db';
+import { defineDatabase } from '@eagerpatch/durable-db/db';
 
 export const { action } = defineDatabase({});
 `

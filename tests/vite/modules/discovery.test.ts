@@ -8,7 +8,7 @@ describe('discovery', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-discovery-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-discovery-'));
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
   });
 
@@ -177,7 +177,7 @@ describe('discovery', () => {
     it('returns null for package imports', () => {
       const result = resolveImportPath(
         path.join(tempDir, 'src', 'databases', 'main.ts'),
-        '@shoplayer/database/db'
+        '@eagerpatch/durable-db/db'
       );
 
       expect(result).toBeNull();

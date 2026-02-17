@@ -9,7 +9,7 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@shoplayer/database": "workspace:*"
+    "@eagerpatch/durable-db": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.0.0",

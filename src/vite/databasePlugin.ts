@@ -14,9 +14,9 @@ import { loadMigrationFiles, generateMigration, buildAndLoadSchema } from '../mi
 // ============================================================================
 
 export interface DatabasePluginOptions {
-  /** Import path for the context module. Default: '@shoplayer/database/context' */
+  /** Import path for the context module. Default: '@eagerpatch/durable-db/context' */
   contextImport?: string;
-  /** Import path for the registry module. Default: '@shoplayer/database/registry' */
+  /** Import path for the registry module. Default: '@eagerpatch/durable-db/registry' */
   registryImport?: string;
   /** Directory containing database definitions. Default: 'src/databases' */
   databasesDir?: string;
@@ -38,8 +38,8 @@ interface ResolvedOptions {
 // Virtual Module IDs
 // ============================================================================
 
-const DURABLE_OBJECTS_ID = 'shoplayer/databases/__durableObjects';
-const VIRTUAL_DO_MODULE_ID = '\0virtual:shoplayer/databases/__durableObjects.js';
+const DURABLE_OBJECTS_ID = 'eagerpatch/databases/__durableObjects';
+const VIRTUAL_DO_MODULE_ID = '\0virtual:eagerpatch/databases/__durableObjects.js';
 
 // ============================================================================
 // State Management
@@ -248,17 +248,17 @@ async function findImportedDatabase(
 // Plugin
 // ============================================================================
 
-export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Plugin {
+export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
   const state = new PluginState({
-    contextImport: options.contextImport ?? '@shoplayer/database/context',
-    registryImport: options.registryImport ?? '@shoplayer/database/registry',
+    contextImport: options.contextImport ?? '@eagerpatch/durable-db/context',
+    registryImport: options.registryImport ?? '@eagerpatch/durable-db/registry',
     databasesDir: options.databasesDir ?? 'src/databases',
     migrationsDir: options.migrationsDir ?? 'migrations',
     autoMigrations: options.autoMigrations ?? 'development',
   });
 
   return {
-    name: 'shoplayer-database',
+    name: 'durable-db',
     enforce: 'pre',
 
     configResolved(config) {
@@ -363,4 +363,4 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
   };
 }
 
-export default shoplayerDatabasePlugin;
+export default databasePlugin;

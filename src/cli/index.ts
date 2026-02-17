@@ -3,13 +3,13 @@
 // ============================================================================
 //
 // This module provides composable functions for database management.
-// It's designed to be consumed by higher-level CLI tools (like `shoplayer`)
+// It's designed to be consumed by higher-level CLI tools
 // rather than used directly.
 //
-// Example usage in shoplayer CLI:
+// Example usage:
 //
 //   import { command } from 'commander';
-//   import * as db from '@shoplayer/database/cli';
+//   import * as db from '@eagerpatch/durable-db/cli';
 //
 //   program
 //     .command('db:push')

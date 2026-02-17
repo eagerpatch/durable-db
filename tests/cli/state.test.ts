@@ -25,7 +25,7 @@ describe('CLI state management', () => {
 
   beforeEach(() => {
     // Create a temp directory that simulates a project root
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shoplayer-cli-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-cli-'));
     nodeModulesDir = path.join(tempDir, 'node_modules');
     fs.mkdirSync(nodeModulesDir, { recursive: true });
   });
@@ -38,7 +38,7 @@ describe('CLI state management', () => {
     it('returns correct paths for a project', () => {
       const paths = getDevPaths(tempDir);
 
-      expect(paths.cacheDir).toContain('node_modules/.cache/@shoplayer/database');
+      expect(paths.cacheDir).toContain('node_modules/.cache/@eagerpatch/durable-db');
       expect(paths.stateFile).toContain('state.json');
       expect(paths.databaseDir('main')).toContain('databases/main');
       expect(paths.migrationsDir('main')).toContain('databases/main/migrations');

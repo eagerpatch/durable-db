@@ -12,8 +12,8 @@ import {
 const program = new Command();
 
 program
-  .name('shoplayer-db')
-  .description('Database migration management for Shoplayer')
+  .name('db')
+  .description('Database migration management for durable-db')
   .version('0.0.1');
 
 program

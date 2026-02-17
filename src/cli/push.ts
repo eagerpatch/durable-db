@@ -44,7 +44,7 @@ export interface PushResult {
  * 4. Uses content-hash naming so the same schema always produces the same
  *    migration name — the DO skips it if already applied
  *
- * Dev migrations are stored in node_modules/.cache/@shoplayer/database/
+ * Dev migrations are stored in node_modules/.cache/@eagerpatch/durable-db/
  * and are ephemeral - they're cleared when running `db:generate` or `db:reset`
  */
 export async function push(ctx: PushContext = {}): Promise<PushResult[]> {

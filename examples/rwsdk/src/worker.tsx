@@ -1,7 +1,7 @@
 import { render, route } from "rwsdk/router";
 import { defineApp } from "rwsdk/worker";
 
-import { setTenantIdResolver } from "@shoplayer/database/context";
+import { setTenantIdResolver } from "@eagerpatch/durable-db/context";
 
 import { Document } from "@/app/document";
 import { setCommonHeaders } from "@/app/headers";
@@ -18,7 +18,7 @@ import { getEventCounts } from "./databases/actions/getEventCounts";
 
 // Export Durable Object classes - the plugin generates these
 // @ts-ignore
-export { MainDatabaseDO, EventsDatabaseDO } from "virtual:shoplayer/databases/__durableObjects";
+export { MainDatabaseDO, EventsDatabaseDO } from "virtual:eagerpatch/databases/__durableObjects";
 
 export type AppContext = {};
 

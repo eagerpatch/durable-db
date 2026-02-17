@@ -146,7 +146,7 @@ describe('parser', () => {
   describe('parseDatabaseFile', () => {
     it('extracts database configuration from defineDatabase call', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users, posts } from './schema';
 
         export const { action } = defineDatabase({
@@ -169,7 +169,7 @@ describe('parser', () => {
 
     it('extracts action definitions', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -203,7 +203,7 @@ describe('parser', () => {
 
     it('extracts multiple actions', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -229,7 +229,7 @@ describe('parser', () => {
 
     it('tracks imports for dependency resolution', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users, posts } from './schema';
         import { helperFn } from './helpers';
 
@@ -241,7 +241,7 @@ describe('parser', () => {
       const result = parseDatabaseFile('/src/databases/main.js', code);
 
       expect(result.localImports.has('defineDatabase')).toBe(true);
-      expect(result.localImports.get('defineDatabase')?.source).toBe('@shoplayer/database/db');
+      expect(result.localImports.get('defineDatabase')?.source).toBe('@eagerpatch/durable-db/db');
 
       expect(result.localImports.has('users')).toBe(true);
       expect(result.localImports.get('users')?.source).toBe('./schema');
@@ -252,7 +252,7 @@ describe('parser', () => {
 
     it('extracts browsable: true', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -267,7 +267,7 @@ describe('parser', () => {
 
     it('extracts browsable: false', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -282,7 +282,7 @@ describe('parser', () => {
 
     it('extracts browsable: "development"', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -297,7 +297,7 @@ describe('parser', () => {
 
     it('defaults browsable to false when not specified', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -311,7 +311,7 @@ describe('parser', () => {
 
     it('extracts transport: "websocket"', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -326,7 +326,7 @@ describe('parser', () => {
 
     it('extracts transport: "rpc"', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -341,7 +341,7 @@ describe('parser', () => {
 
     it('defaults transport to "rpc" when not specified', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action } = defineDatabase({
@@ -355,7 +355,7 @@ describe('parser', () => {
 
     it('handles global instance strategy', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { settings } from './schema';
 
         export const { action } = defineDatabase({
@@ -371,7 +371,7 @@ describe('parser', () => {
 
     it('handles renamed action factory', () => {
       const code = `
-        import { defineDatabase } from '@shoplayer/database/db';
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
         import { users } from './schema';
 
         export const { action: createAction } = defineDatabase({

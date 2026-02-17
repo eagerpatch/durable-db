@@ -8,6 +8,7 @@ import {
 } from './state';
 import { discoverDatabaseFiles, readFile } from '../vite/modules/discovery';
 import { parseDatabaseFile } from '../vite/modules/parser';
+import { debugCli } from '../utils/debug';
 
 // ============================================================================
 // Types
@@ -58,7 +59,7 @@ export async function reset(
   ctx: ResetContext = {},
   options: ResetOptions = {}
 ): Promise<ResetResult> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases' } = ctx;
   const { database: targetDb, keepEpoch = false } = options;
 
   const result: ResetResult = {
@@ -74,10 +75,7 @@ export async function reset(
     const newEpoch = generateEpoch();
     devState.epoch = newEpoch;
     result.newEpoch = newEpoch;
-    
-    if (verbose) {
-      console.log(`[db:reset] New epoch: ${newEpoch}`);
-    }
+    debugCli('New epoch: %s', newEpoch);
   }
 
   // If targeting specific database, only reset that one
@@ -85,14 +83,11 @@ export async function reset(
     clearDatabaseDevState(projectRoot, targetDb);
     delete devState.databases[targetDb];
     result.databases.push(targetDb);
-    
-    if (verbose) {
-      console.log(`[db:reset] Reset ${targetDb}`);
-    }
+    debugCli('Reset %s', targetDb);
   } else {
     // Discover all databases and reset them
     const files = discoverDatabaseFiles({ projectRoot, databasesDir });
-    
+
     for (const file of files) {
       const code = readFile(file.absolutePath);
       const parsed = parseDatabaseFile(file.absolutePath, code);
@@ -101,10 +96,7 @@ export async function reset(
         clearDatabaseDevState(projectRoot, parsed.database.name);
         delete devState.databases[parsed.database.name];
         result.databases.push(parsed.database.name);
-        
-        if (verbose) {
-          console.log(`[db:reset] Reset ${parsed.database.name}`);
-        }
+        debugCli('Reset %s', parsed.database.name);
       }
     }
 
@@ -117,10 +109,7 @@ export async function reset(
         if (!result.databases.includes(dir)) {
           clearDatabaseDevState(projectRoot, dir);
           delete devState.databases[dir];
-          
-          if (verbose) {
-            console.log(`[db:reset] Cleaned up orphaned: ${dir}`);
-          }
+          debugCli('Cleaned up orphaned: %s', dir);
         }
       }
     }
@@ -141,7 +130,7 @@ export async function resetAndPush(
   options: ResetOptions = {}
 ): Promise<{ reset: ResetResult; push: import('./push').PushResult[] }> {
   const { push } = await import('./push');
-  
+
   const resetResult = await reset(ctx, options);
   const pushResults = await push(ctx);
 

@@ -20,6 +20,7 @@ import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modu
 import { parseDatabaseFile } from '../vite/modules/parser';
 import { buildAndLoadSchema } from '../migrations/generator';
 import type { DatabaseInfo } from '../db';
+import { debugCli } from '../utils/debug';
 
 // ============================================================================
 // Types
@@ -67,7 +68,7 @@ export async function generate(
   ctx: GenerateContext = {},
   options: GenerateOptions = {}
 ): Promise<GenerateResult[]> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
   const { name: customName, database: targetDb } = options;
   const results: GenerateResult[] = [];
 
@@ -78,9 +79,7 @@ export async function generate(
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
 
   if (files.length === 0) {
-    if (verbose) {
-      console.log('[db:generate] No databases found');
-    }
+    debugCli('No databases found');
     return results;
   }
 
@@ -101,7 +100,7 @@ export async function generate(
       continue;
     }
 
-    const result = await generateDatabase(projectRoot, db, customName, verbose);
+    const result = await generateDatabase(projectRoot, db, customName);
     results.push(result);
 
     // Clear dev state for this database if migration was generated
@@ -127,7 +126,6 @@ async function generateDatabase(
   projectRoot: string,
   db: DatabaseInfo,
   customName: string | undefined,
-  verbose: boolean
 ): Promise<GenerateResult> {
   const result: GenerateResult = {
     database: db.name,
@@ -139,18 +137,14 @@ async function generateDatabase(
 
   // Skip if no schema defined
   if (!db.schemaImport || db.schemaTableNames.length === 0) {
-    if (verbose) {
-      console.log(`[db:generate] Skipping ${db.name}: no schema defined`);
-    }
+    debugCli('Skipping %s: no schema defined', db.name);
     return result;
   }
 
   // Resolve schema path
   const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
   if (!schemaPath) {
-    if (verbose) {
-      console.log(`[db:generate] Skipping ${db.name}: could not resolve schema path`);
-    }
+    debugCli('Skipping %s: could not resolve schema path', db.name);
     return result;
   }
 
@@ -159,14 +153,12 @@ async function generateDatabase(
   try {
     schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
   } catch (error) {
-    console.warn(`[db:generate] Failed to load schema for ${db.name}: ${error}`);
+    debugCli('Failed to load schema for %s: %O', db.name, error);
     return result;
   }
 
   if (Object.keys(schema).length === 0) {
-    if (verbose) {
-      console.log(`[db:generate] Skipping ${db.name}: empty schema`);
-    }
+    debugCli('Skipping %s: empty schema', db.name);
     return result;
   }
 
@@ -179,9 +171,7 @@ async function generateDatabase(
 
   // Check if there are changes
   if (snapshotsEqual(prodSnapshot, currentSnapshot)) {
-    if (verbose) {
-      console.log(`[db:generate] No changes for ${db.name}`);
-    }
+    debugCli('No changes for %s', db.name);
     return result;
   }
 
@@ -189,9 +179,7 @@ async function generateDatabase(
   const statements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
 
   if (statements.length === 0) {
-    if (verbose) {
-      console.log(`[db:generate] No SQL changes for ${db.name}`);
-    }
+    debugCli('No SQL changes for %s', db.name);
     return result;
   }
 
@@ -219,10 +207,8 @@ async function generateDatabase(
   result.migrationName = migrationName;
   result.migrationPath = migrationPath;
 
-  if (verbose) {
-    console.log(`[db:generate] Generated ${migrationName} for ${db.name} (${statements.length} statements)`);
-    console.log(`[db:generate] Migration path: ${migrationPath}`);
-  }
+  debugCli('Generated %s for %s (%d statements)', migrationName, db.name, statements.length);
+  debugCli('Migration path: %s', migrationPath);
 
   return result;
 }

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Snapshot } from './snapshot';
+import { debugMigrations } from '../utils/debug';
 import {
   createEmptySnapshot,
   generateSnapshotFromSchema,
@@ -59,7 +60,7 @@ export function loadSnapshot(migrationsDir: string): Snapshot {
     const content = fs.readFileSync(snapshotPath, 'utf-8');
     return JSON.parse(content) as Snapshot;
   } catch {
-    console.warn(`[migrations] Failed to load snapshot from ${snapshotPath}, starting fresh`);
+    debugMigrations('Failed to load snapshot from %s, starting fresh', snapshotPath);
     return createEmptySnapshot();
   }
 }
@@ -149,8 +150,8 @@ export async function generateMigration(
     // Update snapshot
     saveSnapshot(migrationsDir, newSnapshot);
 
-    console.log(`[migrations] Generated migration: ${name}`);
-    console.log(`[migrations] Statements: ${statements.length}`);
+    debugMigrations('Generated migration: %s', name);
+    debugMigrations('Statements: %d', statements.length);
   }
 
   return {

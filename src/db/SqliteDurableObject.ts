@@ -12,6 +12,7 @@ import {
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { DateSerializePlugin, createDrizzlePlugins } from './plugins';
+import { debugMigrations } from '../utils/debug';
 
 /**
  * SQL executor function type
@@ -374,9 +375,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       } else {
         // Take bookmark AFTER the counter write (so counter survives restore)
         bookmark = await this.ctx.storage.getCurrentBookmark();
-        console.log(
-          `[database] PITR bookmark taken (attempt ${attemptCount}/${MAX_PITR_ATTEMPTS})`
-        );
+        debugMigrations('PITR bookmark taken (attempt %d/%d)', attemptCount, MAX_PITR_ATTEMPTS);
       }
     }
 
@@ -473,7 +472,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           new Date().toISOString()
         );
 
-        console.log(`[database] Migration chunk applied: ${name}[${chunkIndex}]`);
+        debugMigrations('Migration chunk applied: %s[%d]', name, chunkIndex);
       } catch (error) {
         console.error(`[database] Migration chunk failed: ${name}[${chunkIndex}]`, error);
         throw error;

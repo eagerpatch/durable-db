@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DatabaseInfo } from '../../db';
+import { debugVite } from '../../utils/debug';
 
 /**
  * Result of wrangler config patching
@@ -203,21 +204,18 @@ export function patchWranglerConfig(
         const backupPath = configPath + '.backup';
         if (!fs.existsSync(backupPath)) {
           fs.writeFileSync(backupPath, content, 'utf-8');
-          console.warn(
-            `[shoplayer-database] Original ${path.basename(configPath)} contained comments ` +
-            `that will be lost during patching. Backup saved to ${path.basename(backupPath)}`
-          );
+          debugVite('Original %s contained comments that will be lost during patching. Backup saved to %s', path.basename(configPath), path.basename(backupPath));
         }
       }
 
       const newContent = JSON.stringify(config, null, 2);
       fs.writeFileSync(configPath, newContent, 'utf-8');
-      console.log(`[shoplayer-database] Updated ${path.basename(configPath)} with DO bindings`);
+      debugVite('Updated %s with DO bindings', path.basename(configPath));
     }
 
     return { modified, configPath, error: null };
   } catch (error) {
-    console.warn(`[shoplayer-database] Failed to patch wrangler config: ${error}`);
+    debugVite('Failed to patch wrangler config: %O', error);
     logRequiredConfig(databases);
     return { modified: false, configPath, error: error as Error };
   }
@@ -268,8 +266,7 @@ function logRequiredConfig(databases: DatabaseInfo[]): void {
     new_sqlite_classes: databases.map(db => db.className),
   }];
 
-  console.log('[shoplayer-database] Required Durable Object config:');
-  console.log(JSON.stringify({ durable_objects: { bindings }, migrations }, null, 2));
+  debugVite('Required Durable Object config:\n%O', { durable_objects: { bindings }, migrations });
 }
 
 /**

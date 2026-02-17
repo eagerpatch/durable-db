@@ -16,6 +16,7 @@ import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modu
 import { parseDatabaseFile } from '../vite/modules/parser';
 import { buildAndLoadSchema } from '../migrations/generator';
 import type { DatabaseInfo } from '../db';
+import { debugCli } from '../utils/debug';
 
 // ============================================================================
 // Types
@@ -67,7 +68,7 @@ export interface StatusResult {
  * - What SQL would be generated
  */
 export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
 
   const devState = loadDevState(projectRoot);
   const result: StatusResult = {
@@ -79,9 +80,7 @@ export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
 
   if (files.length === 0) {
-    if (verbose) {
-      console.log('[db:status] No databases found');
-    }
+    debugCli('No databases found');
     return result;
   }
 
@@ -95,7 +94,7 @@ export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
     }
 
     parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
-    const dbStatus = await getDatabaseStatus(projectRoot, parsed.database, devState, verbose);
+    const dbStatus = await getDatabaseStatus(projectRoot, parsed.database, devState);
     result.databases.push(dbStatus);
   }
 
@@ -109,7 +108,6 @@ async function getDatabaseStatus(
   projectRoot: string,
   db: DatabaseInfo,
   devState: ReturnType<typeof loadDevState>,
-  verbose: boolean
 ): Promise<DatabaseStatus> {
   const status: DatabaseStatus = {
     name: db.name,
@@ -145,9 +143,7 @@ async function getDatabaseStatus(
   try {
     schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
   } catch (error) {
-    if (verbose) {
-      console.warn(`[db:status] Failed to load schema for ${db.name}: ${error}`);
-    }
+    debugCli('Failed to load schema for %s: %O', db.name, error);
     return status;
   }
 
@@ -174,9 +170,7 @@ async function getDatabaseStatus(
     try {
       status.pendingStatements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
     } catch (error) {
-      if (verbose) {
-        console.warn(`[db:status] Failed to generate pending statements for ${db.name}: ${error}`);
-      }
+      debugCli('Failed to generate pending statements for %s: %O', db.name, error);
     }
   }
 
@@ -198,16 +192,16 @@ export function formatStatus(result: StatusResult): string {
   }
 
   for (const db of result.databases) {
-    lines.push(`📦 ${db.name}`);
+    lines.push(`\u{1F4E6} ${db.name}`);
     lines.push(`   Production migrations: ${db.prodMigrationCount}`);
     lines.push(`   Dev migrations: ${db.devMigrationCount}`);
-    
+
     if (db.prodSnapshotChanged) {
-      lines.push(`   ⚠️  Production snapshot changed - run 'db:reset' to sync`);
+      lines.push(`   \u26A0\uFE0F  Production snapshot changed - run 'db:reset' to sync`);
     }
 
     if (db.hasUncommittedChanges) {
-      lines.push(`   📝 Uncommitted changes: ${db.pendingStatements.length} statement(s)`);
+      lines.push(`   \u{1F4DD} Uncommitted changes: ${db.pendingStatements.length} statement(s)`);
       if (db.pendingStatements.length > 0) {
         lines.push(`   Pending SQL:`);
         for (const stmt of db.pendingStatements.slice(0, 5)) {
@@ -219,7 +213,7 @@ export function formatStatus(result: StatusResult): string {
         }
       }
     } else {
-      lines.push(`   ✓ Schema is up to date`);
+      lines.push(`   \u2713 Schema is up to date`);
     }
 
     if (db.lastPush) {

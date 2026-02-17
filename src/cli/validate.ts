@@ -7,6 +7,7 @@ import {
   generateCreateTableSQL,
 } from '../migrations/generator';
 import { loadDevMigrations } from './state';
+import { debugCli } from '../utils/debug';
 
 // ============================================================================
 // Types
@@ -129,7 +130,6 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
     projectRoot = process.cwd(),
     databasesDir = 'src/databases',
     migrationsDir = 'migrations',
-    verbose = false,
     noDev = false,
     database: onlyDatabase,
   } = ctx;
@@ -152,9 +152,7 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
 
   if (files.length === 0) {
-    if (verbose) {
-      console.log('[validate] No databases found');
-    }
+    debugCli('No databases found');
     return results;
   }
 
@@ -171,7 +169,6 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
 
     const result = await validateDatabase(db, {
       projectRoot,
-      verbose,
       noDev,
       Database,
     });
@@ -183,7 +180,6 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
 
 interface ValidateDatabaseOptions {
   projectRoot: string;
-  verbose: boolean;
   noDev: boolean;
   Database: SqliteDatabaseConstructor;
 }
@@ -192,7 +188,7 @@ async function validateDatabase(
   db: import('../db/types').DatabaseInfo,
   opts: ValidateDatabaseOptions,
 ): Promise<ValidateResult> {
-  const { projectRoot, verbose, noDev, Database } = opts;
+  const { projectRoot, noDev, Database } = opts;
 
   const result: ValidateResult = {
     database: db.name,
@@ -243,9 +239,7 @@ async function validateDatabase(
 
           try {
             migrationsDb.exec(stmt);
-            if (verbose) {
-              console.log(`  [ok] ${migName}[${chunkIdx}]: ${stmt.substring(0, 80)}...`);
-            }
+            debugCli('[ok] %s[%d]: %s...', migName, chunkIdx, stmt.substring(0, 80));
           } catch (err) {
             const errorMessage = err instanceof Error ? err.message : String(err);
             result.migrationsValid = false;
@@ -255,9 +249,7 @@ async function validateDatabase(
               statement: stmt,
               error: errorMessage,
             });
-            if (verbose) {
-              console.error(`  [FAIL] ${migName}[${chunkIdx}]: ${errorMessage}`);
-            }
+            debugCli('[FAIL] %s[%d]: %s', migName, chunkIdx, errorMessage);
           }
         }
       }
@@ -294,11 +286,7 @@ async function validateDatabase(
             }
           }
         } catch (err) {
-          if (verbose) {
-            console.warn(
-              `  [warn] Could not build schema for dual-path comparison: ${err}`
-            );
-          }
+          debugCli('Could not build schema for dual-path comparison: %O', err);
           // Don't fail validation — schema comparison is best-effort
         }
       }

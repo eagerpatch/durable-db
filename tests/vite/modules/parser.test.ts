@@ -136,18 +136,10 @@ describe('parser', () => {
       expect(calls).toEqual(['getUser']);
     });
 
-    it('warns on unparseable source', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
+    it('returns empty array on unparseable source', () => {
       const calls = findActionCallsInSource('not valid {{{ js', new Set(['foo']));
 
       expect(calls).toEqual([]);
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to parse handler source'),
-        expect.anything()
-      );
-
-      warnSpy.mockRestore();
     });
   });
 

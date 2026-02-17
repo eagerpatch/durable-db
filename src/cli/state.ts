@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createRequire } from 'node:module';
+import { debugCli } from '../utils/debug';
 
 // ============================================================================
 // Types
@@ -115,7 +116,7 @@ export function loadDevState(projectRoot: string): DevState {
     const content = fs.readFileSync(paths.stateFile, 'utf-8');
     return JSON.parse(content) as DevState;
   } catch (error) {
-    console.warn(`[shoplayer-database] Failed to load dev state, starting fresh: ${error}`);
+    debugCli('Failed to load dev state, starting fresh: %O', error);
     return createEmptyDevState();
   }
 }

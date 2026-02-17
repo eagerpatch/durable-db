@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import type { DatabaseInfo, ActionInfo } from '../db';
+import { debugVite } from '../utils/debug';
 
 import {
   discoverDatabaseFiles,
@@ -129,7 +130,7 @@ class PluginState {
     }
 
     if (this.databases.size > 0) {
-      console.log(`[shoplayer-database] Found ${this.databases.size} database(s)`);
+      debugVite('Found %d database(s)', this.databases.size);
       patchWranglerConfig(this.projectRoot, Array.from(this.databases.values()));
     }
 
@@ -153,14 +154,11 @@ class PluginState {
           db.name
         );
         if (result?.hasChanges) {
-          console.log(
-            `[shoplayer-database] Dev migration for ${db.name}: ${result.migrationName} ` +
-            `(${result.statements.length} statements)`
-          );
+          debugVite('Dev migration for %s: %s (%d statements)', db.name, result.migrationName, result.statements.length);
         }
       } catch (error) {
         // Fallback to old behavior if push fails
-        console.warn(`[shoplayer-database] Could not push migrations for ${db.name}: ${error}`);
+        debugVite('Could not push migrations for %s: %O', db.name, error);
         await this.generateMigrationFromSchema(db, migrationsDir, 'Fallback migration generation');
       }
     } else if (shouldAutoMigrate && db.schemaImport && db.schemaTableNames.length > 0) {
@@ -184,7 +182,7 @@ class PluginState {
         }
         
         if (devMigrations.size > 0) {
-          console.log(`[shoplayer-database] Loaded ${devMigrations.size} dev migration(s) for ${db.name}`);
+          debugVite('Loaded %d dev migration(s) for %s', devMigrations.size, db.name);
         }
       } catch (error) {
         // Dev migrations not available, that's fine
@@ -192,7 +190,7 @@ class PluginState {
     }
 
     if (db.migrations.size > 0) {
-      console.log(`[shoplayer-database] Total ${db.migrations.size} migration(s) for ${db.name}`);
+      debugVite('Total %d migration(s) for %s', db.migrations.size, db.name);
     }
   }
 
@@ -208,15 +206,12 @@ class PluginState {
         if (Object.keys(schema).length > 0) {
           const result = await generateMigration({ migrationsDir, schema, write: true });
           if (result.hasChanges) {
-            console.log(
-              `[shoplayer-database] Generated migration for ${db.name}: ${result.migrationName} ` +
-              `(${result.statements.length} statements)`
-            );
+            debugVite('Generated migration for %s: %s (%d statements)', db.name, result.migrationName, result.statements.length);
           }
         }
       }
     } catch (error) {
-      console.warn(`[shoplayer-database] ${label} failed for ${db.name}: ${error}`);
+      debugVite('%s failed for %s: %O', label, db.name, error);
     }
   }
 
@@ -368,7 +363,7 @@ export function shoplayerDatabasePlugin(options: DatabasePluginOptions = {}): Pl
 
     buildEnd() {
       if (state.actions.size > 0) {
-        console.log(`[shoplayer-database] Discovered ${state.actions.size} action(s)`);
+        debugVite('Discovered %d action(s)', state.actions.size);
       }
     },
   };

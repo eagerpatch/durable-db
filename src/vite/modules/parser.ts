@@ -5,6 +5,7 @@ import * as t from '@babel/types';
 import type { NodePath } from '@babel/traverse';
 import * as path from 'node:path';
 import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../../db';
+import { debugVite } from '../../utils/debug';
 
 // Handle both ESM and CJS module formats for Babel
 const traverse = typeof _traverse === 'function' ? _traverse : (_traverse as any).default;
@@ -65,7 +66,7 @@ export function findActionCallsInSource(source: string, knownActionNames: Set<st
       },
     });
   } catch (e) {
-    console.warn('[shoplayer-database] Failed to parse handler source for action call detection:', e);
+    debugVite('Failed to parse handler source for action call detection: %O', e);
   }
 
   return calls;

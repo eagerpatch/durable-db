@@ -15,6 +15,7 @@ import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modu
 import { parseDatabaseFile } from '../vite/modules/parser';
 import { buildAndLoadSchema } from '../migrations/generator';
 import type { DatabaseInfo } from '../db';
+import { debugCli } from '../utils/debug';
 
 // ============================================================================
 // Types
@@ -52,16 +53,14 @@ export interface PushResult {
  * and are ephemeral - they're cleared when running `db:generate` or `db:reset`
  */
 export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
   const results: PushResult[] = [];
 
   // Discover databases
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
 
   if (files.length === 0) {
-    if (verbose) {
-      console.log('[db:push] No databases found');
-    }
+    debugCli('No databases found');
     return results;
   }
 
@@ -75,7 +74,7 @@ export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
     }
 
     parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
-    const result = await pushDatabase(projectRoot, parsed.database, verbose);
+    const result = await pushDatabase(projectRoot, parsed.database);
     results.push(result);
   }
 
@@ -92,7 +91,6 @@ export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
 async function pushDatabase(
   projectRoot: string,
   db: DatabaseInfo,
-  verbose: boolean
 ): Promise<PushResult> {
   const result: PushResult = {
     database: db.name,
@@ -103,18 +101,14 @@ async function pushDatabase(
 
   // Skip if no schema defined
   if (!db.schemaImport || db.schemaTableNames.length === 0) {
-    if (verbose) {
-      console.log(`[db:push] Skipping ${db.name}: no schema defined`);
-    }
+    debugCli('Skipping %s: no schema defined', db.name);
     return result;
   }
 
   // Resolve schema path
   const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
   if (!schemaPath) {
-    if (verbose) {
-      console.log(`[db:push] Skipping ${db.name}: could not resolve schema path`);
-    }
+    debugCli('Skipping %s: could not resolve schema path', db.name);
     return result;
   }
 
@@ -123,14 +117,12 @@ async function pushDatabase(
   try {
     schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
   } catch (error) {
-    console.warn(`[db:push] Failed to load schema for ${db.name}: ${error}`);
+    debugCli('Failed to load schema for %s: %O', db.name, error);
     return result;
   }
 
   if (Object.keys(schema).length === 0) {
-    if (verbose) {
-      console.log(`[db:push] Skipping ${db.name}: empty schema`);
-    }
+    debugCli('Skipping %s: empty schema', db.name);
     return result;
   }
 
@@ -139,9 +131,7 @@ async function pushDatabase(
   const currentSnapshot = await generateSnapshotFromSchema(schema);
 
   if (snapshotsEqual(prodSnapshot, currentSnapshot)) {
-    if (verbose) {
-      console.log(`[db:push] No changes for ${db.name}`);
-    }
+    debugCli('No changes for %s', db.name);
     return result;
   }
 
@@ -149,9 +139,7 @@ async function pushDatabase(
   const statements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
 
   if (statements.length === 0) {
-    if (verbose) {
-      console.log(`[db:push] No SQL changes for ${db.name}`);
-    }
+    debugCli('No SQL changes for %s', db.name);
     return result;
   }
 
@@ -174,9 +162,7 @@ async function pushDatabase(
   // If this exact migration already exists, skip regeneration
   const existingMigrations = loadDevMigrations(projectRoot, db.name);
   if (existingMigrations.has(migrationName)) {
-    if (verbose) {
-      console.log(`[db:push] Migration ${migrationName} already exists for ${db.name}, skipping`);
-    }
+    debugCli('Migration %s already exists for %s, skipping', migrationName, db.name);
     return result;
   }
 
@@ -188,9 +174,7 @@ async function pushDatabase(
   result.statements = statements;
   result.migrationName = migrationName;
 
-  if (verbose) {
-    console.log(`[db:push] Generated ${migrationName} for ${db.name} (${statements.length} statements)`);
-  }
+  debugCli('Generated %s for %s (%d statements)', migrationName, db.name, statements.length);
 
   return result;
 }
@@ -200,7 +184,7 @@ async function pushDatabase(
  * Useful when you only want to push one specific database
  */
 export async function pushOne(ctx: PushContext = {}, dbName: string): Promise<PushResult | null> {
-  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations', verbose = false } = ctx;
+  const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
 
   const files = discoverDatabaseFiles({ projectRoot, databasesDir });
 
@@ -210,7 +194,7 @@ export async function pushOne(ctx: PushContext = {}, dbName: string): Promise<Pu
 
     if (parsed.database?.name === dbName) {
       parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
-      return await pushDatabase(projectRoot, parsed.database, verbose);
+      return await pushDatabase(projectRoot, parsed.database);
     }
   }
 

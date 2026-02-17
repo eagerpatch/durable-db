@@ -450,7 +450,7 @@ db validate --verbose
 
 **What it does:**
 
-1. Creates an in-memory SQLite database (requires `libsql` as a dev dependency)
+1. Creates an in-memory SQLite database using `libsql`
 2. Applies all migrations sequentially (production + dev, unless `--no-dev`)
 3. Builds the expected schema separately from the Drizzle definition
 4. Compares the migrated schema against the expected schema to detect drift
@@ -470,12 +470,6 @@ db validate --verbose
 [db:validate] main: error in migration 20240315123045_bad
   near "INVALID": syntax error
 [db:validate] Validation failed
-```
-
-**Requirements:** Requires `libsql` as a dev dependency:
-
-```bash
-pnpm add -D libsql
 ```
 
 **Exit codes:**

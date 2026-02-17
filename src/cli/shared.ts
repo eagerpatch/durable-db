@@ -1,0 +1,125 @@
+import * as path from 'node:path';
+import { generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual } from '../migrations/snapshot';
+import type { Snapshot } from '../migrations/snapshot';
+import { loadSnapshot, buildAndLoadSchema } from '../migrations/generator';
+import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
+import { parseDatabaseFile } from '../vite/modules/parser';
+import type { DatabaseInfo } from '../db';
+import { debugCli } from '../utils/debug';
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export interface DiscoverOptions {
+  projectRoot: string;
+  databasesDir: string;
+  migrationsDir: string;
+  /** Only return databases matching this name */
+  database?: string;
+}
+
+export interface DiffResult {
+  hasChanges: boolean;
+  statements: string[];
+  prodSnapshot: Snapshot;
+  currentSnapshot: Snapshot;
+}
+
+// ============================================================================
+// Discovery
+// ============================================================================
+
+/**
+ * Discover database files, parse them, and resolve migrationsDir.
+ * Returns parsed DatabaseInfo[] with migrationsDir already set.
+ */
+export function discoverDatabases(opts: DiscoverOptions): DatabaseInfo[] {
+  const { projectRoot, databasesDir, migrationsDir, database } = opts;
+
+  const files = discoverDatabaseFiles({ projectRoot, databasesDir });
+  const databases: DatabaseInfo[] = [];
+
+  for (const file of files) {
+    const code = readFile(file.absolutePath);
+    const parsed = parseDatabaseFile(file.absolutePath, code);
+
+    if (!parsed.database) {
+      continue;
+    }
+
+    if (database && parsed.database.name !== database) {
+      continue;
+    }
+
+    parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
+    databases.push(parsed.database);
+  }
+
+  return databases;
+}
+
+// ============================================================================
+// Schema Loading
+// ============================================================================
+
+/**
+ * Load and validate schema for a database.
+ * Returns null if no schema is defined, can't be resolved, build fails, or is empty.
+ */
+export async function loadSchema(db: DatabaseInfo): Promise<Record<string, unknown> | null> {
+  if (!db.schemaImport || db.schemaTableNames.length === 0) {
+    debugCli('Skipping %s: no schema defined', db.name);
+    return null;
+  }
+
+  const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
+  if (!schemaPath) {
+    debugCli('Skipping %s: could not resolve schema path', db.name);
+    return null;
+  }
+
+  let schema: Record<string, unknown>;
+  try {
+    schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
+  } catch (error) {
+    debugCli('Failed to load schema for %s: %O', db.name, error);
+    return null;
+  }
+
+  if (Object.keys(schema).length === 0) {
+    debugCli('Skipping %s: empty schema', db.name);
+    return null;
+  }
+
+  return schema;
+}
+
+// ============================================================================
+// Schema Diffing
+// ============================================================================
+
+/**
+ * Diff a schema against the production snapshot in migrationsDir.
+ * Returns whether there are changes, the SQL statements, and both snapshots.
+ */
+export async function diffSchema(
+  schema: Record<string, unknown>,
+  migrationsDir: string,
+): Promise<DiffResult> {
+  const prodSnapshot = loadSnapshot(migrationsDir);
+  const currentSnapshot = await generateSnapshotFromSchema(schema);
+
+  if (snapshotsEqual(prodSnapshot, currentSnapshot)) {
+    return { hasChanges: false, statements: [], prodSnapshot, currentSnapshot };
+  }
+
+  const statements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
+
+  return {
+    hasChanges: statements.length > 0,
+    statements,
+    prodSnapshot,
+    currentSnapshot,
+  };
+}

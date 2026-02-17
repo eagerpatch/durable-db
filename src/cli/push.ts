@@ -1,14 +1,10 @@
-import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import {
   saveDevMigration,
   loadDevMigrations,
   clearDevMigrations,
 } from './state';
-import { generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual } from '../migrations/snapshot';
-import { loadSnapshot, buildAndLoadSchema } from '../migrations/generator';
-import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
-import { parseDatabaseFile } from '../vite/modules/parser';
+import { discoverDatabases, loadSchema, diffSchema } from './shared';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
@@ -51,25 +47,15 @@ export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
   const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
   const results: PushResult[] = [];
 
-  // Discover databases
-  const files = discoverDatabaseFiles({ projectRoot, databasesDir });
+  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir });
 
-  if (files.length === 0) {
+  if (databases.length === 0) {
     debugCli('No databases found');
     return results;
   }
 
-  // Parse and process each database
-  for (const file of files) {
-    const code = readFile(file.absolutePath);
-    const parsed = parseDatabaseFile(file.absolutePath, code);
-
-    if (!parsed.database) {
-      continue;
-    }
-
-    parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
-    const result = await pushDatabase(projectRoot, parsed.database);
+  for (const db of databases) {
+    const result = await pushDatabase(projectRoot, db);
     results.push(result);
   }
 
@@ -94,53 +80,21 @@ async function pushDatabase(
     migrationName: null,
   };
 
-  // Skip if no schema defined
-  if (!db.schemaImport || db.schemaTableNames.length === 0) {
-    debugCli('Skipping %s: no schema defined', db.name);
+  const schema = await loadSchema(db);
+  if (!schema) {
     return result;
   }
 
-  // Resolve schema path
-  const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
-  if (!schemaPath) {
-    debugCli('Skipping %s: could not resolve schema path', db.name);
-    return result;
-  }
+  const diff = await diffSchema(schema, db.migrationsDir);
 
-  // Load the schema
-  let schema: Record<string, unknown>;
-  try {
-    schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
-  } catch (error) {
-    debugCli('Failed to load schema for %s: %O', db.name, error);
-    return result;
-  }
-
-  if (Object.keys(schema).length === 0) {
-    debugCli('Skipping %s: empty schema', db.name);
-    return result;
-  }
-
-  // Always diff from production snapshot to current schema
-  const prodSnapshot = loadSnapshot(db.migrationsDir);
-  const currentSnapshot = await generateSnapshotFromSchema(schema);
-
-  if (snapshotsEqual(prodSnapshot, currentSnapshot)) {
+  if (!diff.hasChanges) {
     debugCli('No changes for %s', db.name);
-    return result;
-  }
-
-  // Generate migration statements (prod → current)
-  const statements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
-
-  if (statements.length === 0) {
-    debugCli('No SQL changes for %s', db.name);
     return result;
   }
 
   // Dev migrations use IF NOT EXISTS for safety — the squashed migration
   // may overlay tables from a previous dev migration the DO already applied
-  const safeStatements = statements.map(s =>
+  const safeStatements = diff.statements.map(s =>
     s.replace(/\bCREATE TABLE\b(?!\s+IF\s+NOT\s+EXISTS)/gi, 'CREATE TABLE IF NOT EXISTS')
      .replace(/\bCREATE INDEX\b(?!\s+IF\s+NOT\s+EXISTS)/gi, 'CREATE INDEX IF NOT EXISTS')
      .replace(/\bCREATE UNIQUE INDEX\b(?!\s+IF\s+NOT\s+EXISTS)/gi, 'CREATE UNIQUE INDEX IF NOT EXISTS')
@@ -166,10 +120,10 @@ async function pushDatabase(
   saveDevMigration(projectRoot, db.name, migrationName, safeStatements);
 
   result.hasChanges = true;
-  result.statements = statements;
+  result.statements = diff.statements;
   result.migrationName = migrationName;
 
-  debugCli('Generated %s for %s (%d statements)', migrationName, db.name, statements.length);
+  debugCli('Generated %s for %s (%d statements)', migrationName, db.name, diff.statements.length);
 
   return result;
 }
@@ -181,17 +135,11 @@ async function pushDatabase(
 export async function pushOne(ctx: PushContext = {}, dbName: string): Promise<PushResult | null> {
   const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
 
-  const files = discoverDatabaseFiles({ projectRoot, databasesDir });
+  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir, database: dbName });
 
-  for (const file of files) {
-    const code = readFile(file.absolutePath);
-    const parsed = parseDatabaseFile(file.absolutePath, code);
-
-    if (parsed.database?.name === dbName) {
-      parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
-      return await pushDatabase(projectRoot, parsed.database);
-    }
+  if (databases.length === 0) {
+    return null;
   }
 
-  return null;
+  return await pushDatabase(projectRoot, databases[0]);
 }

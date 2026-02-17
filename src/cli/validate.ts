@@ -1,12 +1,11 @@
-import * as path from 'node:path';
-import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
-import { parseDatabaseFile } from '../vite/modules/parser';
+import { resolveImportPath } from '../vite/modules/discovery';
 import {
   loadMigrationFiles,
   buildAndLoadSchema,
   generateCreateTableSQL,
 } from '../migrations/generator';
 import { loadDevMigrations } from './state';
+import { discoverDatabases } from './shared';
 import { debugCli } from '../utils/debug';
 
 // ============================================================================
@@ -148,25 +147,14 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
 
   const results: ValidateResult[] = [];
 
-  // Discover databases
-  const files = discoverDatabaseFiles({ projectRoot, databasesDir });
+  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir, database: onlyDatabase });
 
-  if (files.length === 0) {
+  if (databases.length === 0) {
     debugCli('No databases found');
     return results;
   }
 
-  for (const file of files) {
-    const code = readFile(file.absolutePath);
-    const parsed = parseDatabaseFile(file.absolutePath, code);
-
-    if (!parsed.database) continue;
-
-    const db = parsed.database;
-    db.migrationsDir = path.resolve(projectRoot, migrationsDir, db.name);
-
-    if (onlyDatabase && db.name !== onlyDatabase) continue;
-
+  for (const db of databases) {
     const result = await validateDatabase(db, {
       projectRoot,
       noDev,

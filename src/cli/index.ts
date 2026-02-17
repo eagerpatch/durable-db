@@ -75,3 +75,12 @@ export {
   type ValidateResult,
   validate,
 } from './validate';
+
+// Shared helpers
+export {
+  type DiscoverOptions,
+  type DiffResult,
+  discoverDatabases,
+  loadSchema,
+  diffSchema,
+} from './shared';

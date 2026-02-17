@@ -1,13 +1,10 @@
-import * as path from 'node:path';
 import {
   loadDevState,
   loadDevMigrations,
-  getDevPaths,
 } from './state';
-import { generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual, hashSnapshot } from '../migrations/snapshot';
-import { loadSnapshot, loadMigrationFiles, buildAndLoadSchema } from '../migrations/generator';
-import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
-import { parseDatabaseFile } from '../vite/modules/parser';
+import { hashSnapshot } from '../migrations/snapshot';
+import { loadSnapshot, loadMigrationFiles } from '../migrations/generator';
+import { discoverDatabases, loadSchema, diffSchema } from './shared';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
@@ -69,25 +66,15 @@ export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
     databases: [],
   };
 
-  // Discover databases
-  const files = discoverDatabaseFiles({ projectRoot, databasesDir });
+  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir });
 
-  if (files.length === 0) {
+  if (databases.length === 0) {
     debugCli('No databases found');
     return result;
   }
 
-  // Get status for each database
-  for (const file of files) {
-    const code = readFile(file.absolutePath);
-    const parsed = parseDatabaseFile(file.absolutePath, code);
-
-    if (!parsed.database) {
-      continue;
-    }
-
-    parsed.database.migrationsDir = path.resolve(projectRoot, migrationsDir, parsed.database.name);
-    const dbStatus = await getDatabaseStatus(projectRoot, parsed.database, devState);
+  for (const db of databases) {
+    const dbStatus = await getDatabaseStatus(projectRoot, db, devState);
     result.databases.push(dbStatus);
   }
 
@@ -102,7 +89,7 @@ async function getDatabaseStatus(
   db: DatabaseInfo,
   devState: ReturnType<typeof loadDevState>,
 ): Promise<DatabaseStatus> {
-  const status: DatabaseStatus = {
+  const dbStatus: DatabaseStatus = {
     name: db.name,
     prodMigrationCount: 0,
     devMigrationCount: 0,
@@ -114,60 +101,40 @@ async function getDatabaseStatus(
   };
 
   // Count production migrations
-  const prodMigrationsDir = db.migrationsDir;
-  const prodMigrations = loadMigrationFiles(prodMigrationsDir);
-  status.prodMigrationCount = prodMigrations.size;
+  const prodMigrations = loadMigrationFiles(db.migrationsDir);
+  dbStatus.prodMigrationCount = prodMigrations.size;
 
   // Count dev migrations
   const devMigrations = loadDevMigrations(projectRoot, db.name);
-  status.devMigrationCount = devMigrations.size;
+  dbStatus.devMigrationCount = devMigrations.size;
 
-  // Check for schema changes
-  if (!db.schemaImport || db.schemaTableNames.length === 0) {
-    return status;
+  // Load schema
+  const schema = await loadSchema(db);
+  if (!schema) {
+    return dbStatus;
   }
-
-  const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
-  if (!schemaPath) {
-    return status;
-  }
-
-  let schema: Record<string, unknown>;
-  try {
-    schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
-  } catch (error) {
-    debugCli('Failed to load schema for %s: %O', db.name, error);
-    return status;
-  }
-
-  if (Object.keys(schema).length === 0) {
-    return status;
-  }
-
-  // Load production snapshot
-  const prodSnapshot = loadSnapshot(prodMigrationsDir);
-  const prodSnapshotHash = hashSnapshot(prodSnapshot);
 
   // Check if prod snapshot changed
+  const prodSnapshot = loadSnapshot(db.migrationsDir);
+  const prodSnapshotHash = hashSnapshot(prodSnapshot);
   const dbDevState = devState.databases[db.name];
   if (dbDevState && dbDevState.prodSnapshotHash !== prodSnapshotHash) {
-    status.prodSnapshotChanged = true;
+    dbStatus.prodSnapshotChanged = true;
   }
 
-  // Generate current schema snapshot
-  const currentSnapshot = await generateSnapshotFromSchema(schema);
+  // Diff schema against prod snapshot
+  try {
+    const diff = await diffSchema(schema, db.migrationsDir);
 
-  // Check for changes against prod snapshot (matches what push would do)
-  if (!snapshotsEqual(prodSnapshot, currentSnapshot)) {
-    status.hasUncommittedChanges = true;
-    try {
-      status.pendingStatements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
-    } catch (error) {
-      debugCli('Failed to generate pending statements for %s: %O', db.name, error);
+    if (diff.hasChanges) {
+      dbStatus.hasUncommittedChanges = true;
+      dbStatus.pendingStatements = diff.statements;
     }
+  } catch (error) {
+    debugCli('Failed to generate pending statements for %s: %O', db.name, error);
   }
 
-  return status;
+  return dbStatus;
 }
 
 /**

@@ -6,8 +6,7 @@ import {
   clearDatabaseDevState,
   getDevPaths,
 } from './state';
-import { discoverDatabaseFiles, readFile } from '../vite/modules/discovery';
-import { parseDatabaseFile } from '../vite/modules/parser';
+import { discoverDatabases } from './shared';
 import { debugCli } from '../utils/debug';
 
 // ============================================================================
@@ -86,18 +85,13 @@ export async function reset(
     debugCli('Reset %s', targetDb);
   } else {
     // Discover all databases and reset them
-    const files = discoverDatabaseFiles({ projectRoot, databasesDir });
+    const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir: 'migrations' });
 
-    for (const file of files) {
-      const code = readFile(file.absolutePath);
-      const parsed = parseDatabaseFile(file.absolutePath, code);
-
-      if (parsed.database) {
-        clearDatabaseDevState(projectRoot, parsed.database.name);
-        delete devState.databases[parsed.database.name];
-        result.databases.push(parsed.database.name);
-        debugCli('Reset %s', parsed.database.name);
-      }
+    for (const db of databases) {
+      clearDatabaseDevState(projectRoot, db.name);
+      delete devState.databases[db.name];
+      result.databases.push(db.name);
+      debugCli('Reset %s', db.name);
     }
 
     // Also clear any orphaned database dev state

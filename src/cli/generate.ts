@@ -4,12 +4,10 @@ import {
   loadDevState,
   saveDevState,
   clearDatabaseDevState,
-  getDevPaths,
 } from './state';
-import { type Snapshot, generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual, hashSnapshot } from '../migrations/snapshot';
-import { loadSnapshot, saveSnapshot, generateMigrationName, buildAndLoadSchema } from '../migrations/generator';
-import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
-import { parseDatabaseFile } from '../vite/modules/parser';
+import { type Snapshot } from '../migrations/snapshot';
+import { saveSnapshot, generateMigrationName } from '../migrations/generator';
+import { discoverDatabases, loadSchema, diffSchema } from './shared';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
@@ -66,38 +64,20 @@ export async function generate(
   // Load global dev state
   const devState = loadDevState(projectRoot);
 
-  // Discover databases
-  const files = discoverDatabaseFiles({ projectRoot, databasesDir });
+  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir, database: targetDb });
 
-  if (files.length === 0) {
+  if (databases.length === 0) {
     debugCli('No databases found');
     return results;
   }
 
-  // Parse and process each database
-  for (const file of files) {
-    const code = readFile(file.absolutePath);
-    const parsed = parseDatabaseFile(file.absolutePath, code);
-
-    if (!parsed.database) {
-      continue;
-    }
-
-    const db = parsed.database;
-    db.migrationsDir = path.resolve(projectRoot, migrationsDir, db.name);
-
-    // Skip if targeting specific database
-    if (targetDb && db.name !== targetDb) {
-      continue;
-    }
-
-    const result = await generateDatabase(projectRoot, db, customName);
+  for (const db of databases) {
+    const result = await generateDatabase(db, customName);
     results.push(result);
 
     // Clear dev state for this database if migration was generated
     if (result.hasChanges) {
       clearDatabaseDevState(projectRoot, db.name);
-      // Update dev state to track new prod snapshot
       if (devState.databases[db.name]) {
         delete devState.databases[db.name];
       }
@@ -114,7 +94,6 @@ export async function generate(
  * Generate migration for a single database
  */
 async function generateDatabase(
-  projectRoot: string,
   db: DatabaseInfo,
   customName: string | undefined,
 ): Promise<GenerateResult> {
@@ -126,51 +105,15 @@ async function generateDatabase(
     migrationPath: null,
   };
 
-  // Skip if no schema defined
-  if (!db.schemaImport || db.schemaTableNames.length === 0) {
-    debugCli('Skipping %s: no schema defined', db.name);
+  const schema = await loadSchema(db);
+  if (!schema) {
     return result;
   }
 
-  // Resolve schema path
-  const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
-  if (!schemaPath) {
-    debugCli('Skipping %s: could not resolve schema path', db.name);
-    return result;
-  }
+  const diff = await diffSchema(schema, db.migrationsDir);
 
-  // Load the schema
-  let schema: Record<string, unknown>;
-  try {
-    schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
-  } catch (error) {
-    debugCli('Failed to load schema for %s: %O', db.name, error);
-    return result;
-  }
-
-  if (Object.keys(schema).length === 0) {
-    debugCli('Skipping %s: empty schema', db.name);
-    return result;
-  }
-
-  // Load production snapshot
-  const migrationsDir = db.migrationsDir;
-  const prodSnapshot = loadSnapshot(migrationsDir);
-
-  // Generate current schema snapshot
-  const currentSnapshot = await generateSnapshotFromSchema(schema);
-
-  // Check if there are changes
-  if (snapshotsEqual(prodSnapshot, currentSnapshot)) {
+  if (!diff.hasChanges) {
     debugCli('No changes for %s', db.name);
-    return result;
-  }
-
-  // Generate migration statements
-  const statements = await generateMigrationStatements(prodSnapshot, currentSnapshot);
-
-  if (statements.length === 0) {
-    debugCli('No SQL changes for %s', db.name);
     return result;
   }
 
@@ -178,27 +121,27 @@ async function generateDatabase(
   const migrationName = generateMigrationName(customName ?? 'migration');
 
   // Ensure migrations directory exists
-  fs.mkdirSync(migrationsDir, { recursive: true });
+  fs.mkdirSync(db.migrationsDir, { recursive: true });
 
   // Write migration file
-  const migrationPath = path.join(migrationsDir, `${migrationName}.sql`);
-  const sqlContent = statements.map(s => s.endsWith(';') ? s : `${s};`).join('\n\n');
+  const migrationPath = path.join(db.migrationsDir, `${migrationName}.sql`);
+  const sqlContent = diff.statements.map(s => s.endsWith(';') ? s : `${s};`).join('\n\n');
   fs.writeFileSync(migrationPath, sqlContent);
 
   // Update production snapshot
   const newSnapshot: Snapshot = {
-    ...currentSnapshot,
+    ...diff.currentSnapshot,
     id: Date.now().toString(36).padStart(13, '0'),
-    prevId: prodSnapshot.id,
+    prevId: diff.prodSnapshot.id,
   };
-  saveSnapshot(migrationsDir, newSnapshot);
+  saveSnapshot(db.migrationsDir, newSnapshot);
 
   result.hasChanges = true;
-  result.statements = statements;
+  result.statements = diff.statements;
   result.migrationName = migrationName;
   result.migrationPath = migrationPath;
 
-  debugCli('Generated %s for %s (%d statements)', migrationName, db.name, statements.length);
+  debugCli('Generated %s for %s (%d statements)', migrationName, db.name, diff.statements.length);
   debugCli('Migration path: %s', migrationPath);
 
   return result;

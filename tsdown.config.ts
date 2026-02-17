@@ -18,6 +18,7 @@ export default defineConfig({
   fixedExtension: false,
   format: 'esm',
   dts: true,
+  sourcemap: false,
   outDir: 'dist',
   clean: true,
 });

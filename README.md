@@ -62,7 +62,6 @@ import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users },
 });
 ```
@@ -147,10 +146,10 @@ import { defineDatabase } from '@eagerpatch/durable-db/db';
 import { users, posts } from './schema';
 
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users, posts },
-  instance: 'per-tenant',        // or 'global' (default: 'per-tenant')
-  browsable: 'development',    // Outerbase Studio integration (default: false)
+  instance: 'per-tenant',     // or 'global' (default: 'per-tenant')
+  transport: 'rpc',           // or 'websocket' (default: 'rpc')
+  browsable: 'development',   // Outerbase Studio integration (default: false)
 });
 ```
 
@@ -160,9 +159,9 @@ The destructured `action` function is your factory for creating database actions
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `migrationsDir` | `string` | (required) | Path to migrations directory, relative to the database file |
-| `schema` | `object` | (required) | Drizzle schema tables |
+| `schema` | `object` | `{}` | Drizzle schema tables |
 | `instance` | `'per-tenant' \| 'global'` | `'per-tenant'` | Instance strategy (see [Instance Strategies](#instance-strategies)) |
+| `transport` | `'rpc' \| 'websocket'` | `'rpc'` | Transport for action stubs. WebSocket uses Cloudflare's 20:1 message billing ratio for cheaper high-volume calls |
 | `browsable` | `boolean \| 'development'` | `false` | Enable Outerbase SQL browsing (see [Outerbase Studio](#outerbase-studio-integration)) |
 
 ---
@@ -360,7 +359,7 @@ db generate --database main add_posts_table
 
 ```
 [db:generate] main: 20240315123045_add_user_bio (2 statements)
-  -> src/databases/migrations/20240315123045_add_user_bio.sql
+  -> migrations/main/20240315123045_add_user_bio.sql
 ```
 
 **Migration file naming:**
@@ -521,7 +520,7 @@ The Vite plugin automatically loads dev migrations in dev mode and appends them 
 Production migrations are the canonical migrations committed to your repository.
 
 - **Created by**: `db generate`
-- **Location**: Your configured `migrationsDir` (e.g. `src/databases/migrations/`)
+- **Location**: The `migrationsDir` configured in the Vite plugin (e.g. `migrations/main/`)
 - **Naming**: Timestamp-based -- `20240315123045.sql` or `20240315123045_description.sql`
 - **Lifecycle**: Permanent, committed to git, deployed to production
 - **Snapshot**: Each `generate` also updates `_snapshot.json` in the migrations directory (tracks schema state with `id`/`prevId` chain)
@@ -616,7 +615,7 @@ db generate add_user_profiles
 db validate
 
 # 3. Commit the migration file and updated snapshot
-git add src/databases/migrations/
+git add migrations/
 git commit -m "Add user profiles migration"
 
 # 4. Deploy
@@ -634,10 +633,9 @@ When a teammate commits a production migration, `db push` automatically detects 
 import { databasePlugin } from '@eagerpatch/durable-db/vite';
 
 databasePlugin({
-  contextImport: '@eagerpatch/durable-db/context',  // Import path for context module
-  registryImport: '@eagerpatch/durable-db/registry', // Import path for registry module
-  databasesDir: 'src/databases',                  // Where database files live
-  autoMigrations: 'development',                  // Auto-run push in dev mode
+  databasesDir: 'src/databases',   // Where database files live
+  migrationsDir: 'migrations',     // Where production migrations live
+  autoMigrations: 'development',   // Auto-run push in dev mode
 });
 ```
 
@@ -645,10 +643,11 @@ databasePlugin({
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `contextImport` | `string` | `'@eagerpatch/durable-db/context'` | Import path for the context module |
-| `registryImport` | `string` | `'@eagerpatch/durable-db/registry'` | Import path for the action registry module |
-| `databasesDir` | `string` | `'src/databases'` | Directory containing database definitions |
-| `autoMigrations` | `boolean \| 'development'` | `'development'` | Auto-push schema changes on dev server start |
+| `databasesDir` | `string` | `'src/databases'` | Directory containing database definition files |
+| `migrationsDir` | `string` | `'migrations'` | Directory for production migrations, relative to project root. Each database gets a subdirectory (e.g. `migrations/main/`) |
+| `autoMigrations` | `boolean \| 'development'` | `'development'` | Auto-push schema changes on dev server start. Set to `true` to also auto-generate in build mode, or `false` to disable |
+| `contextImport` | `string` | `'@eagerpatch/durable-db/context'` | Import path for the context module (for framework integrations) |
+| `registryImport` | `string` | `'@eagerpatch/durable-db/registry'` | Import path for the action registry module (for framework integrations) |
 
 ### What the plugin does
 
@@ -700,7 +699,6 @@ Add `browsable` to your `defineDatabase()` config:
 
 ```ts
 export const { action } = defineDatabase({
-  migrationsDir: './migrations',
   schema: { users, posts },
   browsable: 'development', // Enable in dev mode only
 });
@@ -774,7 +772,6 @@ Each tenant gets its own Durable Object instance, keyed by the tenant ID provide
 ```ts
 defineDatabase({
   schema: { users },
-  migrationsDir: './migrations',
   instance: 'per-tenant',
 });
 ```
@@ -786,7 +783,6 @@ A single shared Durable Object instance for all requests, keyed by the string `'
 ```ts
 defineDatabase({
   schema: { settings },
-  migrationsDir: './migrations',
   instance: 'global',
 });
 ```

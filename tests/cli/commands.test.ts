@@ -7,7 +7,7 @@ import { generate, generateOne } from '../../src/cli/generate';
 import { reset, resetAndPush } from '../../src/cli/reset';
 import { status, formatStatus } from '../../src/cli/status';
 import { loadDevState, getDevPaths, loadDevMigrations } from '../../src/cli/state';
-import { loadMigrationFiles, loadSnapshot } from '../../src/migrations';
+import { loadMigrationFiles, loadSnapshot } from '../../src/migrations/generator';
 
 describe('CLI commands', () => {
   let tempDir: string;
@@ -398,7 +398,7 @@ export const { action } = defineDatabase({
 
     // Simulate having done a push (create dev state)
     const { saveDevState, loadDevState, hashSnapshot } = await import('../../src/cli/state');
-    const { loadSnapshot } = await import('../../src/migrations');
+    const { loadSnapshot } = await import('../../src/migrations/generator');
     
     const prodSnapshot = loadSnapshot(migrationsDir);
     const state = loadDevState(tempDir);

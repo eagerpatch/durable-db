@@ -2,16 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import {
-  createEmptySnapshot,
-  snapshotsEqual,
-  hashSnapshot,
-  loadMigrationFiles,
-  generateMigrationName,
-  loadSnapshot,
-  saveSnapshot,
-  type Snapshot,
-} from '../../src/migrations';
+import { type Snapshot, createEmptySnapshot, snapshotsEqual, hashSnapshot } from '../../src/migrations/snapshot';
+import { loadMigrationFiles, generateMigrationName, loadSnapshot, saveSnapshot } from '../../src/migrations/generator';
 
 describe('migrations', () => {
   let tempDir: string;

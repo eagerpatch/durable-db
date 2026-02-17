@@ -6,19 +6,10 @@ import {
   clearDatabaseDevState,
   getDevPaths,
 } from './state';
-import {
-  loadSnapshot,
-  saveSnapshot,
-  generateSnapshotFromSchema,
-  generateMigrationStatements,
-  generateMigrationName,
-  snapshotsEqual,
-  hashSnapshot,
-  type Snapshot,
-} from '../migrations';
+import { type Snapshot, generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual, hashSnapshot } from '../migrations/snapshot';
+import { loadSnapshot, saveSnapshot, generateMigrationName, buildAndLoadSchema } from '../migrations/generator';
 import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
 import { parseDatabaseFile } from '../vite/modules/parser';
-import { buildAndLoadSchema } from '../migrations/generator';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 

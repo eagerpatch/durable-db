@@ -3,17 +3,11 @@ import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import type { DatabaseInfo, ActionInfo } from '../db';
 import { debugVite } from '../utils/debug';
 
-import {
-  discoverDatabaseFiles,
-  readFile,
-  resolveImportPath,
-  parseDatabaseFile,
-  patchWranglerConfig,
-  generateDurableObjectsModule,
-  transformActionFile,
-} from './modules';
-
-import { loadMigrationFiles, generateMigration, buildAndLoadSchema } from '../migrations';
+import { discoverDatabaseFiles, readFile, resolveImportPath } from './modules/discovery';
+import { parseDatabaseFile } from './modules/parser';
+import { patchWranglerConfig } from './modules/wrangler';
+import { generateDurableObjectsModule, transformActionFile } from './modules/generator';
+import { loadMigrationFiles, generateMigration, buildAndLoadSchema } from '../migrations/generator';
 
 // ============================================================================
 // Types

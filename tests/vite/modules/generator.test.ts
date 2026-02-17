@@ -198,13 +198,13 @@ describe('generateDurableObjectsModule', () => {
 
   it('imports transport module when any db uses websocket', () => {
     const code = generateDurableObjectsModule([wsDatabase], '@shoplayer/database/registry');
-    expect(code).toMatch(/import\s*\{[^}]*decodeRequest[^}]*\}\s*from\s*["']@shoplayer\/database\/transport["']/);
-    expect(code).toMatch(/import\s*\{[^}]*encodeResponse[^}]*\}\s*from\s*["']@shoplayer\/database\/transport["']/);
+    expect(code).toMatch(/import\s*\{[^}]*decodeRequest[^}]*\}\s*from\s*["']@shoplayer\/database\/transport\/protocol["']/);
+    expect(code).toMatch(/import\s*\{[^}]*encodeResponse[^}]*\}\s*from\s*["']@shoplayer\/database\/transport\/protocol["']/);
   });
 
   it('does not import transport module when no db uses websocket', () => {
     const code = generateDurableObjectsModule([mockDatabase], '@shoplayer/database/registry');
-    expect(code).not.toContain('@shoplayer/database/transport');
+    expect(code).not.toContain('@shoplayer/database/transport/');
   });
 
   it('still generates rpc method for websocket databases', () => {
@@ -453,7 +453,7 @@ export const SOME_CONSTANT = 42;
       }],
     });
 
-    expect(result!.code).toMatch(/import\s*\{[^}]*WebSocketTransport[^}]*\}\s*from\s*["']@shoplayer\/database\/transport["']/);
+    expect(result!.code).toMatch(/import\s*\{[^}]*WebSocketTransport[^}]*\}\s*from\s*["']@shoplayer\/database\/transport\/websocket["']/);
   });
 
   it('does not import WebSocketTransport for rpc databases', () => {

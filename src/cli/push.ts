@@ -5,15 +5,10 @@ import {
   loadDevMigrations,
   clearDevMigrations,
 } from './state';
-import {
-  loadSnapshot,
-  generateSnapshotFromSchema,
-  generateMigrationStatements,
-  snapshotsEqual,
-} from '../migrations';
+import { generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual } from '../migrations/snapshot';
+import { loadSnapshot, buildAndLoadSchema } from '../migrations/generator';
 import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
 import { parseDatabaseFile } from '../vite/modules/parser';
-import { buildAndLoadSchema } from '../migrations/generator';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 

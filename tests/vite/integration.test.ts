@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { discoverDatabaseFiles, readFile } from '../../src/vite/modules';
-import { parseDatabaseFile } from '../../src/vite/modules';
-import { generateDurableObjectsModule, transformActionFile } from '../../src/vite/modules';
+import { discoverDatabaseFiles, readFile } from '../../src/vite/modules/discovery';
+import { parseDatabaseFile } from '../../src/vite/modules/parser';
+import { generateDurableObjectsModule, transformActionFile } from '../../src/vite/modules/generator';
 import { generateRequiredConfig } from '../../src/vite/modules/wrangler';
 import type { DatabaseInfo, ActionInfo } from '../../src/db';
 
@@ -244,6 +244,51 @@ export const logEvent = action({
 
       // Should use "global" as instance key
       expect(transformed!.code).toMatch(/instanceKey\s*=\s*["']global["']/);
+    });
+
+    it('generates correct imports for websocket transport database', () => {
+      const eventsCode = `
+import { defineDatabase } from '@shoplayer/database/db';
+export const { action } = defineDatabase({
+  schema: {},
+  transport: 'websocket',
+});
+export const logEvent = action({
+  args: { type: 'string' },
+  handler: async (db, args) => null,
+});
+`;
+      fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'events.ts'), eventsCode);
+
+      const discovered = discoverDatabaseFiles({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      const code = readFile(discovered[0].absolutePath);
+      const parsed = parseDatabaseFile(discovered[0].absolutePath, code);
+
+      // DO module should import from specific transport subpaths
+      const doModule = generateDurableObjectsModule(
+        [parsed.database!],
+        '@shoplayer/database/registry'
+      );
+
+      expect(doModule).toContain('@shoplayer/database/transport/protocol');
+      expect(doModule).not.toMatch(/'@shoplayer\/database\/transport'/);
+
+      // Action file should import WebSocketTransport from specific subpath
+      const transformed = transformActionFile({
+        code,
+        dbName: parsed.database!.name,
+        database: parsed.database!,
+        actionsInFile: parsed.actions,
+        contextImport: '@shoplayer/database/context',
+        registryImport: '@shoplayer/database/registry',
+      });
+
+      expect(transformed!.code).toContain('@shoplayer/database/transport/websocket');
+      expect(transformed!.code).not.toMatch(/'@shoplayer\/database\/transport'/);
     });
 
     it('includes DO short path optimization', () => {

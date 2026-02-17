@@ -163,7 +163,7 @@ export function generateDurableObjectsModule(
 
   if (anyWebSocket) {
     imports.push(
-      createNamedImport(['decodeRequest', 'encodeResponse'], '@shoplayer/database/transport')
+      createNamedImport(['decodeRequest', 'encodeResponse'], '@shoplayer/database/transport/protocol')
     );
   }
 
@@ -869,7 +869,7 @@ export function transformActionFile(options: TransformOptions) {
   ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction']);
 
   if (database.transport === 'websocket') {
-    ensureNamedImports(body, '@shoplayer/database/transport', ['WebSocketTransport']);
+    ensureNamedImports(body, '@shoplayer/database/transport/websocket', ['WebSocketTransport']);
   }
 
   const out: t.Statement[] = [];

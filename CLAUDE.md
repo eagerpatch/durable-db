@@ -13,6 +13,7 @@ pnpm build          # Build with tsdown → dist/
 pnpm dev            # Build in watch mode
 pnpm test           # Run vitest in watch mode
 pnpm test:run       # Run tests once
+pnpm changeset      # Create a changeset for version bumping
 ```
 
 Run a single test file:
@@ -28,7 +29,7 @@ cd examples/rwsdk && pnpm dev
 
 ## Monorepo Structure
 
-pnpm workspace with `examples/*` as separate packages. The root package is the library itself.
+pnpm workspace with `examples/*` as separate packages. The root package is the library itself. Published to GitHub Packages via changesets.
 
 ## Architecture
 
@@ -39,19 +40,33 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 | `./db` | `src/db/` | `defineDatabase()` API, `SqliteDurableObject` base class, Kysely plugins |
 | `./vite` | `src/vite/databasePlugin.ts` | Vite plugin entry (`databasePlugin`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
-| `./context` | `src/context/` | AsyncLocalStorage-based tenant ID context (`runWithTenantId`) |
+| `./context` | `src/context/` | Tenant ID context (`runWithTenantId`, `setTenantIdResolver`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action name → handler registry for RPC dispatch |
-| `./cli` | `src/cli/` | CLI commands (push, generate, status, reset) and `db` binary |
+| `./cli` | `src/cli/` | CLI commands (push, generate, status, reset, validate) and `db` binary |
 
 ### Core Flow
 
 1. **User defines** Drizzle schema in `src/databases/schema.ts` and database + actions in `src/databases/*.ts`
 2. **Vite plugin** discovers database files, parses them with Babel AST, extracts `defineDatabase()` calls and action exports
 3. **Code generation** produces a virtual module (`virtual:eagerpatch/databases/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
-4. **Action call transformation**: internal calls → `this.actionName()`, cross-DB calls → RPC via `ctx.env`
-5. **RPC stubs** are generated so workers can call actions like regular async functions (context provided via AsyncLocalStorage)
+4. **Action call transformation**: internal calls → direct handler call (no RPC), cross-DB calls → RPC via `ctx.env`
+5. **RPC stubs** are generated so workers can call actions like regular async functions
 6. **wrangler.jsonc** is auto-patched with Durable Object bindings
+
+### defineDatabase() Options
+
+- `schema`: Drizzle schema tables
+- `instance`: `'per-tenant'` (default) or `'global'`
+- `transport`: `'rpc'` (default) or `'websocket'`
+- `browsable`: `false` (default), `true`, or `'development'` for Outerbase Studio
+
+### Vite Plugin Options
+
+- `databasesDir`: directory containing database files (default: `'src/databases'`)
+- `migrationsDir`: directory for production migrations, relative to project root (default: `'migrations'`). Each database gets a subdirectory (e.g. `migrations/main/`)
+- `autoMigrations`: auto-push schema changes (default: `'development'`)
+- `contextImport` / `registryImport`: override import paths for framework integrations
 
 ### Action System
 
@@ -61,7 +76,7 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 
 - Schema snapshots stored in `_snapshot.json` in the migrations directory
 - Dev migrations: ephemeral, stored in `node_modules/.cache/@eagerpatch/durable-db/`
-- Production migrations: `.sql` files in the configured `migrationsDir`, created via `db generate`
+- Production migrations: `.sql` files in the Vite plugin's `migrationsDir` (default: `migrations/<dbName>/`), created via `db generate`
 - Dev epoch suffixing allows resetting local databases without conflicts
 
 ### Database Instance Strategies

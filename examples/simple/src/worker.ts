@@ -1,5 +1,5 @@
 import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
-import { studio } from '@outerbase/browsable-durable-object';
+import { studio } from '@eagerpatch/durable-db/db';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
 import { getUserWithPosts } from './databases/actions/getUsersWithPosts';

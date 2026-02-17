@@ -726,7 +726,7 @@ Migrations are guaranteed to run before any browsable request — the generated 
 To serve the Outerbase Studio web interface, add a route in your worker that calls the `studio()` helper:
 
 ```ts
-import { studio } from '@outerbase/browsable-durable-object';
+import { studio } from '@eagerpatch/durable-db/db';
 
 export default {
   async fetch(request: Request, env: any) {

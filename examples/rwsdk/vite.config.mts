@@ -6,7 +6,6 @@ import { databasePlugin } from "@eagerpatch/durable-db/vite";
 export default defineConfig({
   plugins: [
     databasePlugin({
-      contextImport: "@eagerpatch/durable-db/context",
       databasesDir: "./src/databases",
       autoMigrations: false,
     }),

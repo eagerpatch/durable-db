@@ -1,22 +1,10 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
-
 /**
- * AsyncLocalStorage instance for tenant ID
- */
-const tenantIdStorage = new AsyncLocalStorage<string>();
-
-/**
- * Custom tenant ID resolver for framework integration.
- * When set, getTenantId() falls back to this if no ALS store is found.
+ * Tenant ID resolver for framework integration.
  */
 let tenantIdResolver: (() => string) | null = null;
 
 /**
- * Configure a custom tenant ID resolver for framework integration.
- *
- * When running inside a framework that already has its own request-scoped context
- * (e.g. RWSDK's `getRequestInfo()`), use this to bridge the two context systems
- * instead of wrapping every request in `runWithTenantId()`.
+ * Configure a tenant ID resolver.
  *
  * The resolver is called at the moment a database operation needs the tenant ID —
  * by which point request middleware (auth, session, etc.) has already completed.
@@ -34,14 +22,9 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
 }
 
 /**
- * Get the current tenant ID
+ * Get the current tenant ID from the configured resolver.
  *
- * Resolution order:
- * 1. AsyncLocalStorage store (standalone mode via `runWithTenantId()`)
- * 2. Custom resolver (framework integration via `setTenantIdResolver()`)
- * 3. Throws if neither is available
- *
- * @throws Error if no tenant ID is available
+ * @throws Error if no resolver is configured
  *
  * @example
  * ```ts
@@ -54,46 +37,16 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
  * ```
  */
 export function getTenantId(): string {
-  const store = tenantIdStorage.getStore();
-  if (store !== undefined) return store;
-
   if (tenantIdResolver) return tenantIdResolver();
 
-  throw new Error('getTenantId() called outside of request context. Use runWithTenantId() or setTenantIdResolver().');
+  throw new Error('getTenantId() called without a resolver. Call setTenantIdResolver() first.');
 }
 
 /**
- * Run a function with the given tenant ID
- *
- * All database actions called within the callback will have access to this tenant ID.
- *
- * @example
- * ```ts
- * import { runWithTenantId } from '@shoplayer/database/context';
- *
- * export default {
- *   async fetch(request: Request, env: Env) {
- *     return runWithTenantId('my-tenant', async () => {
- *       // Call your actions here
- *       const user = await createUser({ name: 'John', email: 'john@example.com' });
- *       return Response.json(user);
- *     });
- *   },
- * };
- * ```
- */
-export function runWithTenantId<T>(
-  tenantId: string,
-  fn: () => T | Promise<T>
-): T | Promise<T> {
-  return tenantIdStorage.run(tenantId, fn);
-}
-
-/**
- * Check if we're currently inside a request context with a tenant ID
+ * Check if a tenant ID resolver is configured.
  */
 export function hasTenantId(): boolean {
-  return tenantIdStorage.getStore() !== undefined || tenantIdResolver !== null;
+  return tenantIdResolver !== null;
 }
 
 /**

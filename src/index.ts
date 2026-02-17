@@ -20,7 +20,6 @@ export type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 export {
   setTenantIdResolver,
   getTenantId,
-  runWithTenantId,
   hasTenantId,
 } from './context';
 

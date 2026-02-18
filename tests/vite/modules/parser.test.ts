@@ -444,6 +444,98 @@ describe('parser', () => {
       expect(result.actions[0].argsSchemaSource).toContain('metadata');
     });
 
+    it('warns on non-literal instance value and defaults to per-tenant', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const code = `
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
+        import { users } from './schema';
+
+        const mode = 'global';
+        export const { action } = defineDatabase({
+          schema: { users },
+          instance: mode,
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.ts', code);
+
+      expect(result.database!.instance).toBe('per-tenant');
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0][0]).toContain('instance');
+      expect(warnSpy.mock.calls[0][0]).toContain('per-tenant');
+
+      warnSpy.mockRestore();
+    });
+
+    it('warns on non-literal transport value and defaults to rpc', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const code = `
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          schema: { users },
+          transport: someCondition ? 'websocket' : 'rpc',
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.ts', code);
+
+      expect(result.database!.transport).toBe('rpc');
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0][0]).toContain('transport');
+      expect(warnSpy.mock.calls[0][0]).toContain('rpc');
+
+      warnSpy.mockRestore();
+    });
+
+    it('warns on non-literal browsable value and defaults to false', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const code = `
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          schema: { users },
+          browsable: process.env.NODE_ENV === 'development',
+        });
+      `;
+
+      const result = parseDatabaseFile('/src/databases/main.ts', code);
+
+      expect(result.database!.browsable).toBe(false);
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0][0]).toContain('browsable');
+      expect(warnSpy.mock.calls[0][0]).toContain('false');
+
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn when config values are valid literals', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const code = `
+        import { defineDatabase } from '@eagerpatch/durable-db/db';
+        import { users } from './schema';
+
+        export const { action } = defineDatabase({
+          schema: { users },
+          instance: 'global',
+          transport: 'websocket',
+          browsable: 'development',
+        });
+      `;
+
+      parseDatabaseFile('/src/databases/main.ts', code);
+
+      expect(warnSpy).not.toHaveBeenCalled();
+
+      warnSpy.mockRestore();
+    });
+
     it('handles default export action', () => {
       const code = `
         import { action } from './main';

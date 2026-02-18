@@ -200,6 +200,17 @@ function extractActionFactoryName(pattern: t.ObjectPattern): string | null {
 }
 
 /**
+ * Warn when a defineDatabase() config property uses a non-literal value
+ * that can't be statically analyzed.
+ */
+function warnNonLiteral(filePath: string, key: string, defaultValue: string): void {
+  console.warn(
+    `[durable-db] '${key}' in defineDatabase() must be a static literal for build-time analysis. ` +
+    `Got a dynamic expression in ${path.basename(filePath)} — defaulting to '${defaultValue}'.`
+  );
+}
+
+/**
  * Extract database configuration from a defineDatabase() call
  */
 function extractDatabaseInfo(
@@ -227,10 +238,14 @@ function extractDatabaseInfo(
 
     const key = prop.key.name;
 
-    if (key === 'instance' && t.isStringLiteral(prop.value)) {
-      const value = prop.value.value;
-      if (value === 'per-tenant' || value === 'global') {
-        instance = value;
+    if (key === 'instance') {
+      if (t.isStringLiteral(prop.value)) {
+        const value = prop.value.value;
+        if (value === 'per-tenant' || value === 'global') {
+          instance = value;
+        }
+      } else {
+        warnNonLiteral(filePath, 'instance', 'per-tenant');
       }
     }
 
@@ -239,13 +254,19 @@ function extractDatabaseInfo(
         browsable = prop.value.value;
       } else if (t.isStringLiteral(prop.value) && prop.value.value === 'development') {
         browsable = 'development';
+      } else {
+        warnNonLiteral(filePath, 'browsable', String(browsable));
       }
     }
 
-    if (key === 'transport' && t.isStringLiteral(prop.value)) {
-      const value = prop.value.value;
-      if (value === 'rpc' || value === 'websocket') {
-        transport = value;
+    if (key === 'transport') {
+      if (t.isStringLiteral(prop.value)) {
+        const value = prop.value.value;
+        if (value === 'rpc' || value === 'websocket') {
+          transport = value;
+        }
+      } else {
+        warnNonLiteral(filePath, 'transport', 'rpc');
       }
     }
 

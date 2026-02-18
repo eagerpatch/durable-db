@@ -83,11 +83,27 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 - `per-tenant` (default): separate DO instance per tenant, keyed by tenant ID
 - `global`: single shared DO instance
 
+### Schema Definition
+
+Schemas are defined using `table()` from `@eagerpatch/durable-db/schema` (not `sqliteTable` from drizzle-orm directly). The `table()` wrapper auto-converts table names to snake_case. Column names are omitted — they are derived from the JS property key and auto-snake_cased by the migration system (`casing: 'snake_case'`).
+
+```ts
+import { table, text, integer } from '@eagerpatch/durable-db/schema';
+
+export const userProfiles = table('userProfiles', {
+  id: text().primaryKey(),
+  displayName: text().notNull(),
+  priceInCents: integer().notNull(),
+  createdAt: integer({ mode: 'timestamp' }).notNull(),
+});
+// SQL: user_profiles (display_name, price_in_cents, created_at)
+```
+
 ### Kysely Plugins
 
-- **CamelCasePlugin**: auto-converts camelCase ↔ snake_case between JS and SQL
+- **DrizzleDefaultsPlugin**: auto-populates columns with `$defaultFn()` on INSERT and `$onUpdateFn()` on UPDATE
+- **SchemaPlugin** (extends CamelCasePlugin): schema-aware camelCase ↔ snake_case for both table and column names, falls back to standard CamelCasePlugin
 - **DateSerializePlugin**: handles Date serialization/deserialization for SQLite
-- **DrizzleSchemaPlugin**: schema-aware column mapping
 
 ## Key Conventions
 

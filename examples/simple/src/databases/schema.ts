@@ -1,17 +1,17 @@
-import { sqliteTable, text, integer } from '@eagerpatch/durable-db/schema';
+import { table, text, integer } from '@eagerpatch/durable-db/schema';
 
-export const users = sqliteTable('users', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  nickname: text('nickname').notNull().default(''),
-  email: text('email').notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+export const users = table('users', {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  nickname: text().notNull().default(''),
+  email: text().notNull(),
+  createdAt: integer({ mode: 'timestamp' }).notNull(),
 });
 
-export const posts = sqliteTable('posts', {
-  id: text('id').primaryKey(),
-  title: text('title').notNull(),
-  content: text('content'),
-  authorId: text('author_id').notNull().references(() => users.id),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+export const posts = table('posts', {
+  id: text().primaryKey(),
+  title: text().notNull(),
+  content: text(),
+  authorId: text().notNull().references(() => users.id),
+  createdAt: integer({ mode: 'timestamp' }).notNull(),
 });

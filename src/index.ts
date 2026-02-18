@@ -1,9 +1,9 @@
 // Database definition
 export { defineDatabase } from './db/defineDatabase';
 
-// Schema builders (from drizzle-orm/sqlite-core)
+// Schema builders (re-exported from ./schema with auto-snake_case table names)
 export {
-  sqliteTable,
+  table,
   text,
   integer,
   real,
@@ -13,8 +13,8 @@ export {
   uniqueIndex,
   foreignKey,
   primaryKey,
-} from 'drizzle-orm/sqlite-core';
-export type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
+} from './schema';
+export type { AnySQLiteColumn } from './schema';
 
 // Tenant context
 export {

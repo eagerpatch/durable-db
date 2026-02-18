@@ -1,19 +1,19 @@
-import { sqliteTable, text, integer } from '@eagerpatch/durable-db/schema';
+import { table, text, integer } from '@eagerpatch/durable-db/schema';
 
 // Products table (main DB)
-export const products = sqliteTable('products', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  description: text('description'),
-  priceInCents: integer('price_in_cents').notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+export const products = table('products', {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  description: text(),
+  priceInCents: integer().notNull(),
+  createdAt: integer({ mode: 'timestamp' }).notNull(),
 });
 
 // Events table (events DB)
-export const events = sqliteTable('events', {
-  id: text('id').primaryKey(),
-  type: text('type').notNull(),
-  payload: text('payload'),
-  sessionId: text('session_id').notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+export const events = table('events', {
+  id: text().primaryKey(),
+  type: text().notNull(),
+  payload: text(),
+  sessionId: text().notNull(),
+  createdAt: integer({ mode: 'timestamp' }).notNull(),
 });

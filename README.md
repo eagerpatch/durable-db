@@ -44,15 +44,17 @@ pnpm add @eagerpatch/durable-db
 
 ```ts
 // src/databases/schema.ts
-import { sqliteTable, text, integer } from '@eagerpatch/durable-db/schema';
+import { table, text, integer } from '@eagerpatch/durable-db/schema';
 
-export const users = sqliteTable('users', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  email: text('email').notNull(),
-  createdAt: integer('created_at', { mode: 'timestamp' }).notNull(),
+export const users = table('users', {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  email: text().notNull(),
+  createdAt: integer({ mode: 'timestamp' }).notNull(),
 });
 ```
+
+Column names are derived from JS property keys and auto-converted to snake_case (e.g. `createdAt` → `created_at`). Table names passed to `table()` are also auto-snake_cased.
 
 ### 3. Define your database
 
@@ -84,7 +86,7 @@ export const createUser = action({
         id: crypto.randomUUID(),
         name: args.name,
         email: args.email,
-        created_at: new Date(),
+        createdAt: new Date(),
       })
       .returningAll()
       .executeTakeFirstOrThrow();
@@ -807,7 +809,7 @@ export const createUser = action({
       id: crypto.randomUUID(),
       name: args.name,
       email: args.email,
-      created_at: new Date(),
+      createdAt: new Date(),
     }).returningAll().executeTakeFirstOrThrow();
   },
 });
@@ -857,7 +859,7 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 | `./context` | `src/context/` | Tenant ID context (`setTenantIdResolver`, `getTenantId`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
 | `./registry` | `src/registry.ts` | Action registry and RPC dispatch (`registerAction`, `getAction`, `callAction`) |
-| `./schema` | `src/schema.ts` | Re-exports Drizzle SQLite schema builders (`sqliteTable`, `text`, `integer`, etc.) |
+| `./schema` | `src/schema.ts` | Schema builders: `table()` (auto-snake_case wrapper around Drizzle's `sqliteTable`), `text`, `integer`, etc. |
 | `./cli` | `src/cli/` | CLI commands (`push`, `generate`, `status`, `reset`, `validate`) and `db` binary |
 
 ### Request Flow
@@ -884,9 +886,11 @@ Worker fetch()
 
 The library includes plugins for transparent data mapping between JavaScript and SQLite:
 
-- **CamelCasePlugin**: Converts `camelCase` JS property names to `snake_case` SQL column names and back
-- **SchemaPlugin**: Schema-aware version of CamelCasePlugin that uses Drizzle metadata for precise column mapping (handles non-standard mappings)
-- **DateSerializePlugin**: Converts `Date` objects to ISO strings (`YYYY-MM-DD HH:MM:SS`) for SQLite storage, and parses them back on read
+- **DrizzleDefaultsPlugin**: Auto-populates columns with Drizzle's `$defaultFn()` on INSERT (e.g. auto-generated IDs, `createdAt` timestamps) and `$onUpdateFn()` on UPDATE (e.g. `updatedAt` timestamps). Columns that are explicitly provided in the query are not overridden.
+- **SchemaPlugin**: Schema-aware extension of Kysely's `CamelCasePlugin`. Maps camelCase JS property names to snake_case SQL names for both tables and columns using Drizzle schema metadata. Falls back to standard CamelCasePlugin behavior for names not in the schema.
+- **DateSerializePlugin**: Converts `Date` objects to ISO strings (`YYYY-MM-DD HH:MM:SS`) for SQLite storage, and parses them back on read.
+
+All three plugins are automatically configured when using `createDrizzlePlugins(schema)`.
 
 ---
 
@@ -929,7 +933,7 @@ src/
   db/               # Core database abstractions
     SqliteDurableObject.ts   # Base DO class with migrations + PITR
     defineDatabase.ts        # defineDatabase() API
-    plugins.ts               # Kysely plugins (CamelCase, Date, Schema)
+    plugins.ts               # Kysely plugins (DrizzleDefaults, Schema, DateSerialize)
     types.ts                 # TypeScript type definitions
   migrations/       # Snapshot-based migration generation
     snapshot.ts     # Drizzle schema -> snapshot diffing

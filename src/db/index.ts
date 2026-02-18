@@ -8,6 +8,7 @@ export { studio } from '@outerbase/browsable-durable-object';
 // Plugins
 export {
   SchemaPlugin,
+  DrizzleDefaultsPlugin,
   DateSerializePlugin,
   dateSerializers,
   createDrizzlePlugins

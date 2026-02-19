@@ -152,8 +152,7 @@ export function generateDurableObjectsModule(
   const anyWebSocket = databases.some((db) => db.transport === 'websocket');
 
   const imports: t.ImportDeclaration[] = [
-    createNamedImport(['SqliteDurableObject'], '@eagerpatch/durable-db/db'),
-    createNamedImport(['type'], 'arktype'),
+    createNamedImport(['SqliteDurableObject', 'type'], '@eagerpatch/durable-db/db'),
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
   ];
 

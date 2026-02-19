@@ -95,14 +95,10 @@ describe('parseExpression', () => {
 // ============================================================================
 
 describe('generateDurableObjectsModule', () => {
-  it('imports SqliteDurableObject', () => {
+  it('imports SqliteDurableObject and type from db', () => {
     const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
-    expect(code).toMatch(/import\s*\{\s*SqliteDurableObject\s*\}\s*from\s*["']@eagerpatch\/durable-db\/db["']/);
-  });
-
-  it('imports arktype', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
-    expect(code).toMatch(/import\s*\{\s*type\s*\}\s*from\s*["']arktype["']/);
+    expect(code).toMatch(/import\s*\{[^}]*SqliteDurableObject[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/db["']/);
+    expect(code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/db["']/);
   });
 
   it('imports from registry module', () => {

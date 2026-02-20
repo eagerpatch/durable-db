@@ -113,6 +113,15 @@ export interface DatabaseDefinition<
   action: <const Def, TResult, TEnv = unknown>(
     config: ActionConfig<Def, TResult, TSchema, TEnv>,
   ) => Action<InferArgs<Def>, TResult>;
+
+  /**
+   * Destroy the database instance, clearing all data via `ctx.storage.deleteAll()`.
+   * The next action call will re-run migrations and start fresh.
+   *
+   * For per-tenant databases, targets the current tenant (via `getTenantId()`).
+   * For global databases, targets the single shared instance.
+   */
+  destroyDatabase: () => Promise<void>;
 }
 
 /**

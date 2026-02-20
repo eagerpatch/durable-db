@@ -6,7 +6,7 @@ import { debugVite } from '../utils/debug';
 import { discoverDatabaseFiles, readFile } from './modules/discovery';
 import { parseDatabaseFile } from './modules/parser';
 import { patchWranglerConfig } from './modules/wrangler';
-import { generateDurableObjectsModule, transformActionFile } from './modules/generator';
+import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
 import { loadMigrationFiles } from '../migrations/generator';
 
 // ============================================================================
@@ -266,8 +266,19 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
 
       const cleanId = path.normalize(id.split('?', 1)[0]);
 
-      // Skip database definition files
-      if (state.getDatabaseNameForPath(cleanId)) return null;
+      // Database definition files: transform if destroyDatabase is used, otherwise skip
+      const dbNameForPath = state.getDatabaseNameForPath(cleanId);
+      if (dbNameForPath) {
+        const database = state.databases.get(dbNameForPath);
+        if (!database) return null;
+
+        return transformDatabaseFile({
+          code,
+          sourceFileName: cleanId,
+          database,
+          contextImport: state.options.contextImport,
+        });
+      }
 
       const parsed = parseDatabaseFile(cleanId, code);
       if (parsed.actions.length === 0) return null;

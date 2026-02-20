@@ -241,7 +241,8 @@ function buildDurableObjectStatements(
     buildMigrationsObject(db.migrations)
   );
 
-  const classMethods: t.ClassMethod[] = [rpcMethod];
+  const sysMethod = buildSysMethod();
+  const classMethods: t.ClassMethod[] = [rpcMethod, sysMethod];
 
   // Add webSocketMessage handler when transport is websocket
   if (db.transport === 'websocket') {
@@ -304,6 +305,82 @@ function buildDoCtxObject(
     t.objectProperty(t.identifier('dbTransports'), dbTransportsExpr),
     t.objectProperty(t.identifier('instanceKey'), instanceKeyExpr),
   ]);
+}
+
+/**
+ * Build the `sys(command)` method for system operations like destroyDatabase.
+ *
+ * Generates:
+ *   async sys(command) {
+ *     if (command === "destroyDatabase") {
+ *       await this.ctx.storage.deleteAll();
+ *       this.resetMigrationState();
+ *       return null;
+ *     }
+ *     throw new Error(`[db] Unknown system command: "${command}"`);
+ *   }
+ */
+function buildSysMethod(): t.ClassMethod {
+  const body = t.blockStatement([
+    // if (command === "destroyDatabase") { ... }
+    t.ifStatement(
+      t.binaryExpression(
+        '===',
+        t.identifier('command'),
+        t.stringLiteral('destroyDatabase')
+      ),
+      t.blockStatement([
+        // await this.ctx.storage.deleteAll();
+        t.expressionStatement(
+          t.awaitExpression(
+            t.callExpression(
+              t.memberExpression(
+                t.memberExpression(
+                  t.memberExpression(t.thisExpression(), t.identifier('ctx')),
+                  t.identifier('storage')
+                ),
+                t.identifier('deleteAll')
+              ),
+              []
+            )
+          )
+        ),
+        // this.resetMigrationState();
+        t.expressionStatement(
+          t.callExpression(
+            t.memberExpression(t.thisExpression(), t.identifier('resetMigrationState')),
+            []
+          )
+        ),
+        // return null;
+        t.returnStatement(t.nullLiteral()),
+      ])
+    ),
+
+    // throw new Error(`[db] Unknown system command: "${command}"`);
+    t.throwStatement(
+      t.newExpression(t.identifier('Error'), [
+        t.templateLiteral(
+          [
+            t.templateElement({ raw: '[db] Unknown system command: "', cooked: '[db] Unknown system command: "' }, false),
+            t.templateElement({ raw: '"', cooked: '"' }, true),
+          ],
+          [t.identifier('command')]
+        ),
+      ])
+    ),
+  ]);
+
+  return t.classMethod(
+    'method',
+    t.identifier('sys'),
+    [t.identifier('command')],
+    body,
+    false, // computed
+    false, // static
+    false, // generator
+    true   // async
+  );
 }
 
 function buildRpcMethod(
@@ -956,4 +1033,129 @@ export function transformActionFile(options: TransformOptions) {
 
   ast.program.body = out;
   return generateWithMap(ast, sourceFileName);
+}
+
+// ============================================================================
+// Database Definition File Transform (for destroyDatabase)
+// ============================================================================
+
+export interface TransformDatabaseFileOptions {
+  code: string;
+  sourceFileName?: string;
+  database: DatabaseInfo;
+  contextImport: string;
+}
+
+/**
+ * Transform a database definition file to replace the `destroyDatabase` placeholder
+ * with a generated stub that calls the DO's `sys("destroyDatabase")` method.
+ *
+ * Returns null if `destroyDatabase` is not destructured from `defineDatabase()`.
+ */
+export function transformDatabaseFile(options: TransformDatabaseFileOptions) {
+  const { code, sourceFileName, database, contextImport } = options;
+
+  const ast = parseProgram(code);
+  const body = ast.program.body;
+
+  // Find the `export const { action, destroyDatabase } = defineDatabase(...)` pattern
+  let found = false;
+
+  for (const stmt of body) {
+    if (!t.isExportNamedDeclaration(stmt) || !stmt.declaration || !t.isVariableDeclaration(stmt.declaration)) {
+      continue;
+    }
+
+    for (const decl of stmt.declaration.declarations) {
+      if (!t.isObjectPattern(decl.id) || !isDefineDatabaseCallNode(decl.init)) {
+        continue;
+      }
+
+      // Check if destroyDatabase is in the destructuring pattern
+      const destroyIdx = decl.id.properties.findIndex(
+        (prop) =>
+          t.isObjectProperty(prop) &&
+          t.isIdentifier(prop.key) &&
+          prop.key.name === 'destroyDatabase'
+      );
+
+      if (destroyIdx === -1) continue;
+
+      // Remove destroyDatabase from the destructuring pattern
+      decl.id.properties.splice(destroyIdx, 1);
+      found = true;
+    }
+  }
+
+  if (!found) return null;
+
+  // Add required imports
+  ensureNamedImports(body, 'cloudflare:workers', ['env']);
+  if (database.instance === 'per-tenant') {
+    ensureNamedImports(body, contextImport, ['getTenantId']);
+  }
+
+  // Build the destroyDatabase stub function
+  const bindingExpr = t.memberExpression(t.identifier('env'), t.identifier(database.bindingName));
+  const instanceKeyExpr =
+    database.instance === 'global'
+      ? t.stringLiteral('global')
+      : t.callExpression(t.identifier('getTenantId'), []);
+
+  const stubBody = t.blockStatement([
+    // const instanceKey = getTenantId() or "global"
+    t.variableDeclaration('const', [
+      t.variableDeclarator(t.identifier('instanceKey'), instanceKeyExpr),
+    ]),
+
+    // const id = env.BINDING.idFromName(instanceKey);
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('id'),
+        t.callExpression(
+          t.memberExpression(bindingExpr, t.identifier('idFromName')),
+          [t.identifier('instanceKey')]
+        )
+      ),
+    ]),
+
+    // const stub = env.BINDING.get(id);
+    t.variableDeclaration('const', [
+      t.variableDeclarator(
+        t.identifier('stub'),
+        t.callExpression(
+          t.memberExpression(bindingExpr, t.identifier('get')),
+          [t.identifier('id')]
+        )
+      ),
+    ]),
+
+    // return stub.sys("destroyDatabase");
+    t.returnStatement(
+      t.callExpression(
+        t.memberExpression(t.identifier('stub'), t.identifier('sys')),
+        [t.stringLiteral('destroyDatabase')]
+      )
+    ),
+  ]);
+
+  const funcDecl = t.functionDeclaration(
+    t.identifier('destroyDatabase'),
+    [],
+    stubBody,
+    false, // generator
+    true   // async
+  );
+
+  body.push(t.exportNamedDeclaration(funcDecl));
+
+  return generateWithMap(ast, sourceFileName);
+}
+
+function isDefineDatabaseCallNode(node: t.Node | null | undefined): node is t.CallExpression {
+  return (
+    t.isCallExpression(node) &&
+    t.isIdentifier(node.callee) &&
+    node.callee.name === 'defineDatabase'
+  );
 }

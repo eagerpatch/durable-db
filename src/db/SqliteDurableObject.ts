@@ -287,6 +287,15 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
+   * Reset the in-memory migration flag so that the next operation
+   * will re-run migrations. Used after `ctx.storage.deleteAll()` to
+   * ensure a fresh start.
+   */
+  protected resetMigrationState(): void {
+    this.migrationsApplied = false;
+  }
+
+  /**
    * Ensure migrations are applied before any operation
    */
   protected async ensureMigrations(): Promise<void> {

@@ -394,6 +394,40 @@ describe('SqliteDurableObject', () => {
     });
   });
 
+  describe('resetMigrationState', () => {
+    it('allows migrations to re-run after reset', async () => {
+      const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: false });
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_initial': {
+          chunks: [['CREATE TABLE users (id TEXT PRIMARY KEY)']],
+        },
+      };
+
+      // Apply migrations via fetch
+      await dobj.fetch(new Request('http://test/'));
+
+      const appliedBefore = state.storage.sql.exec(
+        'SELECT name, chunk_index FROM __migrations'
+      ).toArray();
+      expect(appliedBefore).toHaveLength(1);
+
+      // Call resetMigrationState (it's protected, so we need to access it via the test class)
+      (dobj as any).resetMigrationState();
+
+      // Second fetch should re-run ensureMigrations, which checks __migrations table
+      // and finds no new pending migrations (same migration already applied)
+      await dobj.fetch(new Request('http://test/'));
+
+      // Should still only have 1 migration entry (not duplicated)
+      const appliedAfter = state.storage.sql.exec(
+        'SELECT name, chunk_index FROM __migrations'
+      ).toArray();
+      expect(appliedAfter).toHaveLength(1);
+    });
+  });
+
   describe('multiple migration chunks', () => {
     it('applies chunks in order', async () => {
       const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: false });

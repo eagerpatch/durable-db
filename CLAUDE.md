@@ -67,6 +67,25 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 - `migrationsDir`: directory for production migrations, relative to project root (default: `'migrations'`). Each database gets a subdirectory (e.g. `migrations/main/`)
 - `contextImport` / `registryImport`: override import paths for framework integrations
 
+### destroyDatabase
+
+`destroyDatabase` is an optional function returned by `defineDatabase()`. It calls `ctx.storage.deleteAll()` inside the Durable Object, which atomically wipes the entire SQLite database (including Cloudflare internal metadata that counts toward billable storage). The next action call re-runs migrations and starts fresh.
+
+```ts
+export const { action, destroyDatabase } = defineDatabase({
+  schema: { users, posts },
+});
+
+// In a route handler:
+await destroyDatabase(); // clears current tenant's database
+```
+
+- Opt-in: only available if explicitly destructured from `defineDatabase()`
+- For `per-tenant` databases: targets the current tenant (via `getTenantId()`)
+- For `global` databases: targets the single shared instance
+- The Vite plugin detects `destroyDatabase` in the destructuring pattern and generates an RPC stub that calls `stub.sys("destroyDatabase")` on the DO
+- Generated DO classes have a `sys(command)` method (separate from `rpc()`) that handles system operations
+
 ### Action System
 
 Actions are defined with `action({ args, handler })`. The `args` object uses ArkType syntax for runtime validation. The `handler` receives `(db: Kysely, args, ctx)`. Actions can call other actions — the Vite plugin detects these at build time via Babel AST traversal and transforms them appropriately.

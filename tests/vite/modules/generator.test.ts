@@ -3,6 +3,7 @@ import {
   parseExpression,
   generateDurableObjectsModule,
   transformActionFile,
+  transformDatabaseFile,
 } from '../../../src/vite/modules/generator';
 import type { DatabaseInfo, ActionInfo } from '../../../src/db';
 
@@ -461,5 +462,172 @@ export const SOME_CONSTANT = 42;
     });
 
     expect(result!.code).not.toContain('WebSocketTransport');
+  });
+});
+
+// ============================================================================
+// generateDurableObjectsModule - sys method
+// ============================================================================
+
+describe('generateDurableObjectsModule - sys method', () => {
+  it('generates sys method on DO class', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    expect(code).toContain('async sys(command)');
+  });
+
+  it('sys method handles destroyDatabase command', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    expect(code).toContain('command === "destroyDatabase"');
+    expect(code).toContain('this.ctx.storage.deleteAll()');
+    expect(code).toContain('this.resetMigrationState()');
+  });
+
+  it('sys method throws on unknown command', () => {
+    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    expect(code).toContain('Unknown system command');
+  });
+});
+
+// ============================================================================
+// transformDatabaseFile
+// ============================================================================
+
+describe('transformDatabaseFile', () => {
+  const defaultDbFileOptions = {
+    database: mockDatabase,
+    contextImport: '@eagerpatch/durable-db/context',
+  };
+
+  it('returns null when destroyDatabase is not destructured', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action } = defineDatabase({
+  schema: { users },
+});
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it('generates destroyDatabase stub for per-tenant database', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action, destroyDatabase } = defineDatabase({
+  schema: { users },
+});
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.code).toContain('export async function destroyDatabase');
+    expect(result!.code).toContain('getTenantId()');
+    expect(result!.code).toContain('env.MAIN_DATABASE_DO.idFromName(instanceKey)');
+    expect(result!.code).toContain('stub.sys("destroyDatabase")');
+  });
+
+  it('generates destroyDatabase stub for global database', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action, destroyDatabase } = defineDatabase({
+  schema: { users },
+});
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      database: globalDatabase,
+      code,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.code).toContain('export async function destroyDatabase');
+    expect(result!.code).toContain('instanceKey = "global"');
+    expect(result!.code).not.toContain('getTenantId');
+  });
+
+  it('removes destroyDatabase from destructuring pattern', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action, destroyDatabase } = defineDatabase({
+  schema: { users },
+});
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+    });
+
+    expect(result).not.toBeNull();
+    // The destructuring should no longer contain destroyDatabase
+    // It should have `{ action }` without destroyDatabase
+    expect(result!.code).toMatch(/const\s*\{\s*action\s*\}\s*=\s*defineDatabase/);
+  });
+
+  it('adds cloudflare:workers env import', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+export const { action, destroyDatabase } = defineDatabase({ schema: {} });
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+    });
+
+    expect(result!.code).toMatch(/import\s*\{[^}]*env[^}]*\}\s*from\s*["']cloudflare:workers["']/);
+  });
+
+  it('adds context import for per-tenant database', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+export const { action, destroyDatabase } = defineDatabase({ schema: {} });
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+    });
+
+    expect(result!.code).toMatch(/import\s*\{[^}]*getTenantId[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/context["']/);
+  });
+
+  it('does not add context import for global database', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+export const { action, destroyDatabase } = defineDatabase({ schema: {} });
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      database: globalDatabase,
+      code,
+    });
+
+    expect(result!.code).not.toContain('getTenantId');
+  });
+
+  it('returns sourcemap', () => {
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+export const { action, destroyDatabase } = defineDatabase({ schema: {} });
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+      sourceFileName: 'test.ts',
+    });
+
+    expect(result!.map).toBeDefined();
   });
 });

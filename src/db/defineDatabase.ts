@@ -73,5 +73,12 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
     return actionFn;
   };
 
-  return { action } as unknown as DatabaseDefinition<TSchema>;
+  const destroyDatabase = async (): Promise<void> => {
+    throw new Error(
+      'destroyDatabase() called without transformation. ' +
+      'Make sure the durable-db plugin is configured in your Vite config.'
+    );
+  };
+
+  return { action, destroyDatabase } as unknown as DatabaseDefinition<TSchema>;
 }

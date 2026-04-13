@@ -1,5 +1,6 @@
 import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
 import { studio } from '@eagerpatch/durable-db/db';
+import { destroyDatabase } from './databases/main';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
 import { getUserWithPosts } from './databases/actions/getUsersWithPosts';
@@ -25,6 +26,11 @@ export default {
 
     try {
       // Route handling
+      if (url.pathname === '/database' && request.method === 'DELETE') {
+        await destroyDatabase();
+        return Response.json({ ok: true, tenantId });
+      }
+
       if (url.pathname === '/users' && request.method === 'POST') {
         const body = await request.json() as { name: string; email: string };
         const user = await createUser({ name: body.name, email: body.email });

@@ -194,6 +194,7 @@ describe('WebSocketTransport', () => {
   });
 
   it('ignores malformed messages', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const mockWs = createMockWebSocket();
     const stub = createMockStub(mockWs);
     const transport = new WebSocketTransport(stub);
@@ -222,6 +223,42 @@ describe('WebSocketTransport', () => {
     }));
 
     expect(await callPromise).toBe('correct');
+    warnSpy.mockRestore();
+  });
+
+  it('rejects pending request after requestTimeoutMs with no response', async () => {
+    const mockWs = createMockWebSocket();
+    const stub = createMockStub(mockWs);
+    const transport = new WebSocketTransport(stub, { requestTimeoutMs: 20 });
+
+    await expect(
+      transport.call('slowAction', {}, 'tenant-1')
+    ).rejects.toThrow(/timed out after 20ms/);
+  });
+
+  it('warns on malformed messages instead of failing silently', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const mockWs = createMockWebSocket();
+    const stub = createMockStub(mockWs);
+    const transport = new WebSocketTransport(stub);
+
+    const callPromise = transport.call('action1', {}, 'tenant-1');
+    await vi.waitFor(() => expect(mockWs.sent.length).toBe(1));
+
+    mockWs.simulateMessage('not valid json {{{');
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain('malformed message');
+
+    // Legitimate response still resolves
+    mockWs.simulateMessage(JSON.stringify({
+      id: 'test-uuid-1',
+      ok: true,
+      result: 'ok',
+    }));
+    await expect(callPromise).resolves.toBe('ok');
+
+    warnSpy.mockRestore();
   });
 
   it('close() shuts down the connection', async () => {

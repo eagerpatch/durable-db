@@ -1,5 +1,19 @@
 import { encodeRequest, decodeResponse, type WsActionResponse } from './protocol';
 
+/** Default timeout (ms) after which a pending WebSocket request rejects. */
+export const DEFAULT_WS_REQUEST_TIMEOUT_MS = 30_000;
+
+interface PendingRequest {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+export interface WebSocketTransportOptions {
+  /** Per-request timeout in ms. Set to 0 or Infinity to disable. */
+  requestTimeoutMs?: number;
+}
+
 /**
  * Client-side WebSocket transport for calling DO actions over WebSocket.
  *
@@ -8,10 +22,16 @@ import { encodeRequest, decodeResponse, type WsActionResponse } from './protocol
  */
 export class WebSocketTransport {
   private ws: WebSocket | null = null;
-  private pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private pending = new Map<string, PendingRequest>();
   private connectPromise: Promise<void> | null = null;
+  private readonly requestTimeoutMs: number;
 
-  constructor(private stub: { fetch: (input: RequestInfo) => Promise<Response> }) {}
+  constructor(
+    private stub: { fetch: (input: RequestInfo) => Promise<Response> },
+    options: WebSocketTransportOptions = {}
+  ) {
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_WS_REQUEST_TIMEOUT_MS;
+  }
 
   async call(action: string, args: unknown, instanceKey: string): Promise<unknown> {
     await this.ensureConnected();
@@ -20,7 +40,20 @@ export class WebSocketTransport {
     const message = encodeRequest({ id, action, args, instanceKey });
 
     return new Promise<unknown>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = this.requestTimeoutMs > 0 && Number.isFinite(this.requestTimeoutMs)
+        ? setTimeout(() => {
+            const entry = this.pending.get(id);
+            if (!entry) return;
+            this.pending.delete(id);
+            entry.reject(
+              new Error(
+                `[db] WebSocket request '${action}' timed out after ${this.requestTimeoutMs}ms`
+              )
+            );
+          }, this.requestTimeoutMs)
+        : null;
+
+      this.pending.set(id, { resolve, reject, timer });
       this.ws!.send(message);
     });
   }
@@ -72,17 +105,24 @@ export class WebSocketTransport {
   }
 
   private onMessage(event: MessageEvent): void {
+    const raw = typeof event.data === 'string' ? event.data : String(event.data);
     let response: WsActionResponse;
     try {
-      response = decodeResponse(typeof event.data === 'string' ? event.data : String(event.data));
-    } catch {
-      return; // Ignore malformed messages
+      response = decodeResponse(raw);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.warn(
+        `[db] WebSocket received malformed message (ignored): ${message}. ` +
+        `First 120 chars: ${raw.slice(0, 120)}`
+      );
+      return;
     }
 
     const pending = this.pending.get(response.id);
     if (!pending) return;
 
     this.pending.delete(response.id);
+    if (pending.timer) clearTimeout(pending.timer);
 
     if (response.ok) {
       pending.resolve(response.result);
@@ -94,8 +134,9 @@ export class WebSocketTransport {
   private onClose(): void {
     this.ws = null;
     // Reject all pending requests
-    for (const [id, { reject }] of this.pending) {
-      reject(new Error('WebSocket connection closed'));
+    for (const [, entry] of this.pending) {
+      if (entry.timer) clearTimeout(entry.timer);
+      entry.reject(new Error('WebSocket connection closed'));
     }
     this.pending.clear();
   }

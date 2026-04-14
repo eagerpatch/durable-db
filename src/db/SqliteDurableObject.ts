@@ -222,6 +222,12 @@ export interface MigrationStatus {
   /** Whether the underlying storage supports PITR bookmarks. */
   pitrAvailable: boolean;
   /**
+   * Reason PITR is unavailable, populated from the error thrown by
+   * `getCurrentBookmark()` on first check. Null when PITR is available
+   * or hasn't been checked yet.
+   */
+  pitrUnavailableReason: string | null;
+  /**
    * Remaining PITR-protected retries before PITR is disabled. Clamped to
    * 0; always 0 when pitrAvailable is false.
    */
@@ -296,6 +302,14 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   private pitrAvailable: boolean | null = null;
 
+  /**
+   * Reason PITR was determined unavailable, if known. Null when PITR is
+   * available or hasn't been checked yet. Surfaced via getMigrationStatus()
+   * so operators can distinguish "not supported by the runtime" from
+   * "unexpected error at detection time".
+   */
+  private pitrUnavailableReason: string | null = null;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
@@ -311,8 +325,11 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     try {
       await this.ctx.storage.getCurrentBookmark();
       this.pitrAvailable = true;
-    } catch {
+      this.pitrUnavailableReason = null;
+    } catch (e) {
       this.pitrAvailable = false;
+      this.pitrUnavailableReason = e instanceof Error ? e.message : String(e);
+      debugMigrations('PITR unavailable: %s', this.pitrUnavailableReason);
     }
     return this.pitrAvailable;
   }
@@ -324,6 +341,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   protected resetMigrationState(): void {
     this.migrationsApplied = false;
+    debugMigrations('Migration state reset; migrations will re-run on next access');
   }
 
   /**
@@ -425,6 +443,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     }
 
     // WRITE 2: Apply migrations
+    const startedAt = Date.now();
     try {
       this.applyMigrations(pending);
 
@@ -434,6 +453,14 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
         SET attempt_count = 0, last_error = NULL
         WHERE id = 'current'
       `);
+
+      const uniqueNames = Array.from(new Set(pending.map(p => p.name)));
+      const elapsed = Date.now() - startedAt;
+      console.log(
+        `[database] Applied ${pending.length} migration chunk(s) ` +
+        `across ${uniqueNames.length} migration(s) in ${elapsed}ms: ${uniqueNames.join(', ')}` +
+        (hasPitr ? '' : ' (PITR unavailable — migrations ran unprotected)')
+      );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
 
@@ -641,6 +668,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       pending,
       applied,
       pitrAvailable,
+      pitrUnavailableReason: pitrAvailable ? null : this.pitrUnavailableReason,
       pitrAttemptsRemaining,
     };
   }

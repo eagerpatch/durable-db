@@ -434,6 +434,25 @@ describe('SqliteDurableObject', () => {
       expect(status.pending).toEqual(['20240301_third']);
     });
 
+    it('getMigrationStatus surfaces the reason PITR is unavailable', async () => {
+      const { state } = createMockDurableObjectState({ pitrAvailable: false });
+      const dobj = new TestDurableObject(state, {});
+
+      // Trigger PITR check via status call
+      const status = await dobj.getMigrationStatus();
+      expect(status.pitrAvailable).toBe(false);
+      expect(status.pitrUnavailableReason).toBe('PITR not available');
+    });
+
+    it('getMigrationStatus reports null reason when PITR is available', async () => {
+      const { state } = createMockDurableObjectState({ pitrAvailable: true });
+      const dobj = new TestDurableObject(state, {});
+
+      const status = await dobj.getMigrationStatus();
+      expect(status.pitrAvailable).toBe(true);
+      expect(status.pitrUnavailableReason).toBeNull();
+    });
+
     it('getMigrationStatus reports PITR attempts remaining', async () => {
       const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: true });
 
@@ -486,6 +505,58 @@ describe('SqliteDurableObject', () => {
       expect(chunkFailLog![0]).toContain('INVALID SQL HERE');
 
       errSpy.mockRestore();
+    });
+
+    it('logs a success summary after applying migrations', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const { state } = createMockDurableObjectState({ pitrAvailable: false });
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_a': { chunks: [['CREATE TABLE a (id TEXT PRIMARY KEY)']] },
+        '20240201_b': {
+          chunks: [
+            ['CREATE TABLE b1 (id TEXT PRIMARY KEY)'],
+            ['CREATE TABLE b2 (id TEXT PRIMARY KEY)'],
+          ],
+        },
+      };
+
+      await dobj.fetch(new Request('http://test/'));
+
+      const summary = logSpy.mock.calls.find(
+        call => typeof call[0] === 'string' && call[0].includes('Applied')
+      );
+      expect(summary).toBeDefined();
+      // 3 chunks across 2 migrations
+      expect(summary![0]).toContain('Applied 3 migration chunk(s)');
+      expect(summary![0]).toContain('across 2 migration(s)');
+      expect(summary![0]).toContain('20240101_a');
+      expect(summary![0]).toContain('20240201_b');
+      // PITR was unavailable → should note that
+      expect(summary![0]).toContain('PITR unavailable');
+
+      logSpy.mockRestore();
+    });
+
+    it('success summary omits the PITR warning when PITR is available', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const { state } = createMockDurableObjectState({ pitrAvailable: true });
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_a': { chunks: [['CREATE TABLE a (id TEXT PRIMARY KEY)']] },
+      };
+
+      await dobj.fetch(new Request('http://test/'));
+
+      const summary = logSpy.mock.calls.find(
+        call => typeof call[0] === 'string' && call[0].includes('Applied')
+      );
+      expect(summary).toBeDefined();
+      expect(summary![0]).not.toContain('PITR unavailable');
+
+      logSpy.mockRestore();
     });
 
     it('PITR-exhausted log includes pending migration names', async () => {

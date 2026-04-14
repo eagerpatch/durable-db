@@ -481,12 +481,35 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
         );
 
         // Schedule restore and abort — the DO will restart with the counter
-        // already incremented (since we wrote it before the bookmark)
-        await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
-        this.ctx.abort('Restoring to pre-migration bookmark');
+        // already incremented (since we wrote it before the bookmark).
+        //
+        // If the restore call itself fails (some runtimes advertise PITR via
+        // getCurrentBookmark() but fail the actual restore) we must still
+        // surface the ORIGINAL migration error, not the PITR failure. That's
+        // what the user needs to fix; the PITR layer is just getting in the
+        // way of the real diagnostic.
+        try {
+          await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
+          this.ctx.abort('Restoring to pre-migration bookmark');
+        } catch (pitrErr) {
+          const pitrMessage = pitrErr instanceof Error ? pitrErr.message : String(pitrErr);
+          // If abort() threw (expected in production), re-throw so the DO
+          // tears down as intended. We detect this heuristically by the
+          // presence of our abort reason in the message — abort errors
+          // carry the reason we passed in.
+          if (pitrMessage.includes('Restoring to pre-migration bookmark')) {
+            throw pitrErr;
+          }
+          console.error(
+            `[database] PITR restore failed (${pitrMessage}). ` +
+            `Propagating the original migration error instead so you can fix the root cause.`
+          );
+          // fall through to `throw error` below
+        }
       }
 
-      // No PITR available or attempts exhausted — propagate error
+      // No PITR available, attempts exhausted, or PITR restore itself failed —
+      // propagate the original migration error (the real root cause).
       throw error;
     }
   }

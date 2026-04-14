@@ -559,6 +559,61 @@ describe('SqliteDurableObject', () => {
       logSpy.mockRestore();
     });
 
+    it('propagates the original migration error when PITR restore itself fails', async () => {
+      // Simulate a workerd-like environment where getCurrentBookmark succeeds
+      // but onNextSessionRestoreBookmark rejects (partial PITR support).
+      const { state } = createMockDurableObjectState({ pitrAvailable: true });
+      state.storage.onNextSessionRestoreBookmark = vi.fn().mockRejectedValue(
+        new Error('storage back-end does not implement point-in-time recovery')
+      );
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_bad': { chunks: [['INVALID SQL']] },
+      };
+
+      // The user should see the SQL syntax error — the real root cause —
+      // not the PITR restore failure masking it.
+      await expect(dobj.fetch(new Request('http://test/'))).rejects.toThrow(
+        /near "INVALID": syntax error/
+      );
+
+      // And we should have logged the PITR failure distinctly so operators
+      // can still see that PITR itself is broken.
+      const pitrLog = errSpy.mock.calls.find(
+        call => typeof call[0] === 'string' && call[0].includes('PITR restore failed')
+      );
+      expect(pitrLog).toBeDefined();
+      expect(pitrLog![0]).toContain('does not implement point-in-time recovery');
+
+      errSpy.mockRestore();
+    });
+
+    it('re-throws the abort error when abort() throws (production-like)', async () => {
+      // In real Cloudflare runtime ctx.abort() throws with the abort reason.
+      // We should let that error through — the DO is being torn down on
+      // purpose and the caller needs to see the abort, not our fallback.
+      const { state } = createMockDurableObjectState({ pitrAvailable: true });
+      state.abort = vi.fn().mockImplementation(() => {
+        throw new Error('Restoring to pre-migration bookmark');
+      });
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_bad': { chunks: [['INVALID SQL']] },
+      };
+
+      await expect(dobj.fetch(new Request('http://test/'))).rejects.toThrow(
+        /Restoring to pre-migration bookmark/
+      );
+
+      errSpy.mockRestore();
+    });
+
     it('PITR-exhausted log includes pending migration names', async () => {
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: true });

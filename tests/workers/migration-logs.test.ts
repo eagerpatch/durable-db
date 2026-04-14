@@ -46,7 +46,7 @@ function newStub() {
 }
 
 describe('migration E2E (real workerd)', () => {
-  it('propagates an error when a migration statement fails', async () => {
+  it('propagates the underlying SQL error, not a PITR-layer error', async () => {
     const stub = newStub();
 
     let caught: Error | null = null;
@@ -57,12 +57,12 @@ describe('migration E2E (real workerd)', () => {
     }
 
     expect(caught, 'expected fetch to reject').not.toBeNull();
-    // The exact message depends on the workerd storage back-end: without
-    // PITR support it may surface the SQL error; with the local test
-    // storage it can surface a PITR-unavailability error thrown by the
-    // runtime. Either way, a) the fetch rejects, and b) the next test
-    // verifies the migration error itself is recorded on the DO.
-    expect(caught!.message.length).toBeGreaterThan(0);
+    // workerd's local storage accepts getCurrentBookmark() but rejects the
+    // actual onNextSessionRestoreBookmark call — the exact scenario where
+    // our PITR fallback should surface the SQL error instead of the PITR
+    // complaint. This asserts that our runMigrations catch block is
+    // unwrapping correctly in a real runtime.
+    expect(caught!.message).toMatch(/syntax error|NOT VALID|INVALID/i);
   });
 
   it('getMigrationStatus reports applied vs pending against a real DO', async () => {

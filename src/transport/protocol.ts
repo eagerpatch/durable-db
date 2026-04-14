@@ -26,17 +26,21 @@ export function encodeRequest(req: WsActionRequest): string {
 }
 
 export function decodeRequest(data: string): WsActionRequest {
-  const parsed = JSON.parse(data);
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    typeof parsed.id !== 'string' ||
-    typeof parsed.action !== 'string' ||
-    typeof parsed.instanceKey !== 'string'
-  ) {
-    throw new Error('Invalid WsActionRequest');
+  const parsed: unknown = JSON.parse(data);
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error(
+      `Invalid WsActionRequest: expected object, got ${parsed === null ? 'null' : typeof parsed}`
+    );
   }
-  return parsed as WsActionRequest;
+  const obj = parsed as Record<string, unknown>;
+  for (const field of ['id', 'action', 'instanceKey'] as const) {
+    if (typeof obj[field] !== 'string') {
+      throw new Error(
+        `Invalid WsActionRequest: '${field}' must be a string, got ${describeType(obj[field])}`
+      );
+    }
+  }
+  return obj as unknown as WsActionRequest;
 }
 
 export function encodeResponse(res: WsActionResponse): string {
@@ -44,17 +48,33 @@ export function encodeResponse(res: WsActionResponse): string {
 }
 
 export function decodeResponse(data: string): WsActionResponse {
-  const parsed = JSON.parse(data);
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    typeof parsed.id !== 'string' ||
-    typeof parsed.ok !== 'boolean'
-  ) {
-    throw new Error('Invalid WsActionResponse');
+  const parsed: unknown = JSON.parse(data);
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error(
+      `Invalid WsActionResponse: expected object, got ${parsed === null ? 'null' : typeof parsed}`
+    );
   }
-  if (!parsed.ok && typeof parsed.error !== 'string') {
-    throw new Error('Invalid WsActionResponse: missing error string');
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.id !== 'string') {
+    throw new Error(
+      `Invalid WsActionResponse: 'id' must be a string, got ${describeType(obj.id)}`
+    );
   }
-  return parsed as WsActionResponse;
+  if (typeof obj.ok !== 'boolean') {
+    throw new Error(
+      `Invalid WsActionResponse: 'ok' must be a boolean, got ${describeType(obj.ok)}`
+    );
+  }
+  if (!obj.ok && typeof obj.error !== 'string') {
+    throw new Error(
+      `Invalid WsActionResponse: 'error' must be a string when ok=false, got ${describeType(obj.error)}`
+    );
+  }
+  return obj as unknown as WsActionResponse;
+}
+
+function describeType(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
 }

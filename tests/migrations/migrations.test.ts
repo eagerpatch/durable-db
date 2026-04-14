@@ -115,6 +115,14 @@ describe('migrations', () => {
       expect(loaded.tables).toEqual({});
     });
 
+    it('throws a descriptive error when snapshot file is corrupt', () => {
+      const snapshotPath = path.join(tempDir, '_snapshot.json');
+      fs.writeFileSync(snapshotPath, '{ not valid json', 'utf-8');
+
+      expect(() => loadSnapshot(tempDir)).toThrow(/Failed to parse snapshot at/);
+      expect(() => loadSnapshot(tempDir)).toThrow(/appears corrupt/);
+    });
+
     it('creates directory if it does not exist', () => {
       const nestedDir = path.join(tempDir, 'nested', 'dir');
       const snapshot = createEmptySnapshot();

@@ -117,7 +117,9 @@ export async function callAction(
 
   const validated = entry.validator(args);
   if (validated instanceof type.errors) {
-    throw new Error(`[db] Invalid args: ${validated.summary}`);
+    throw new Error(
+      `[db] Invalid args for ${targetDb}/${actionName}: ${validated.summary}`
+    );
   }
 
   // Same DB: direct call (no RPC hop)

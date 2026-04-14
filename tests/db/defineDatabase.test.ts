@@ -49,9 +49,22 @@ describe('db', () => {
       });
 
       // Valid args should still throw because transformation hasn't run
+      // and the error should include the args schema keys for identifiability
       await expect(myAction({ name: 'test' })).rejects.toThrow(
-        'Action called without transformation'
+        /Action \(args: \{ name \}\) called without transformation/
       );
+    });
+
+    it('includes args schema keys in invalid-args error', async () => {
+      const { action } = defineDatabase({ schema: {} });
+      const myAction = action({
+        args: { name: 'string', email: 'string.email' },
+        handler: async () => undefined,
+      });
+
+      await expect(
+        myAction({ name: 'test', email: 'not-an-email' } as any)
+      ).rejects.toThrow(/Invalid args for action \(args: \{ name, email \}\)/);
     });
 
     it('supports complex args schemas', async () => {
@@ -94,7 +107,7 @@ describe('db', () => {
 
       // Should validate successfully (but then throw the transformation error)
       await expect(myAction({ name: 'test' })).rejects.toThrow(
-        'Action called without transformation'
+        /called without transformation/
       );
     });
 

@@ -56,12 +56,21 @@ export function loadSnapshot(migrationsDir: string): Snapshot {
     return createEmptySnapshot();
   }
 
+  const content = fs.readFileSync(snapshotPath, 'utf-8');
   try {
-    const content = fs.readFileSync(snapshotPath, 'utf-8');
     return JSON.parse(content) as Snapshot;
-  } catch {
-    debugMigrations('Failed to load snapshot from %s, starting fresh', snapshotPath);
-    return createEmptySnapshot();
+  } catch (e) {
+    // A corrupt snapshot is far more dangerous than a missing one: silently
+    // treating it as empty would regenerate migrations that collide with
+    // schema already applied in production. Refuse to proceed and tell the
+    // operator how to recover.
+    const message = e instanceof Error ? e.message : String(e);
+    throw new Error(
+      `[db] Failed to parse snapshot at ${snapshotPath}: ${message}. ` +
+      `The file appears corrupt — restore from git, or delete it if you ` +
+      `intend to re-derive migrations from scratch (only safe when the ` +
+      `migration history matches an empty-starting-point schema).`
+    );
   }
 }
 

@@ -172,6 +172,20 @@ describe('callAction', () => {
     ).rejects.toThrow('Action not registered');
   });
 
+  it('args-validation error names the db/action that failed', async () => {
+    const { type } = await import('arktype');
+    const validator = type({ name: 'string' }) as unknown as ActionDefinition['validator'];
+    registerAction('argCtxDb', 'argCtxAction', {
+      validator,
+      handler: async (_db, args) => args,
+    });
+
+    const ctx = createMockContext('argCtxDb');
+    await expect(
+      callAction({}, 'argCtxDb', 'argCtxAction', { name: 123 }, ctx)
+    ).rejects.toThrow(/Invalid args for argCtxDb\/argCtxAction/);
+  });
+
   it('error for unregistered action lists known actions on that database', async () => {
     registerAction('errorListDb', 'existingOne', createMockAction('existingOne'));
     registerAction('errorListDb', 'existingTwo', createMockAction('existingTwo'));

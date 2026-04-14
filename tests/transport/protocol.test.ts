@@ -73,6 +73,16 @@ describe('protocol', () => {
     it('throws on null payload', () => {
       expect(() => decodeRequest('null')).toThrow('Invalid WsActionRequest');
     });
+
+    it('names the offending field and its actual type', () => {
+      expect(() =>
+        decodeRequest(JSON.stringify({ id: 123, action: 'foo', instanceKey: 'k' }))
+      ).toThrow(/'id' must be a string, got number/);
+
+      expect(() =>
+        decodeRequest(JSON.stringify({ id: '1', action: null, instanceKey: 'k' }))
+      ).toThrow(/'action' must be a string, got null/);
+    });
   });
 
   describe('encodeResponse / decodeResponse', () => {
@@ -133,11 +143,21 @@ describe('protocol', () => {
     it('throws on error response missing error string', () => {
       expect(() =>
         decodeResponse(JSON.stringify({ id: '1', ok: false }))
-      ).toThrow('Invalid WsActionResponse: missing error string');
+      ).toThrow(/'error' must be a string when ok=false/);
     });
 
     it('throws on null payload', () => {
       expect(() => decodeResponse('null')).toThrow('Invalid WsActionResponse');
+    });
+
+    it('names the offending field and its actual type', () => {
+      expect(() =>
+        decodeResponse(JSON.stringify({ id: 123, ok: true, result: 1 }))
+      ).toThrow(/'id' must be a string, got number/);
+
+      expect(() =>
+        decodeResponse(JSON.stringify({ id: '1', ok: 'yes', result: 1 }))
+      ).toThrow(/'ok' must be a boolean, got string/);
     });
   });
 });

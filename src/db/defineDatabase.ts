@@ -53,6 +53,14 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
     // ArkType's type() returns a validator function
     const validator = type(actionConfig.args as Record<string, unknown>);
 
+    // Summarize the args schema so placeholder errors carry enough info
+    // to identify which action fired. We don't know the export name here
+    // (it's assigned downstream), so the shape is the best hint.
+    const argKeys = Object.keys(actionConfig.args as Record<string, unknown>);
+    const argsHint = argKeys.length > 0
+      ? `args: { ${argKeys.join(', ')} }`
+      : 'args: {}';
+
     // This is a placeholder that will be replaced by the Vite plugin
     // with an RPC stub. During static analysis, we just need this to
     // be a valid function.
@@ -60,12 +68,12 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
       // Validate args
       const result = validator(args);
       if (result instanceof type.errors) {
-        throw new Error(`Invalid args: ${result.summary}`);
+        throw new Error(`Invalid args for action (${argsHint}): ${result.summary}`);
       }
 
       // This error helps catch cases where the transform didn't run
       throw new Error(
-        'Action called without transformation. ' +
+        `Action (${argsHint}) called without transformation. ` +
         'Make sure the durable-db plugin is configured in your Vite config.'
       );
     };

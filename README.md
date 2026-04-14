@@ -27,6 +27,7 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
 - [Instance Strategies](#instance-strategies)
 - [Action-to-Action Calls](#action-to-action-calls)
 - [PITR Safety](#pitr-safety)
+- [Recovery Workflows](#recovery-workflows)
 - [Architecture](#architecture)
 - [Development](#development)
 
@@ -844,6 +845,59 @@ The `SqliteDurableObject` base class provides methods for inspecting migration s
 - `getMigrationAttempts()` -- Returns `{ attemptCount, lastAttemptAt, lastError }`
 - `getMigrationBookmark()` -- Returns the current PITR bookmark string, or `null` if PITR is unavailable
 - `restoreToBookmark(bookmark)` -- Manually trigger a PITR restore
+
+---
+
+## Recovery Workflows
+
+This section covers what to do when things go wrong. The goal is to give you a clear playbook for the common failure modes instead of guessing.
+
+### Migration keeps failing past the PITR cap
+
+After 3 consecutive failed migration attempts, PITR restore is skipped and the error surfaces on every request. The DO will log:
+
+```
+[database] Migration has failed 3 times. PITR restore disabled -- fix the migration and redeploy.
+```
+
+**Do this:**
+
+1. Check which migration broke by calling `getMigrationAttempts()` on the DO -- it returns `{ attemptCount, lastAttemptAt, lastError }`.
+2. Fix the offending `.sql` file in `migrations/<db>/`. Typical culprits: non-nullable column added without a default, a `DROP COLUMN` on a table with data, an index name collision.
+3. Redeploy. The next request will attempt the (now fixed) migration against the pre-migration state -- no manual reset needed.
+4. If you're certain the DO is already in a bad state (e.g. a migration was half-applied before the bookmark logic landed), call `restoreToBookmark(bookmark)` manually from a worker route with a known-good bookmark, then redeploy.
+
+**Don't** try to delete or rewrite a migration that's already been applied in production -- it'll be skipped on machines that already ran it and break machines that haven't. Always forward-fix with a new migration.
+
+### Local dev: start from scratch
+
+In development, migrations run against ephemeral state cached under `node_modules/.cache/@eagerpatch/durable-db/`. Use whichever matches your situation:
+
+- **Reset one tenant's data while keeping schema**: call `destroyDatabase()` from a route. This runs `ctx.storage.deleteAll()` on the current tenant's DO and re-runs migrations on the next call.
+- **Reset _every_ tenant's data for a database**: bump the dev epoch with `pnpm db reset` (or `pnpm db reset --database main`). Instance keys get a new `__dev_<epoch>` suffix, so every tenant starts from empty SQLite.
+- **Drop everything and re-derive migrations from the schema**: `rm -rf node_modules/.cache/@eagerpatch/durable-db` and restart `pnpm dev`. The plugin regenerates dev migrations from the current schema.
+
+### Snapshot corruption (`_snapshot.json`)
+
+The `_snapshot.json` file in each `migrations/<db>/` directory is the source of truth for what schema the migration history represents. If it's been hand-edited, merged badly, or lost:
+
+1. `pnpm db validate` -- this will compare your live schema against what the snapshot claims and flag drift.
+2. If only the snapshot is missing but the `.sql` files are correct, delete `_snapshot.json` and run `pnpm db generate`. It will reconstruct the snapshot by replaying migration history.
+3. If both `_snapshot.json` and an SQL file are out of sync: check `git log -- migrations/<db>/` for the last known-good revision and restore from there. Never regenerate by hand -- let `db generate` produce the diff.
+
+### "Action not registered" / "Missing binding" at runtime
+
+These errors now include the list of available actions/bindings so you can see what _is_ wired up. Typical causes:
+
+- **Action not registered**: the action file didn't match the Vite plugin's discovery rules (see the [Vite Plugin](#vite-plugin) section). Files named `schema.ts`, `_*.ts`, or `*.d.ts` are excluded.
+- **Missing binding**: the target database `.ts` file isn't in `databasesDir`, or the wrangler config wasn't patched (check `wrangler.jsonc` for a `durable_objects.bindings` entry). A full Vite restart regenerates bindings.
+
+### WebSocket transport hangs
+
+Pending requests time out after 30s by default and reject with `WebSocket request '<action>' timed out after 30000ms`. If you're seeing timeouts:
+
+- Confirm the target DO's action handler actually returns (look for unawaited promises or an uncaught exception in logs).
+- If the action is legitimately slow, pass `new WebSocketTransport(stub, { requestTimeoutMs: 60_000 })` when constructing manually, or switch that database to `transport: 'rpc'` which has no intrinsic timeout beyond the platform's request limit.
 
 ---
 

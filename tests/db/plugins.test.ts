@@ -17,6 +17,7 @@ import {
   dateSerializers,
   createDrizzlePlugins,
   extractDefaults,
+  assertValidSchema,
 } from '../../src/db/plugins';
 
 // ---------------------------------------------------------------------------
@@ -413,6 +414,68 @@ describe('createDrizzlePlugins', () => {
     expect(plugins).toHaveLength(2);
     expect(plugins[0]).toBeInstanceOf(DrizzleDefaultsPlugin);
     expect(plugins[1]).toBeInstanceOf(DateSerializePlugin);
+  });
+
+  it('throws a helpful error when schema contains a non-table value', () => {
+    const bad = { users: usersExplicit, broken: { not: 'a table' } } as any;
+    expect(() => createDrizzlePlugins(bad)).toThrow(/'broken' is not a Drizzle table/);
+  });
+
+  it('throws when schema is null', () => {
+    expect(() => createDrizzlePlugins(null as any)).toThrow(/expected a record of Drizzle tables/);
+  });
+
+  it('accepts an empty schema object', () => {
+    const plugins = createDrizzlePlugins({});
+    expect(plugins).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// assertValidSchema tests
+// ---------------------------------------------------------------------------
+
+describe('assertValidSchema', () => {
+  it('accepts a record of Drizzle tables', () => {
+    expect(() => assertValidSchema({ users: usersExplicit })).not.toThrow();
+  });
+
+  it('accepts an empty object', () => {
+    expect(() => assertValidSchema({})).not.toThrow();
+  });
+
+  it('rejects null with a clear message', () => {
+    expect(() => assertValidSchema(null)).toThrow(/got null/);
+  });
+
+  it('rejects undefined', () => {
+    expect(() => assertValidSchema(undefined)).toThrow(/got undefined/);
+  });
+
+  it('rejects arrays', () => {
+    expect(() => assertValidSchema([usersExplicit])).toThrow(/got array/);
+  });
+
+  it('rejects primitives', () => {
+    expect(() => assertValidSchema('schema' as any)).toThrow(/got string/);
+    expect(() => assertValidSchema(42 as any)).toThrow(/got number/);
+  });
+
+  it('names the offending key when a value is not a table', () => {
+    const bad = {
+      users: usersExplicit,
+      maybeRelations: { some: 'plain object' },
+    };
+    expect(() => assertValidSchema(bad as any)).toThrow(
+      /'maybeRelations' is not a Drizzle table \(got object\)/
+    );
+  });
+
+  it('flags undefined values (common when imports fail)', () => {
+    const bad = { users: usersExplicit, posts: undefined } as any;
+    expect(() => assertValidSchema(bad)).toThrow(
+      /'posts' is not a Drizzle table \(got undefined\)/
+    );
   });
 });
 

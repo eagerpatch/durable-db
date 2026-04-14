@@ -20,7 +20,7 @@ import {
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { getTableConfig, SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
-import { getTableColumns, getTableName, isSQLWrapper, Table } from 'drizzle-orm';
+import { getTableColumns, getTableName, is, isSQLWrapper, Table } from 'drizzle-orm';
 import { toCamelCase } from 'drizzle-orm/casing';
 
 /**
@@ -353,6 +353,39 @@ export class DateSerializePlugin implements KyselyPlugin {
 }
 
 /**
+ * Validate that a schema object is shaped like a record of Drizzle tables.
+ *
+ * Throws a descriptive error pointing at the offending key when the schema
+ * is not a plain object or when any value isn't a Drizzle `Table`. This
+ * catches the common foot-guns (passing a Drizzle relations helper, a plain
+ * column builder, or `undefined` because of a missing import) before Kysely
+ * plugins crash with an unhelpful stack deep inside their constructors.
+ */
+export function assertValidSchema(
+  schema: unknown
+): asserts schema is Record<string, SQLiteTableWithColumns<any>> {
+  if (schema === null || typeof schema !== 'object' || Array.isArray(schema)) {
+    throw new Error(
+      `[db] Invalid schema: expected a record of Drizzle tables (e.g. { users, posts }), ` +
+      `got ${Array.isArray(schema) ? 'array' : schema === null ? 'null' : typeof schema}.`
+    );
+  }
+
+  for (const [key, value] of Object.entries(schema)) {
+    if (!is(value, Table)) {
+      const got =
+        value === null ? 'null' :
+        value === undefined ? 'undefined' :
+        typeof value;
+      throw new Error(
+        `[db] Invalid schema: '${key}' is not a Drizzle table (got ${got}). ` +
+        `Make sure every value is defined with table() from '@eagerpatch/durable-db/schema'.`
+      );
+    }
+  }
+}
+
+/**
  * Create all recommended plugins for use with Drizzle schemas.
  *
  * Includes:
@@ -366,6 +399,8 @@ export function createDrizzlePlugins(
   schema: Record<string, SQLiteTableWithColumns<any>>,
   camelCase = true
 ): KyselyPlugin[] {
+  assertValidSchema(schema);
+
   const plugins: KyselyPlugin[] = [];
 
   plugins.push(new DrizzleDefaultsPlugin(schema as unknown as Record<string, Table>));

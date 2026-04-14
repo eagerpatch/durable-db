@@ -50,6 +50,12 @@ export function hasTenantId(): boolean {
 }
 
 /**
+ * One-time warning guard: we only log an unexpected dev-epoch load failure
+ * once per process so Vite HMR / repeated lookups don't spam stderr.
+ */
+let loggedDevEpochFailure = false;
+
+/**
  * Get the dev epoch for instance key suffixing
  * Only used in development to allow database resets
  *
@@ -68,8 +74,16 @@ export function getDevInstanceKeySuffix(): string | null {
     // In Vite dev, this will resolve; in production builds, it returns null
     const { getDevEpoch } = require('../cli/state');
     return getDevEpoch(process.cwd());
-  } catch {
-    // CLI not available (production build or worker environment)
+  } catch (e) {
+    // Expected in worker/production builds where the CLI module isn't bundled.
+    // MODULE_NOT_FOUND is silently ignored; anything else is logged once so
+    // unexpected breakage (permissions, malformed state file) is visible.
+    const code = (e as NodeJS.ErrnoException | undefined)?.code;
+    if (code !== 'MODULE_NOT_FOUND' && code !== 'ERR_MODULE_NOT_FOUND' && !loggedDevEpochFailure) {
+      loggedDevEpochFailure = true;
+      const message = e instanceof Error ? e.message : String(e);
+      console.warn(`[durable-db] Could not load dev epoch state (continuing without it): ${message}`);
+    }
     return null;
   }
 }

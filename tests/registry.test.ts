@@ -172,6 +172,26 @@ describe('callAction', () => {
     ).rejects.toThrow('Action not registered');
   });
 
+  it('error for unregistered action lists known actions on that database', async () => {
+    registerAction('errorListDb', 'existingOne', createMockAction('existingOne'));
+    registerAction('errorListDb', 'existingTwo', createMockAction('existingTwo'));
+
+    const ctx = createMockContext('errorListDb');
+    await expect(
+      callAction({}, 'errorListDb', 'missing', {}, ctx)
+    ).rejects.toThrow(/existingOne.*existingTwo|existingTwo.*existingOne/);
+  });
+
+  it('error for unknown database mentions other known databases', async () => {
+    registerAction('knownA', 'foo', createMockAction('foo'));
+    registerAction('knownB', 'bar', createMockAction('bar'));
+
+    const ctx = createMockContext('knownA');
+    await expect(
+      callAction({}, 'totallyUnknownDb', 'foo', {}, ctx)
+    ).rejects.toThrow(/database 'totallyUnknownDb' has no registered actions/);
+  });
+
   it('throws for missing binding on cross-db call', async () => {
     const action = createMockAction('crossAction');
     registerAction('otherDb', 'crossAction', action);
@@ -182,6 +202,114 @@ describe('callAction', () => {
     await expect(
       callAction({}, 'otherDb', 'crossAction', {}, ctx)
     ).rejects.toThrow('Missing binding');
+  });
+
+  it('missing-binding error lists known bindings', async () => {
+    registerAction('unreachable', 'ping', createMockAction('ping'));
+
+    const ctx: RpcContext = {
+      env: {},
+      dbName: 'main',
+      dbBindingNames: { main: 'MAIN_DO', analytics: 'ANALYTICS_DO' },
+      instanceKey: 'test-shop',
+    };
+
+    await expect(
+      callAction({}, 'unreachable', 'ping', {}, ctx)
+    ).rejects.toThrow(/Known database bindings: main, analytics/);
+  });
+
+  it('missing-binding error hints at Vite plugin discovery', async () => {
+    registerAction('unreachable', 'ping', createMockAction('ping'));
+
+    const ctx: RpcContext = {
+      env: {},
+      dbName: 'main',
+      dbBindingNames: { main: 'MAIN_DO' },
+      instanceKey: 'test-shop',
+    };
+
+    await expect(
+      callAction({}, 'unreachable', 'ping', {}, ctx)
+    ).rejects.toThrow(/didn't discover 'unreachable\.ts'/);
+  });
+
+  it('propagates errors from cross-db RPC', async () => {
+    registerAction('analytics', 'explodeRpc', createMockAction('explodeRpc'));
+
+    const rpcSpy = vi.fn().mockRejectedValue(new Error('remote failure'));
+    const ctx = createMockContext('main');
+    ctx.env = {
+      ANALYTICS_DO: {
+        idFromName: vi.fn().mockReturnValue({}),
+        get: vi.fn().mockReturnValue({ rpc: rpcSpy }),
+      },
+    };
+
+    await expect(
+      callAction({}, 'analytics', 'explodeRpc', {}, ctx)
+    ).rejects.toThrow('remote failure');
+  });
+
+  it('uses websocket transport for cross-db when dbTransports says websocket', async () => {
+    registerAction('analytics', 'wsPing', createMockAction('wsPing'));
+
+    // Minimal fake WebSocket round-trip
+    const listeners = new Map<string, Function[]>();
+    const sent: string[] = [];
+    const ws: any = {
+      readyState: 1,
+      accept: vi.fn(),
+      send: vi.fn((data: string) => {
+        sent.push(data);
+        // Echo back a success response using the id from the request
+        const { id } = JSON.parse(data);
+        queueMicrotask(() => {
+          for (const h of listeners.get('message') ?? []) {
+            h({ data: JSON.stringify({ id, ok: true, result: { pong: true } }) });
+          }
+        });
+      }),
+      close: vi.fn(),
+      addEventListener: vi.fn((event: string, handler: Function) => {
+        if (!listeners.has(event)) listeners.set(event, []);
+        listeners.get(event)!.push(handler);
+      }),
+    };
+    const stub = {
+      rpc: vi.fn(),
+      fetch: vi.fn().mockResolvedValue({ webSocket: ws }),
+    };
+
+    const ctx = createMockContext('main');
+    ctx.dbTransports = { analytics: 'websocket' };
+    ctx.env = {
+      ANALYTICS_DO: {
+        idFromName: vi.fn().mockReturnValue({}),
+        get: vi.fn().mockReturnValue(stub),
+      },
+    };
+
+    const result = await callAction({}, 'analytics', 'wsPing', {}, ctx);
+    expect(result).toEqual({ pong: true });
+    expect(stub.rpc).not.toHaveBeenCalled();
+    expect(stub.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('websocket transport also fails fast on missing binding', async () => {
+    registerAction('unreachableWs', 'ping', createMockAction('ping'));
+
+    const ctx: RpcContext = {
+      env: {},
+      dbName: 'main',
+      dbBindingNames: { main: 'MAIN_DO' }, // no unreachableWs entry
+      dbTransports: { unreachableWs: 'websocket' },
+      instanceKey: 'test-shop',
+    };
+
+    await expect(
+      callAction({}, 'unreachableWs', 'ping', {}, ctx)
+    ).rejects.toThrow(/Missing binding for db: unreachableWs/);
   });
 
   it('uses RPC for cross-db calls', async () => {

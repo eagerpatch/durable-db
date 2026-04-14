@@ -137,9 +137,27 @@ describe('parser', () => {
     });
 
     it('returns empty array on unparseable source', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const calls = findActionCallsInSource('not valid {{{ js', new Set(['foo']));
 
       expect(calls).toEqual([]);
+      warnSpy.mockRestore();
+    });
+
+    it('warns with source context when handler is unparseable', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      findActionCallsInSource('not valid {{{ js', new Set(['foo']), {
+        filePath: '/src/databases/main.ts',
+        actionName: 'createUser',
+      });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const message = warnSpy.mock.calls[0][0] as string;
+      expect(message).toContain('main.ts');
+      expect(message).toContain('createUser');
+
+      warnSpy.mockRestore();
     });
   });
 

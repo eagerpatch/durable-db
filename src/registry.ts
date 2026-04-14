@@ -68,7 +68,21 @@ export function getAction(dbName: string, actionName: string): ActionDefinition 
 function getOrThrow(dbName: string, actionName: string): ActionDefinition {
   const entry = getAction(dbName, actionName);
   if (!entry) {
-    throw new Error(`[db] Action not registered: ${dbName}/${actionName}`);
+    const dbMap = actionsByDb.get(dbName);
+    if (!dbMap) {
+      const knownDbs = Array.from(actionsByDb.keys());
+      const dbList = knownDbs.length > 0 ? knownDbs.join(', ') : '(none registered)';
+      throw new Error(
+        `[db] Action not registered: ${dbName}/${actionName} — database '${dbName}' has no registered actions. ` +
+        `Known databases: ${dbList}.`
+      );
+    }
+    const knownActions = Array.from(dbMap.keys());
+    const actionList = knownActions.length > 0 ? knownActions.join(', ') : '(none)';
+    throw new Error(
+      `[db] Action not registered: ${dbName}/${actionName}. ` +
+      `Actions registered on '${dbName}': ${actionList}.`
+    );
   }
   return entry;
 }
@@ -114,7 +128,13 @@ export async function callAction(
   // Cross DB: RPC or WebSocket to the other DO
   const bindingName = ctx.dbBindingNames[targetDb];
   if (!bindingName) {
-    throw new Error(`[db] Missing binding for db: ${targetDb}`);
+    const known = Object.keys(ctx.dbBindingNames);
+    const knownList = known.length > 0 ? known.join(', ') : '(none)';
+    throw new Error(
+      `[db] Missing binding for db: ${targetDb}. ` +
+      `Known database bindings: ${knownList}. ` +
+      `This usually means the Vite plugin didn't discover '${targetDb}.ts' in your databases directory.`
+    );
   }
 
   const binding = ctx.env[bindingName] as {

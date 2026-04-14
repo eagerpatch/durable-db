@@ -24,6 +24,17 @@ export interface DiscoveredFile {
 }
 
 /**
+ * Tracks directories we've already warned about to avoid duplicate noise
+ * on repeated discovery calls (e.g. Vite HMR, multiple plugin hooks).
+ */
+const warnedMissingDirs = new Set<string>();
+
+/** Reset the missing-dir warning cache — for tests. */
+export function __resetDiscoveryWarnings(): void {
+  warnedMissingDirs.clear();
+}
+
+/**
  * Discover database files in the configured directory
  *
  * Looks for .ts files in the databases directory, excluding:
@@ -36,6 +47,14 @@ export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile
   const absoluteDir = path.join(projectRoot, databasesDir);
 
   if (!fs.existsSync(absoluteDir)) {
+    if (!warnedMissingDirs.has(absoluteDir)) {
+      warnedMissingDirs.add(absoluteDir);
+      console.warn(
+        `[durable-db] Databases directory not found: ${absoluteDir}. ` +
+        `No databases will be generated. ` +
+        `Set the 'databasesDir' plugin option if your databases live elsewhere (current: '${databasesDir}').`
+      );
+    }
     return [];
   }
 

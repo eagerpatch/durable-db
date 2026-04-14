@@ -43,8 +43,16 @@ export function generateCode(node: t.Node): string {
 /**
  * Find calls to other actions within a handler's source code
  * Returns the names of actions that are called
+ *
+ * @param source - Handler source code
+ * @param knownActionNames - Set of action names to detect calls to
+ * @param context - Optional source location for diagnostics (shown in warnings)
  */
-export function findActionCallsInSource(source: string, knownActionNames: Set<string>): string[] {
+export function findActionCallsInSource(
+  source: string,
+  knownActionNames: Set<string>,
+  context?: { filePath?: string; actionName?: string }
+): string[] {
   const calls: string[] = [];
 
   try {
@@ -66,6 +74,14 @@ export function findActionCallsInSource(source: string, knownActionNames: Set<st
       },
     });
   } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    const where = context?.filePath
+      ? `${path.basename(context.filePath)}${context.actionName ? ` → ${context.actionName}` : ''}`
+      : context?.actionName ?? 'handler';
+    console.warn(
+      `[durable-db] Could not parse ${where} for cross-action call detection — ` +
+      `cross-DB calls inside this handler will not be transformed. ${message}`
+    );
     debugVite('Failed to parse handler source for action call detection: %O', e);
   }
 

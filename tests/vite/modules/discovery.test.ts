@@ -1,8 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { discoverDatabaseFiles, readFile, resolveImportPath } from '../../../src/vite/modules/discovery';
+import {
+  discoverDatabaseFiles,
+  readFile,
+  resolveImportPath,
+  __resetDiscoveryWarnings,
+} from '../../../src/vite/modules/discovery';
 
 describe('discovery', () => {
   let tempDir: string;
@@ -84,12 +89,29 @@ describe('discovery', () => {
     });
 
     it('returns empty array for non-existent directory', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const discovered = discoverDatabaseFiles({
         projectRoot: tempDir,
         databasesDir: 'src/nonexistent',
       });
 
       expect(discovered).toHaveLength(0);
+      warnSpy.mockRestore();
+    });
+
+    it('warns exactly once when databases directory is missing', () => {
+      __resetDiscoveryWarnings();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      discoverDatabaseFiles({ projectRoot: tempDir, databasesDir: 'src/missing-dbs' });
+      discoverDatabaseFiles({ projectRoot: tempDir, databasesDir: 'src/missing-dbs' });
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const message = warnSpy.mock.calls[0][0] as string;
+      expect(message).toContain('Databases directory not found');
+      expect(message).toContain('src/missing-dbs');
+
+      warnSpy.mockRestore();
     });
 
     it('discovers test files (no filtering by default)', () => {

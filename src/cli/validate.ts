@@ -274,8 +274,15 @@ async function validateDatabase(
             }
           }
         } catch (err) {
+          // Schema comparison is best-effort, but silently skipping it hides
+          // real problems (e.g. a broken schema.ts). Warn with context so the
+          // operator knows the drift check was skipped and why.
+          const message = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[db] Schema drift check skipped for '${db.name}': ${message}. ` +
+            `Migration replay still validated. Run with DEBUG=database:cli for a stack trace.`
+          );
           debugCli('Could not build schema for dual-path comparison: %O', err);
-          // Don't fail validation — schema comparison is best-effort
         }
       }
     }

@@ -83,4 +83,5 @@ export {
   discoverDatabases,
   loadSchema,
   diffSchema,
+  reportCliError,
 } from './shared';

@@ -4,6 +4,7 @@ import { generate } from './generate';
 import { status, formatStatus } from './status';
 import { reset } from './reset';
 import { validate } from './validate';
+import { reportCliError } from './shared';
 
 /**
  * Create a Commander command group with all database subcommands:
@@ -47,7 +48,7 @@ export function createDbCommand(): Command {
           console.log('\nAll databases are up to date.');
         }
       } catch (error) {
-        console.error('Error:', error instanceof Error ? error.message : error);
+        reportCliError(error, options.verbose);
         process.exit(1);
       }
     });
@@ -93,7 +94,7 @@ export function createDbCommand(): Command {
           console.log('\nNo pending changes to generate.');
         }
       } catch (error) {
-        console.error('Error:', error instanceof Error ? error.message : error);
+        reportCliError(error, options.verbose);
         process.exit(1);
       }
     });
@@ -113,7 +114,7 @@ export function createDbCommand(): Command {
 
         console.log(formatStatus(result));
       } catch (error) {
-        console.error('Error:', error instanceof Error ? error.message : error);
+        reportCliError(error, options.verbose);
         process.exit(1);
       }
     });
@@ -150,7 +151,7 @@ export function createDbCommand(): Command {
           console.log(`· No databases to reset`);
         }
       } catch (error) {
-        console.error('Error:', error instanceof Error ? error.message : error);
+        reportCliError(error, options.verbose);
         process.exit(1);
       }
     });
@@ -208,7 +209,7 @@ export function createDbCommand(): Command {
           process.exit(1);
         }
       } catch (error) {
-        console.error('Error:', error instanceof Error ? error.message : error);
+        reportCliError(error, options.verbose);
         process.exit(1);
       }
     });

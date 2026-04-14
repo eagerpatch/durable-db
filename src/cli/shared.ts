@@ -8,6 +8,27 @@ import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
 // ============================================================================
+// Error reporting
+// ============================================================================
+
+/**
+ * Print a caught error to stderr. Always shows the message; when verbose
+ * (flag or `DEBUG=*`) is set, also prints the stack so users can diagnose
+ * unexpected failures without patching the CLI.
+ */
+export function reportCliError(error: unknown, verbose = false): void {
+  const showStack = verbose || Boolean(process.env.DEBUG);
+  if (error instanceof Error) {
+    console.error('Error:', error.message);
+    if (showStack && error.stack) {
+      console.error(error.stack);
+    }
+    return;
+  }
+  console.error('Error:', error);
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -83,6 +104,13 @@ export async function loadSchema(db: DatabaseInfo): Promise<Record<string, unkno
   try {
     schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
   } catch (error) {
+    // Warn loudly: silently skipping a database is how a typo in schema.ts
+    // becomes "why is my migration empty" 20 minutes later.
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[db] Could not build schema for database '${db.name}' (${schemaPath}): ${message}. ` +
+      `This database will be skipped. Run with DEBUG=database:cli or --verbose for a stack trace.`
+    );
     debugCli('Failed to load schema for %s: %O', db.name, error);
     return null;
   }

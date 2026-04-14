@@ -862,7 +862,7 @@ After 3 consecutive failed migration attempts, PITR restore is skipped and the e
 
 **Do this:**
 
-1. Check which migration broke by calling `getMigrationAttempts()` on the DO -- it returns `{ attemptCount, lastAttemptAt, lastError }`.
+1. Inspect current state with `getMigrationStatus()` on the DO -- it returns `{ attempts, pending, applied, pitrAvailable, pitrAttemptsRemaining }`, so you can see exactly which migration is stuck and how many PITR retries are left. (`getMigrationAttempts()` still exists if you only need the attempts counter.)
 2. Fix the offending `.sql` file in `migrations/<db>/`. Typical culprits: non-nullable column added without a default, a `DROP COLUMN` on a table with data, an index name collision.
 3. Redeploy. The next request will attempt the (now fixed) migration against the pre-migration state -- no manual reset needed.
 4. If you're certain the DO is already in a bad state (e.g. a migration was half-applied before the bookmark logic landed), call `restoreToBookmark(bookmark)` manually from a worker route with a known-good bookmark, then redeploy.

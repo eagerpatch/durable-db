@@ -99,6 +99,13 @@ class MockSqlStorage {
       return new MockSqlCursor(this.tables.get('__migrations') ?? []);
     }
 
+    // Simulate SELECT DISTINCT name FROM __migrations
+    if (/SELECT DISTINCT name FROM __migrations/i.test(sql)) {
+      const rows = this.tables.get('__migrations') ?? [];
+      const names = Array.from(new Set(rows.map(r => r.name)));
+      return new MockSqlCursor(names.map(name => ({ name })));
+    }
+
     // Simulate INSERT INTO __migrations
     if (/INSERT INTO __migrations/i.test(sql)) {
       const rows = this.tables.get('__migrations') ?? [];
@@ -391,6 +398,126 @@ describe('SqliteDurableObject', () => {
 
       expect(onNextSessionRestoreBookmark).toHaveBeenCalledWith('my-bookmark');
       expect(abort).toHaveBeenCalledWith('Restoring to pre-migration bookmark');
+    });
+
+    it('getMigrationStatus reports empty pending/applied on a fresh DO', async () => {
+      const { state } = createMockDurableObjectState({ pitrAvailable: false });
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {};
+
+      const status = await dobj.getMigrationStatus();
+      expect(status.pending).toEqual([]);
+      expect(status.applied).toEqual([]);
+      expect(status.pitrAvailable).toBe(false);
+      expect(status.pitrAttemptsRemaining).toBe(0);
+      expect(status.attempts.attemptCount).toBe(0);
+    });
+
+    it('getMigrationStatus separates pending from applied', async () => {
+      const { state } = createMockDurableObjectState({ pitrAvailable: false });
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_initial': { chunks: [['CREATE TABLE users (id TEXT PRIMARY KEY)']] },
+        '20240201_second': { chunks: [['CREATE TABLE posts (id TEXT PRIMARY KEY)']] },
+      };
+
+      // Apply only the first migration
+      await dobj.fetch(new Request('http://test/'));
+
+      // Now add an additional not-yet-applied migration
+      dobj.migrations['20240301_third'] = {
+        chunks: [['CREATE TABLE comments (id TEXT PRIMARY KEY)']],
+      };
+
+      const status = await dobj.getMigrationStatus();
+      expect(status.applied).toEqual(['20240101_initial', '20240201_second']);
+      expect(status.pending).toEqual(['20240301_third']);
+    });
+
+    it('getMigrationStatus reports PITR attempts remaining', async () => {
+      const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: true });
+
+      // Seed attempt counter at 2
+      mockSql.exec(
+        'CREATE TABLE IF NOT EXISTS __migration_attempts (id TEXT PRIMARY KEY, attempt_count INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, last_error TEXT)'
+      );
+      mockSql.exec(
+        "INSERT OR IGNORE INTO __migration_attempts (id, attempt_count) VALUES ('current', 0)"
+      );
+      const rows = (mockSql as any).tables.get('__migration_attempts');
+      rows[0].attempt_count = 2;
+
+      const dobj = new TestDurableObject(state, {});
+      const status = await dobj.getMigrationStatus();
+
+      expect(status.pitrAvailable).toBe(true);
+      expect(status.attempts.attemptCount).toBe(2);
+      // MAX_PITR_ATTEMPTS is 3, so 3 + 1 - 2 = 2 retries remaining
+      expect(status.pitrAttemptsRemaining).toBe(2);
+    });
+  });
+
+  describe('migration error logging', () => {
+    it('logs the failing statement and its position within the chunk', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { state } = createMockDurableObjectState({ pitrAvailable: false });
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_bad': {
+          chunks: [
+            [
+              'CREATE TABLE ok_one (id TEXT PRIMARY KEY)',
+              'INVALID SQL HERE',
+              'CREATE TABLE never_reached (id TEXT PRIMARY KEY)',
+            ],
+          ],
+        },
+      };
+
+      await expect(dobj.fetch(new Request('http://test/'))).rejects.toThrow();
+
+      const chunkFailLog = errSpy.mock.calls.find(
+        call => typeof call[0] === 'string' && call[0].includes('Migration chunk failed')
+      );
+      expect(chunkFailLog).toBeDefined();
+      expect(chunkFailLog![0]).toContain('20240101_bad[0]');
+      expect(chunkFailLog![0]).toContain('stmt 1');
+      expect(chunkFailLog![0]).toContain('INVALID SQL HERE');
+
+      errSpy.mockRestore();
+    });
+
+    it('PITR-exhausted log includes pending migration names', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: true });
+
+      // Seed counter at MAX_PITR_ATTEMPTS so the next attempt trips the cap
+      mockSql.exec(
+        'CREATE TABLE IF NOT EXISTS __migration_attempts (id TEXT PRIMARY KEY, attempt_count INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, last_error TEXT)'
+      );
+      mockSql.exec(
+        "INSERT OR IGNORE INTO __migration_attempts (id, attempt_count) VALUES ('current', 0)"
+      );
+      const rows = (mockSql as any).tables.get('__migration_attempts');
+      rows[0].attempt_count = 3;
+      rows[0].last_error = 'previous failure';
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_bad': { chunks: [['INVALID SQL']] },
+      };
+
+      await expect(dobj.fetch(new Request('http://test/'))).rejects.toThrow();
+
+      const exhaustedLog = errSpy.mock.calls.find(
+        call => typeof call[0] === 'string' && call[0].includes('PITR restore disabled')
+      );
+      expect(exhaustedLog).toBeDefined();
+      expect(exhaustedLog![0]).toContain('20240101_bad');
+      expect(exhaustedLog![0]).toContain('previous failure');
+
+      errSpy.mockRestore();
     });
   });
 

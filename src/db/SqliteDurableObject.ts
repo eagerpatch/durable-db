@@ -207,6 +207,37 @@ export interface MigrationAttemptInfo {
 }
 
 /**
+ * Consolidated migration status returned by getMigrationStatus().
+ * Combines attempt diagnostics with the DO's current pending/applied
+ * state so operators can answer "what's going on with this DO?" in a
+ * single call.
+ */
+export interface MigrationStatus {
+  /** Attempt counter from __migration_attempts. */
+  attempts: MigrationAttemptInfo;
+  /** Names of migrations that exist in code but haven't been applied. */
+  pending: string[];
+  /** Names of migrations that have been applied (at least one chunk). */
+  applied: string[];
+  /** Whether the underlying storage supports PITR bookmarks. */
+  pitrAvailable: boolean;
+  /**
+   * Remaining PITR-protected retries before PITR is disabled. Clamped to
+   * 0; always 0 when pitrAvailable is false.
+   */
+  pitrAttemptsRemaining: number;
+}
+
+/**
+ * Truncate a SQL statement for logging. Collapses whitespace so multi-line
+ * statements render on one log line.
+ */
+function formatStatementForLog(statement: string, max = 120): string {
+  const collapsed = statement.replace(/\s+/g, ' ').trim();
+  return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed;
+}
+
+/**
  * Base class for SQLite Durable Objects with migration support
  *
  * Extend this class and set the `migrations` property to define your schema.
@@ -377,9 +408,14 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
       if (attemptCount > MAX_PITR_ATTEMPTS) {
         // Too many retries — skip PITR, let error propagate naturally
+        const lastError = this.readLastMigrationError();
+        const pendingNames = pending.map(p => p.name);
+        const uniquePending = Array.from(new Set(pendingNames));
         console.error(
           `[database] Migration has failed ${attemptCount} times. ` +
-          `PITR restore disabled — fix the migration and redeploy.`
+          `PITR restore disabled — fix the migration and redeploy. ` +
+          `Pending: ${uniquePending.join(', ') || '(none)'}. ` +
+          `Last error: ${lastError ?? '(unknown)'}`
         );
       } else {
         // Take bookmark AFTER the counter write (so counter survives restore)
@@ -407,8 +443,13 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           UPDATE __migration_attempts SET last_error = ? WHERE id = 'current'
         `, errorMessage);
 
+        const attempts = this.getMigrationAttempts();
+        const remaining = Math.max(0, MAX_PITR_ATTEMPTS + 1 - attempts.attemptCount);
+        const pendingNames = Array.from(new Set(pending.map(p => p.name))).join(', ');
         console.error(
-          `[database] Migration failed, restoring to pre-migration bookmark.`,
+          `[database] Migration failed (attempt ${attempts.attemptCount}/${MAX_PITR_ATTEMPTS + 1}, ` +
+          `${remaining} PITR-protected retries remaining). ` +
+          `Restoring to pre-migration bookmark. Pending: ${pendingNames || '(none)'}.`,
           error
         );
 
@@ -467,12 +508,22 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     pending: Array<{ name: string; chunkIndex: number; statements: string[] }>
   ): void {
     for (const { name, chunkIndex, statements } of pending) {
+      // Track which statement is executing so the catch can report it.
+      // A chunk may contain many statements and the raised error doesn't
+      // carry a statement index of its own.
+      let currentIndex = -1;
+      let currentStatement: string | null = null;
       try {
-        for (const statement of statements) {
-          if (statement.trim()) {
-            this.sql.exec(statement);
-          }
+        for (let i = 0; i < statements.length; i++) {
+          const statement = statements[i];
+          if (!statement.trim()) continue;
+          currentIndex = i;
+          currentStatement = statement;
+          this.sql.exec(statement);
         }
+
+        currentIndex = -1;
+        currentStatement = null;
 
         this.sql.exec(
           'INSERT INTO __migrations (name, chunk_index, applied_at) VALUES (?, ?, ?)',
@@ -483,7 +534,13 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
         debugMigrations('Migration chunk applied: %s[%d]', name, chunkIndex);
       } catch (error) {
-        console.error(`[database] Migration chunk failed: ${name}[${chunkIndex}]`, error);
+        const location = currentStatement !== null
+          ? ` stmt ${currentIndex}: ${formatStatementForLog(currentStatement)}`
+          : ' (while recording chunk as applied)';
+        console.error(
+          `[database] Migration chunk failed: ${name}[${chunkIndex}]${location}`,
+          error
+        );
         throw error;
       }
     }
@@ -532,6 +589,60 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       // Table doesn't exist yet (no migrations have run)
       return { attemptCount: 0, lastAttemptAt: null, lastError: null };
     }
+  }
+
+  /**
+   * Read the last recorded migration error, or null if unavailable.
+   * Used for enriching PITR-exhausted log output.
+   */
+  private readLastMigrationError(): string | null {
+    try {
+      return this.getMigrationAttempts().lastError;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get a consolidated snapshot of migration state: attempts, pending and
+   * applied migration names, and PITR availability. Useful for building
+   * admin/debug endpoints without exposing internal SQL.
+   */
+  async getMigrationStatus(): Promise<MigrationStatus> {
+    const attempts = this.getMigrationAttempts();
+    const pitrAvailable = await this.checkPitrAvailable();
+    const pitrAttemptsRemaining = pitrAvailable
+      ? Math.max(0, MAX_PITR_ATTEMPTS + 1 - attempts.attemptCount)
+      : 0;
+
+    const appliedSet = new Set<string>();
+    try {
+      const rows = this.sql.exec(
+        'SELECT DISTINCT name FROM __migrations'
+      ).toArray() as Array<{ name: string }>;
+      for (const row of rows) appliedSet.add(row.name);
+    } catch {
+      // __migrations table doesn't exist yet (first run) — treat as empty
+    }
+
+    const migrationNames = Object.keys(this.migrations).sort();
+    const applied: string[] = [];
+    const pending: string[] = [];
+    for (const name of migrationNames) {
+      if (appliedSet.has(name)) {
+        applied.push(name);
+      } else {
+        pending.push(name);
+      }
+    }
+
+    return {
+      attempts,
+      pending,
+      applied,
+      pitrAvailable,
+      pitrAttemptsRemaining,
+    };
   }
 
   /**

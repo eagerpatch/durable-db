@@ -77,17 +77,30 @@ export async function generateMigrationStatements(
 }
 
 /**
+ * Serialize the schema-relevant parts of a snapshot for comparison/hashing.
+ * Includes tables, views, and enums so that changes to any of them are
+ * detected — previously only `tables` was considered.
+ */
+function serializeSchemaShape(snapshot: Snapshot): string {
+  return JSON.stringify({
+    tables: snapshot.tables ?? {},
+    views: snapshot.views ?? {},
+    enums: snapshot.enums ?? {},
+  });
+}
+
+/**
  * Check if two snapshots are equivalent (no migration needed)
  */
 export function snapshotsEqual(a: Snapshot, b: Snapshot): boolean {
-  return JSON.stringify(a.tables) === JSON.stringify(b.tables);
+  return serializeSchemaShape(a) === serializeSchemaShape(b);
 }
 
 /**
  * Create a hash of a snapshot for quick comparison
  */
 export function hashSnapshot(snapshot: Snapshot): string {
-  const content = JSON.stringify(snapshot.tables);
+  const content = serializeSchemaShape(snapshot);
   // Simple hash for comparison purposes
   let hash = 0;
   for (let i = 0; i < content.length; i++) {

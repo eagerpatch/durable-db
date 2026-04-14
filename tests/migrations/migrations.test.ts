@@ -42,6 +42,22 @@ describe('migrations', () => {
 
       expect(snapshotsEqual(a, b)).toBe(false);
     });
+
+    it('returns false when views differ', () => {
+      const a = createEmptySnapshot();
+      const b = createEmptySnapshot();
+      b.views = { active_users: { name: 'active_users' } } as any;
+
+      expect(snapshotsEqual(a, b)).toBe(false);
+    });
+
+    it('returns false when enums differ', () => {
+      const a = createEmptySnapshot();
+      const b = createEmptySnapshot();
+      b.enums = { role: { name: 'role', values: ['admin', 'user'] } } as any;
+
+      expect(snapshotsEqual(a, b)).toBe(false);
+    });
   });
 
   describe('hashSnapshot', () => {

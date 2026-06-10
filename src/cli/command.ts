@@ -1,0 +1,243 @@
+import { Command } from 'commander';
+import { push } from './push';
+import { generate } from './generate';
+import { status, formatStatus } from './status';
+import { reset } from './reset';
+import { validate } from './validate';
+import { reportCliError } from './shared';
+
+/**
+ * Register all database subcommands (push, generate, status, reset,
+ * validate) directly on the given Commander command.
+ *
+ * Use this to flatten the commands onto your own program — the standalone
+ * `db` binary does this so `db push` works without a nested group:
+ *
+ *   registerDbCommands(program);          // → `mycli push`
+ *
+ * Or use {@link createDbCommand} to mount them as a `db` group:
+ *
+ *   program.addCommand(createDbCommand()); // → `mycli db push`
+ */
+export function registerDbCommands(program: Command): Command {
+  program.command('push')
+    .description('Push schema changes to dev migrations')
+    .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+    .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
+    .option('-v, --verbose', 'Verbose output')
+    .action(async (options) => {
+      try {
+        const results = await push({
+          databasesDir: options.databasesDir,
+          migrationsDir: options.migrationsDir,
+          verbose: options.verbose,
+        });
+
+        if (results.length === 0) {
+          console.log('No databases found.');
+          return;
+        }
+
+        let hasChanges = false;
+        for (const r of results) {
+          if (r.hasChanges) {
+            hasChanges = true;
+            console.log(`✓ ${r.database}: ${r.migrationName} (${r.statements.length} statements)`);
+          } else {
+            console.log(`· ${r.database}: no changes`);
+          }
+        }
+
+        if (!hasChanges) {
+          console.log('\nAll databases are up to date.');
+        }
+      } catch (error) {
+        reportCliError(error, options.verbose);
+        process.exit(1);
+      }
+    });
+
+  program.command('generate [name]')
+    .description('Generate production migration from schema changes')
+    .option('--database <db>', 'Only generate for this database')
+    .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+    .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
+    .option('-v, --verbose', 'Verbose output')
+    .action(async (name, options) => {
+      try {
+        const results = await generate(
+          {
+            databasesDir: options.databasesDir,
+            migrationsDir: options.migrationsDir,
+            verbose: options.verbose,
+          },
+          {
+            name,
+            database: options.database,
+          }
+        );
+
+        if (results.length === 0) {
+          console.log('No databases found.');
+          return;
+        }
+
+        let hasChanges = false;
+        for (const r of results) {
+          if (r.hasChanges) {
+            hasChanges = true;
+            console.log(`✓ ${r.database}: ${r.migrationName}`);
+            console.log(`  → ${r.migrationPath}`);
+            console.log(`  ${r.statements.length} statement(s)`);
+          } else {
+            console.log(`· ${r.database}: no changes`);
+          }
+        }
+
+        if (!hasChanges) {
+          console.log('\nNo pending changes to generate.');
+        }
+      } catch (error) {
+        reportCliError(error, options.verbose);
+        process.exit(1);
+      }
+    });
+
+  program.command('status')
+    .description('Show database migration status')
+    .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+    .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
+    .option('-v, --verbose', 'Verbose output')
+    .action(async (options) => {
+      try {
+        const result = await status({
+          databasesDir: options.databasesDir,
+          migrationsDir: options.migrationsDir,
+          verbose: options.verbose,
+        });
+
+        console.log(formatStatus(result));
+      } catch (error) {
+        reportCliError(error, options.verbose);
+        process.exit(1);
+      }
+    });
+
+  program.command('reset')
+    .description('Reset dev state and create fresh DB instances (via epoch bump)')
+    .option('--keep-epoch', 'Only clear dev migrations, keep the same epoch')
+    .option('--purge-local-storage', "Also delete workerd's persisted DO storage under .wrangler/ (requires the dev server to be stopped)")
+    .option('--database <db>', 'Only reset this database')
+    .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+    .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
+    .option('-v, --verbose', 'Verbose output')
+    .action(async (options) => {
+      try {
+        const result = await reset(
+          {
+            databasesDir: options.databasesDir,
+            verbose: options.verbose,
+          },
+          {
+            keepEpoch: options.keepEpoch,
+            purgeLocalStorage: options.purgeLocalStorage,
+            database: options.database,
+          }
+        );
+
+        if (result.newEpoch) {
+          console.log(`✓ New epoch: ${result.newEpoch} — databases start fresh on the next request`);
+        } else {
+          console.log(`✓ Epoch unchanged`);
+        }
+
+        if (result.databases.length > 0) {
+          console.log(`✓ Reset databases: ${result.databases.join(', ')}`);
+        } else {
+          console.log(`· No databases to reset`);
+        }
+
+        if (result.clearedStorageDirs.length > 0) {
+          console.log(`✓ Purged local DO storage: ${result.clearedStorageDirs.join(', ')}`);
+          console.log(
+            '  Note: if a dev server was running, restart it — workerd keeps deleted DO state open until restart.'
+          );
+        }
+      } catch (error) {
+        reportCliError(error, options.verbose);
+        process.exit(1);
+      }
+    });
+
+  program.command('validate')
+    .description('Dry-run migrations against local SQLite to catch errors before deployment')
+    .option('--database <db>', 'Only validate this database')
+    .option('--no-dev', 'Skip dev migrations, only validate production')
+    .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
+    .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
+    .option('-v, --verbose', 'Show each migration as it is applied')
+    .action(async (options) => {
+      try {
+        const results = await validate({
+          databasesDir: options.databasesDir,
+          migrationsDir: options.migrationsDir,
+          verbose: options.verbose,
+          noDev: !options.dev,
+          database: options.database,
+        });
+
+        if (results.length === 0) {
+          console.log('No databases found.');
+          return;
+        }
+
+        let allValid = true;
+        for (const r of results) {
+          const status = r.migrationsValid ? '✓' : '✗';
+          const devNote = r.includesDevMigrations ? ' (includes dev migrations)' : '';
+          console.log(`${status} ${r.database}: ${r.migrationCount} migration(s)${devNote}`);
+
+          if (!r.migrationsValid) {
+            allValid = false;
+            for (const err of r.errors) {
+              console.error(`  ✗ ${err.migration}[${err.chunk}]: ${err.error}`);
+              if (options.verbose) {
+                console.error(`    Statement: ${err.statement}`);
+              }
+            }
+          }
+
+          if (!r.schemaMatches) {
+            allValid = false;
+            console.warn(`  ⚠ Schema drift detected:`);
+            for (const diff of r.schemaDiffs) {
+              console.warn(`    ${diff}`);
+            }
+          } else if (r.migrationsValid) {
+            console.log(`  Schema matches ✓`);
+          }
+        }
+
+        if (!allValid) {
+          process.exit(1);
+        }
+      } catch (error) {
+        reportCliError(error, options.verbose);
+        process.exit(1);
+      }
+    });
+
+  return program;
+}
+
+/**
+ * Create a Commander command group named `db` with all database
+ * subcommands. Mount it in a host CLI with
+ * `program.addCommand(createDbCommand())` so the commands live under a
+ * `db` prefix (e.g. `mycli db push`).
+ */
+export function createDbCommand(): Command {
+  return registerDbCommands(
+    new Command('db').description('Database migration management')
+  );
+}

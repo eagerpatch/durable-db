@@ -1,0 +1,47 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  # Node 20 action runtimes are deprecated (removed from runners on
+  # 2026-09-16); run actions that haven't shipped a node24 major yet
+  # (pnpm/action-setup, changesets/action) on Node 24 now.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      # Required for npm Trusted Publishing (OIDC) — no NPM_TOKEN needed
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - run: pnpm install --frozen-lockfile
+
+      # npm >= 11.5.1 is required for OIDC trusted publishing
+      - run: npm install -g npm@latest
+
+      - run: pnpm build
+
+      - run: pnpm test:run
+
+      - name: Create release PR or publish
+        uses: changesets/action@v1
+        with:
+          publish: pnpm changeset publish
+          title: "Version package"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

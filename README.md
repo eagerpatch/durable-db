@@ -515,6 +515,22 @@ Schema drift (migrations ran cleanly but produce a different schema than your Dr
 | `0` | All validations passed |
 | `1` | Validation errors found |
 
+### Embedding in your own CLI
+
+The commands are composable Commander commands, so a host CLI can re-use them:
+
+```ts
+import { Command } from 'commander';
+import { createDbCommand, registerDbCommands } from '@eagerpatch/durable-db/cli';
+
+// As a nested `db` group: `mycli db push`
+program.addCommand(createDbCommand());
+
+// Or flat on your own command: `mycli push`
+// (this is exactly what the standalone `db` binary does)
+registerDbCommands(program);
+```
+
 ### Programmatic API
 
 All CLI functions are also available for integration into other tools:

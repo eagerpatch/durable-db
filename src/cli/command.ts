@@ -7,16 +7,20 @@ import { validate } from './validate';
 import { reportCliError } from './shared';
 
 /**
- * Create a Commander command group with all database subcommands:
- * push, generate, status, reset, validate.
+ * Register all database subcommands (push, generate, status, reset,
+ * validate) directly on the given Commander command.
  *
- * Mount it in your CLI with `program.addCommand(createDbCommand())`.
+ * Use this to flatten the commands onto your own program — the standalone
+ * `db` binary does this so `db push` works without a nested group:
+ *
+ *   registerDbCommands(program);          // → `mycli push`
+ *
+ * Or use {@link createDbCommand} to mount them as a `db` group:
+ *
+ *   program.addCommand(createDbCommand()); // → `mycli db push`
  */
-export function createDbCommand(): Command {
-  const db = new Command('db')
-    .description('Database migration management');
-
-  db.command('push')
+export function registerDbCommands(program: Command): Command {
+  program.command('push')
     .description('Push schema changes to dev migrations')
     .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
@@ -53,7 +57,7 @@ export function createDbCommand(): Command {
       }
     });
 
-  db.command('generate [name]')
+  program.command('generate [name]')
     .description('Generate production migration from schema changes')
     .option('--database <db>', 'Only generate for this database')
     .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
@@ -99,7 +103,7 @@ export function createDbCommand(): Command {
       }
     });
 
-  db.command('status')
+  program.command('status')
     .description('Show database migration status')
     .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
@@ -119,7 +123,7 @@ export function createDbCommand(): Command {
       }
     });
 
-  db.command('reset')
+  program.command('reset')
     .description('Reset dev state and create fresh DB instances (via epoch bump)')
     .option('--keep-epoch', 'Only clear dev migrations, keep the same epoch')
     .option('--purge-local-storage', "Also delete workerd's persisted DO storage under .wrangler/ (requires the dev server to be stopped)")
@@ -165,7 +169,7 @@ export function createDbCommand(): Command {
       }
     });
 
-  db.command('validate')
+  program.command('validate')
     .description('Dry-run migrations against local SQLite to catch errors before deployment')
     .option('--database <db>', 'Only validate this database')
     .option('--no-dev', 'Skip dev migrations, only validate production')
@@ -223,5 +227,17 @@ export function createDbCommand(): Command {
       }
     });
 
-  return db;
+  return program;
+}
+
+/**
+ * Create a Commander command group named `db` with all database
+ * subcommands. Mount it in a host CLI with
+ * `program.addCommand(createDbCommand())` so the commands live under a
+ * `db` prefix (e.g. `mycli db push`).
+ */
+export function createDbCommand(): Command {
+  return registerDbCommands(
+    new Command('db').description('Database migration management')
+  );
 }

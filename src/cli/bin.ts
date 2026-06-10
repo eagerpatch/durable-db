@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { createDbCommand } from './index';
+import { registerDbCommands } from './index';
 
 const program = new Command();
 
 program
   .name('db')
-  .version('0.0.1')
-  .addCommand(createDbCommand());
+  .description('Database migration management')
+  .version('0.0.1');
+
+// Flat registration: the standalone binary exposes `db push`, not `db db push`
+registerDbCommands(program);
 
 program.parse();

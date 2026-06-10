@@ -10,4 +10,6 @@ Fix four bugs found while dogfooding, plus live dev-state reloading:
 - **`db reset` actually gives fresh databases**: the dev epoch is now baked into generated stubs via the `virtual:eagerpatch/durable-db/__devEpoch` module (`applyDevEpoch(key)`, identity in production builds). A reset's epoch bump rotates every database to a brand-new DO instance on the next request — no storage deletion, dev server can keep running. New opt-in `db reset --purge-local-storage` deletes the orphaned instances under `.wrangler/state/v3/do`.
 - **Live CLI integration**: the Vite dev server watches durable-db's dev cache, so `db reset` and `db push` take effect immediately (epoch + embedded dev migrations reload) without restarting.
 
+- **Flat `db` binary**: the standalone CLI is now `db push`/`db reset`/… instead of the accidental `db db push`. The commands remain reusable in host CLIs: `createDbCommand()` mounts them as a nested `db` group, and the new `registerDbCommands(program)` registers them flat on any Commander command.
+
 Note: in development, DO instance keys are now suffixed with `__dev_<epoch>`; production keys are unchanged. `getInstanceKey`/`getDevInstanceKeySuffix` from `./context` are deprecated in favor of the virtual module.

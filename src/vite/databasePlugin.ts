@@ -257,19 +257,38 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
         }
       });
 
-      // Watch the CLI dev-state file so a `db reset` (epoch bump) takes
-      // effect while the dev server is running: the __devEpoch virtual
-      // module is invalidated and stubs pick up the new instance-key
-      // suffix on the next request — fresh databases, no restart needed.
-      // (fs.watchFile because Vite's watcher ignores node_modules.)
-      const stateFile = getDevPaths(state.projectRoot).stateFile;
-      fs.unwatchFile(stateFile);
-      fs.watchFile(stateFile, { interval: 500 }, () => {
-        debugVite('Dev state changed, refreshing dev epoch');
-        state.invalidateDevEpochModule();
-        server.ws.send({ type: 'full-reload' });
-      });
-      server.httpServer?.once('close', () => fs.unwatchFile(stateFile));
+      // Watch durable-db's dev cache (state.json + dev migrations) so CLI
+      // commands take effect while the dev server is running:
+      // - `db reset` bumps the epoch → __devEpoch reloads, stubs rotate to
+      //   fresh DO instances on the next request
+      // - `db push` rewrites the squashed dev migration → plugin state is
+      //   re-initialized so the DO module re-embeds migrations from disk
+      // (fs.watch because Vite's watcher ignores node_modules.)
+      const devPaths = getDevPaths(state.projectRoot);
+      fs.mkdirSync(devPaths.cacheDir, { recursive: true });
+
+      let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+      const onDevStateChange = () => {
+        if (reloadTimer) clearTimeout(reloadTimer);
+        reloadTimer = setTimeout(() => {
+          debugVite('Dev state changed; reloading durable-db modules');
+          state.reset();
+          state.invalidateDOModule();
+          state.invalidateDevEpochModule();
+          server.ws.send({ type: 'full-reload' });
+        }, 100);
+      };
+
+      try {
+        const cacheWatcher = fs.watch(devPaths.cacheDir, { recursive: true }, onDevStateChange);
+        server.httpServer?.once('close', () => cacheWatcher.close());
+      } catch {
+        // Recursive fs.watch is unavailable on some platforms — fall back
+        // to polling the state file, which still covers `db reset`.
+        fs.unwatchFile(devPaths.stateFile);
+        fs.watchFile(devPaths.stateFile, { interval: 500 }, onDevStateChange);
+        server.httpServer?.once('close', () => fs.unwatchFile(devPaths.stateFile));
+      }
     },
 
     buildStart() {
@@ -293,11 +312,15 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
         const isDev = state.config.command === 'serve';
         let epoch: string | null = null;
         if (isDev) {
-          // Persist immediately: loadDevState mints a new epoch when no
-          // state file exists, and an unsaved epoch would differ on every
-          // reload, silently orphaning dev databases.
+          // Persist a newly minted epoch immediately: loadDevState mints
+          // one when no state file exists, and an unsaved epoch would
+          // differ on every reload, silently orphaning dev databases.
+          // Only write when missing — an unconditional write would
+          // retrigger the cache watcher and loop forever.
           const devState = loadDevState(state.projectRoot);
-          saveDevState(state.projectRoot, devState);
+          if (!fs.existsSync(getDevPaths(state.projectRoot).stateFile)) {
+            saveDevState(state.projectRoot, devState);
+          }
           epoch = devState.epoch;
         }
         return { code: generateDevEpochModule(epoch) };

@@ -204,7 +204,8 @@ async function validateDatabase(
 
   // Apply migrations to in-memory SQLite
   // Apply prod migrations first (sorted), then dev migrations (sorted) —
-  // dev migration names (e.g. 0001_dev) don't sort correctly relative to prod names
+  // dev migration names (e.g. dev_a1b2c3d4) don't sort correctly relative
+  // to prod timestamp names
   const migrationsDb = new Database(':memory:');
   try {
     const sortedNames = [

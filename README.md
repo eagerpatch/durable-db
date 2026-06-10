@@ -586,7 +586,7 @@ When you run `db reset` (without `--keep-epoch`), a new epoch is generated. This
 
 The epoch is a base36-encoded timestamp stored in `node_modules/.cache/@eagerpatch/durable-db/state.json`.
 
-**How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:eagerpatch/durable-db/__devEpoch`) exporting `applyDevEpoch(key)`, and every generated stub routes its instance key through it. In dev the plugin embeds the current epoch from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches `state.json` and invalidates the virtual module on change, so an epoch bump from `db reset` takes effect on the next request without restarting.
+**How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:eagerpatch/durable-db/__devEpoch`) exporting `applyDevEpoch(key)`, and every generated stub routes its instance key through it. In dev the plugin embeds the current epoch from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches durable-db's dev cache directory and reloads on change, so both `db reset` (new epoch → fresh instances) and `db push` (new dev migration → re-embedded into the DO module) take effect on the next request without restarting.
 
 ### Dev State Structure
 

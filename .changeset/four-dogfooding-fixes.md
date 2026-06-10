@@ -1,0 +1,13 @@
+---
+"@eagerpatch/durable-db": minor
+---
+
+Fix four bugs found while dogfooding, plus live dev-state reloading:
+
+- **Same-file actions work**: `action()` definitions in the same file as `defineDatabase()` are now transformed into RPC stubs like separate action files, instead of throwing "Action called without transformation" at runtime.
+- **Schema loading fails loudly**: `db push`/`generate`/`status`/`validate` now error (exit 1) when declared schema tables can't be loaded — inline table definitions, unresolvable schema imports, build failures, or missing exports — instead of silently reporting "no changes".
+- **Text date columns round-trip verbatim**: `text()` columns holding ISO date strings no longer come back as `null` over the action RPC. `DateSerializePlugin` only deserializes the exact `YYYY-MM-DD HH:MM:SS` format its write path produces, never double-appends timezone markers, and is schema-aware via `createDrizzlePlugins` (only Drizzle date-typed columns convert to `Date`).
+- **`db reset` actually gives fresh databases**: the dev epoch is now baked into generated stubs via the `virtual:eagerpatch/durable-db/__devEpoch` module (`applyDevEpoch(key)`, identity in production builds). A reset's epoch bump rotates every database to a brand-new DO instance on the next request — no storage deletion, dev server can keep running. New opt-in `db reset --purge-local-storage` deletes the orphaned instances under `.wrangler/state/v3/do`.
+- **Live CLI integration**: the Vite dev server watches durable-db's dev cache, so `db reset` and `db push` take effect immediately (epoch + embedded dev migrations reload) without restarting.
+
+Note: in development, DO instance keys are now suffixed with `__dev_<epoch>`; production keys are unchanged. `getInstanceKey`/`getDevInstanceKeySuffix` from `./context` are deprecated in favor of the virtual module.

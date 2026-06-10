@@ -189,14 +189,49 @@ class PluginState {
     this.invalidateVirtualModule(VIRTUAL_DEV_EPOCH_MODULE_ID);
   }
 
+  /**
+   * Invalidate a virtual module in every module graph.
+   *
+   * On Vite 6+ each environment (client, ssr, and e.g. the Cloudflare
+   * plugin's `worker` environment) has its own module graph — the legacy
+   * `server.moduleGraph` only proxies client/ssr, so invalidating there
+   * never reaches the worker. On Vite 5 only the legacy graph exists.
+   */
   private invalidateVirtualModule(virtualId: string): void {
     if (!this.devServer) return;
 
-    for (const mod of this.devServer.moduleGraph.idToModuleMap.values()) {
-      const id = mod.id ?? '';
-      if (id === virtualId || id.startsWith(virtualId + '?')) {
-        this.devServer.moduleGraph.invalidateModule(mod);
+    const environments = (this.devServer as { environments?: Record<string, { moduleGraph: any }> }).environments;
+    const graphs = environments
+      ? Object.values(environments).map((env) => env.moduleGraph)
+      : [this.devServer.moduleGraph];
+
+    for (const graph of graphs) {
+      for (const mod of graph.idToModuleMap.values()) {
+        const id = mod.id ?? '';
+        if (id === virtualId || id.startsWith(virtualId + '?')) {
+          graph.invalidateModule(mod);
+        }
       }
+    }
+  }
+
+  /**
+   * Trigger a reload in every environment: the browser via the legacy ws
+   * channel, and module-runner environments (like the Cloudflare worker)
+   * via their own hot channels — the legacy ws broadcast doesn't reach them.
+   */
+  triggerFullReload(): void {
+    if (!this.devServer) return;
+
+    const environments = (this.devServer as { environments?: Record<string, { hot?: { send: (payload: unknown) => void } }> }).environments;
+    if (environments) {
+      // The client environment's hot channel IS the legacy ws channel, so
+      // this covers the browser and the worker without double-sending.
+      for (const env of Object.values(environments)) {
+        env.hot?.send({ type: 'full-reload' });
+      }
+    } else {
+      this.devServer.ws.send({ type: 'full-reload' });
     }
   }
 }
@@ -275,7 +310,7 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
           state.reset();
           state.invalidateDOModule();
           state.invalidateDevEpochModule();
-          server.ws.send({ type: 'full-reload' });
+          state.triggerFullReload();
         }, 100);
       };
 

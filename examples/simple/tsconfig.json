@@ -7,7 +7,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["@cloudflare/workers-types", "@eagerpatch/durable-db/virtual"]
+    "types": ["@cloudflare/workers-types", "durable-db/virtual"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules"]

@@ -21,7 +21,7 @@ const generate =
  * (which bumps the epoch) yields fresh DO instances; in production builds it
  * is the identity function.
  */
-export const DEV_EPOCH_IMPORT = 'virtual:eagerpatch/durable-db/__devEpoch';
+export const DEV_EPOCH_IMPORT = 'virtual:durable-db/__devEpoch';
 
 // ============================================================================
 // Types
@@ -164,7 +164,7 @@ export function generateDurableObjectsModule(
   const anyWebSocket = databases.some((db) => db.transport === 'websocket');
 
   const imports: t.ImportDeclaration[] = [
-    createNamedImport(['SqliteDurableObject', 'type'], '@eagerpatch/durable-db/db'),
+    createNamedImport(['SqliteDurableObject', 'type'], 'durable-db/db'),
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
   ];
 
@@ -174,7 +174,7 @@ export function generateDurableObjectsModule(
 
   if (anyWebSocket) {
     imports.push(
-      createNamedImport(['decodeRequest', 'encodeResponse'], '@eagerpatch/durable-db/transport/protocol')
+      createNamedImport(['decodeRequest', 'encodeResponse'], 'durable-db/transport/protocol')
     );
   }
 
@@ -969,7 +969,7 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
   ensureNamedImports(body, DEV_EPOCH_IMPORT, ['applyDevEpoch']);
 
   if (database.transport === 'websocket') {
-    ensureNamedImports(body, '@eagerpatch/durable-db/transport/websocket', ['WebSocketTransport']);
+    ensureNamedImports(body, 'durable-db/transport/websocket', ['WebSocketTransport']);
   }
 
   const actionNames = new Set(actionsInFile.map((a) => a.exportName));
@@ -1106,7 +1106,7 @@ export function transformDatabaseFile(options: TransformDatabaseFileOptions) {
     database,
     contextImport,
     actionsInFile = [],
-    registryImport = '@eagerpatch/durable-db/registry',
+    registryImport = 'durable-db/registry',
   } = options;
 
   const ast = parseProgram(code);

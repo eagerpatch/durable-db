@@ -1,10 +1,10 @@
 import { defineConfig } from 'vite';
 import { cloudflare } from '@cloudflare/vite-plugin';
-import { databasePlugin } from '@eagerpatch/durable-db/vite';
+import { durableDb } from 'durable-db/vite';
 
 export default defineConfig({
   plugins: [
-    databasePlugin({
+    durableDb({
       databasesDir: './src/databases',
     }),
     // Cloudflare's Vite plugin for Workers

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { databasePlugin } from '../../src/vite/databasePlugin';
+import { durableDb, databasePlugin } from '../../src/vite/durableDb';
 import type { Plugin, ResolvedConfig } from 'vite';
 
 // ============================================================================
@@ -16,7 +16,7 @@ describe('databasePlugin', () => {
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-plugin-'));
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
-    plugin = databasePlugin();
+    plugin = durableDb();
   });
 
   afterEach(() => {
@@ -39,7 +39,7 @@ describe('databasePlugin', () => {
 
   describe('options', () => {
     it('accepts all options', () => {
-      const customPlugin = databasePlugin({
+      const customPlugin = durableDb({
         contextImport: 'my-app/context',
         registryImport: 'my-app/registry',
         databasesDir: 'lib/db',
@@ -87,30 +87,42 @@ describe('resolveId', () => {
   let plugin: Plugin;
 
   beforeEach(() => {
-    plugin = databasePlugin();
+    plugin = durableDb();
   });
 
-  it('resolves virtual:eagerpatch/durable-db/__durableObjects', async () => {
+  it('resolves virtual:durable-db/__durableObjects', async () => {
     const resolveId = plugin.resolveId as Function;
-    const result = await resolveId('virtual:eagerpatch/durable-db/__durableObjects');
-    expect(result).toBe('\0virtual:eagerpatch/durable-db/__durableObjects.js');
+    const result = await resolveId('virtual:durable-db/__durableObjects');
+    expect(result).toBe('\0virtual:durable-db/__durableObjects.js');
   });
 
-  it('resolves eagerpatch/durable-db/__durableObjects without prefix', async () => {
+  it('resolves durable-db/__durableObjects without prefix', async () => {
     const resolveId = plugin.resolveId as Function;
-    const result = await resolveId('eagerpatch/durable-db/__durableObjects');
-    expect(result).toBe('\0virtual:eagerpatch/durable-db/__durableObjects.js');
+    const result = await resolveId('durable-db/__durableObjects');
+    expect(result).toBe('\0virtual:durable-db/__durableObjects.js');
   });
 
-  it('resolves virtual:eagerpatch/durable-db/__devEpoch', async () => {
+  it('resolves virtual:durable-db/__devEpoch', async () => {
     const resolveId = plugin.resolveId as Function;
-    const result = await resolveId('virtual:eagerpatch/durable-db/__devEpoch');
-    expect(result).toBe('\0virtual:eagerpatch/durable-db/__devEpoch.js');
+    const result = await resolveId('virtual:durable-db/__devEpoch');
+    expect(result).toBe('\0virtual:durable-db/__devEpoch.js');
+  });
+
+  it('still resolves the legacy eagerpatch-prefixed ids', async () => {
+    const resolveId = plugin.resolveId as Function;
+    expect(await resolveId('virtual:eagerpatch/durable-db/__durableObjects'))
+      .toBe('\0virtual:durable-db/__durableObjects.js');
+    expect(await resolveId('virtual:eagerpatch/durable-db/__devEpoch'))
+      .toBe('\0virtual:durable-db/__devEpoch.js');
+  });
+
+  it('exposes the deprecated databasePlugin alias', () => {
+    expect(databasePlugin).toBe(durableDb);
   });
 
   it('returns null for registry (now a real module)', async () => {
     const resolveId = plugin.resolveId as Function;
-    expect(await resolveId('@eagerpatch/durable-db/registry')).toBeNull();
+    expect(await resolveId('durable-db/registry')).toBeNull();
   });
 
   it('returns null for non-virtual imports', async () => {
@@ -139,12 +151,12 @@ describe('__devEpoch virtual module', () => {
   });
 
   async function loadDevEpochModule(command: 'serve' | 'build'): Promise<string> {
-    const plugin = databasePlugin();
+    const plugin = durableDb();
     const configResolved = plugin.configResolved as Function;
     await configResolved({ root: tempDir, command } as ResolvedConfig);
 
     const load = plugin.load as Function;
-    const result = await load('\0virtual:eagerpatch/durable-db/__devEpoch.js');
+    const result = await load('\0virtual:durable-db/__devEpoch.js');
     return result.code;
   }
 
@@ -175,17 +187,17 @@ describe('__devEpoch virtual module', () => {
   });
 
   it('reflects an epoch bump (db reset) on the next load', async () => {
-    const plugin = databasePlugin();
+    const plugin = durableDb();
     const configResolved = plugin.configResolved as Function;
     await configResolved({ root: tempDir, command: 'serve' } as ResolvedConfig);
     const load = plugin.load as Function;
 
-    const before = (await load('\0virtual:eagerpatch/durable-db/__devEpoch.js')).code;
+    const before = (await load('\0virtual:durable-db/__devEpoch.js')).code;
 
     const { reset } = await import('../../src/cli/reset');
     const { newEpoch } = await reset({ projectRoot: tempDir, databasesDir: 'src/databases' });
 
-    const after = (await load('\0virtual:eagerpatch/durable-db/__devEpoch.js')).code;
+    const after = (await load('\0virtual:durable-db/__devEpoch.js')).code;
     expect(after).not.toBe(before);
     expect(after).toContain(`export const devEpoch = "${newEpoch}"`);
   });
@@ -203,7 +215,7 @@ describe('transform', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-transform-'));
     fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
 
-    plugin = databasePlugin();
+    plugin = durableDb();
 
     const configResolved = plugin.configResolved as Function;
     await configResolved({
@@ -269,7 +281,7 @@ describe('transform', () => {
   it('transforms action() definitions inside the database file itself', async () => {
     const dbFile = path.join(tempDir, 'src', 'databases', 'main.ts');
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -310,7 +322,7 @@ describe('concurrent initialization', () => {
   });
 
   it('does not initialize twice when load and transform race', async () => {
-    const plugin = databasePlugin();
+    const plugin = durableDb();
 
     const configResolved = plugin.configResolved as Function;
     await configResolved({
@@ -323,7 +335,7 @@ describe('concurrent initialization', () => {
 
     // Fire both hooks concurrently — both call state.initialize()
     const [loadResult, transformResult] = await Promise.all([
-      load('\0virtual:eagerpatch/durable-db/__durableObjects.js'),
+      load('\0virtual:durable-db/__durableObjects.js'),
       transform.call(
         { resolve: async () => null },
         'export const x = 1;',

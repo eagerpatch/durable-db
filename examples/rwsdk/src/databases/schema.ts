@@ -1,4 +1,4 @@
-import { table, text, integer } from '@eagerpatch/durable-db/schema';
+import { table, text, integer } from 'durable-db/schema';
 
 // Products table (main DB)
 export const products = table('products', {

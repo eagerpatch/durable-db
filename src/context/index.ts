@@ -11,7 +11,7 @@ let tenantIdResolver: (() => string) | null = null;
  *
  * @example
  * ```ts
- * import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
+ * import { setTenantIdResolver } from 'durable-db/context';
  * import { getRequestInfo } from 'rwsdk/worker';
  *
  * setTenantIdResolver(() => getRequestInfo().ctx.session!.shop);
@@ -28,7 +28,7 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
  *
  * @example
  * ```ts
- * import { getTenantId } from '@eagerpatch/durable-db/context';
+ * import { getTenantId } from 'durable-db/context';
  *
  * async function myHandler() {
  *   const tenantId = getTenantId();
@@ -62,7 +62,7 @@ let loggedDevEpochFailure = false;
  * Returns null in production or if no dev state exists
  *
  * @deprecated The epoch is now baked into generated stubs at build time via
- * the `virtual:eagerpatch/durable-db/__devEpoch` module — this function
+ * the `virtual:durable-db/__devEpoch` module — this function
  * cannot read the dev state inside workerd (no filesystem) and returns null
  * there. Import `devEpoch` / `applyDevEpoch` from the virtual module instead.
  */
@@ -100,7 +100,7 @@ export function getDevInstanceKeySuffix(): string | null {
  * In production, this returns the base key unchanged.
  *
  * @deprecated Generated stubs apply the epoch automatically via
- * `applyDevEpoch` from `virtual:eagerpatch/durable-db/__devEpoch`. This
+ * `applyDevEpoch` from `virtual:durable-db/__devEpoch`. This
  * function only works in Node (it reads the dev state from disk) and is the
  * identity inside workerd — combining it with the generated stubs would
  * also double-suffix keys. Import from the virtual module instead.

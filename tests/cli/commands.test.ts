@@ -48,7 +48,7 @@ describe('CLI commands', () => {
     fs.writeFileSync(
       path.join(dbDir, `${name}.ts`),
       `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -282,7 +282,7 @@ export const users = sqliteTable('users', { id: text('id').primaryKey() });
       fs.writeFileSync(
         path.join(databasesDir, 'analytics.ts'),
         `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -348,7 +348,7 @@ export const { action } = defineDatabase({
       fs.writeFileSync(
         path.join(databasesDir, 'noschema.ts'),
         `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 
 export const { action } = defineDatabase({});
 `
@@ -394,7 +394,7 @@ describe('CLI workflow scenarios', () => {
     fs.writeFileSync(
       path.join(databasesDir, 'main.ts'),
       `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -442,7 +442,7 @@ export const { action } = defineDatabase({
     fs.writeFileSync(
       path.join(databasesDir, 'main.ts'),
       `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({

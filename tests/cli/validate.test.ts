@@ -35,7 +35,7 @@ describe('validate command', () => {
       fs.writeFileSync(
         path.join(databasesDir, `${name}.ts`),
         `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -47,7 +47,7 @@ export const { action } = defineDatabase({
       fs.writeFileSync(
         path.join(databasesDir, `${name}.ts`),
         `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 
 export const { action } = defineDatabase({});
 `
@@ -236,7 +236,7 @@ export const { action } = defineDatabase({});
     fs.writeFileSync(
       path.join(databasesDir, 'other.ts'),
       `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 
 export const { action } = defineDatabase({});
 `

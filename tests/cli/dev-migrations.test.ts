@@ -93,7 +93,7 @@ describe('dev migrations integration', () => {
       saveDevMigration(tempDir, 'main', 'dev_test', ['SELECT 1']);
 
       expect(fs.existsSync(paths.migrationsDir('main'))).toBe(true);
-      expect(paths.cacheDir).toContain('.cache/@eagerpatch/durable-db');
+      expect(paths.cacheDir).toContain('.cache/durable-db');
       expect(paths.migrationsDir('main')).toContain('databases/main/migrations');
     });
   });

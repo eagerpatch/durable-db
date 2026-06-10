@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`@eagerpatch/durable-db` — a zero-configuration database abstraction for Cloudflare Durable Objects with SQLite. Uses Drizzle for schema definition, Kysely for queries, and ArkType for runtime validation. A Vite plugin handles build-time code generation (Durable Object classes, RPC stubs, migration embedding, wrangler config patching).
+`durable-db` — a zero-configuration database abstraction for Cloudflare Durable Objects with SQLite. Uses Drizzle for schema definition, Kysely for queries, and ArkType for runtime validation. A Vite plugin handles build-time code generation (Durable Object classes, RPC stubs, migration embedding, wrangler config patching).
 
 ## Commands
 
@@ -38,7 +38,7 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 | Export path | Source | Purpose |
 |---|---|---|
 | `./db` | `src/db/` | `defineDatabase()` API, `SqliteDurableObject` base class, Kysely plugins |
-| `./vite` | `src/vite/databasePlugin.ts` | Vite plugin entry (`databasePlugin`) |
+| `./vite` | `src/vite/durableDb.ts` | Vite plugin entry (`durableDb`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
 | `./context` | `src/context/` | Tenant ID context (`setTenantIdResolver`, `getTenantId`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
@@ -49,7 +49,7 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 
 1. **User defines** Drizzle schema in `src/databases/schema.ts` and database + actions in `src/databases/*.ts`
 2. **Vite plugin** discovers database files, parses them with Babel AST, extracts `defineDatabase()` calls and action exports
-3. **Code generation** produces a virtual module (`virtual:eagerpatch/durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
+3. **Code generation** produces a virtual module (`virtual:durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
 4. **Action call transformation**: internal calls → direct handler call (no RPC), cross-DB calls → RPC via `ctx.env`
 5. **RPC stubs** are generated so workers can call actions like regular async functions
 6. **wrangler.jsonc** is auto-patched with Durable Object bindings
@@ -93,11 +93,11 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 ### Migration System
 
 - Schema snapshots stored in `_snapshot.json` in the migrations directory
-- Dev migrations: ephemeral, stored in `node_modules/.cache/@eagerpatch/durable-db/`
+- Dev migrations: ephemeral, stored in `node_modules/.cache/durable-db/`
 - Production migrations: `.sql` files in the Vite plugin's `migrationsDir` (default: `migrations/<dbName>/`), created via `db generate`
 - Dev epoch suffixing allows resetting local databases without conflicts
 - Schema loading (`loadSchema` in `src/cli/shared.ts`) is strict: declared-but-unloadable tables (inline definitions, unresolvable imports, missing exports, build failures) throw instead of silently producing "no changes". Only databases with zero declared tables are skipped.
-- Dev epoch wiring: generated stubs route every instance key through `applyDevEpoch()` from the virtual module `virtual:eagerpatch/durable-db/__devEpoch`. In dev the Vite plugin embeds the current epoch from `state.json`; in production builds the epoch is null and the function is the identity. The dev server watches the whole dev cache dir and fully re-initializes plugin state on change, so `db reset` (epoch bump → fresh DO instances) and `db push` (new squashed dev migration → re-embedded) both work live. `--purge-local-storage` optionally deletes the orphaned instances under `.wrangler/state/v3/do` (dev server must be stopped for that).
+- Dev epoch wiring: generated stubs route every instance key through `applyDevEpoch()` from the virtual module `virtual:durable-db/__devEpoch`. In dev the Vite plugin embeds the current epoch from `state.json`; in production builds the epoch is null and the function is the identity. The dev server watches the whole dev cache dir and fully re-initializes plugin state on change, so `db reset` (epoch bump → fresh DO instances) and `db push` (new squashed dev migration → re-embedded) both work live. `--purge-local-storage` optionally deletes the orphaned instances under `.wrangler/state/v3/do` (dev server must be stopped for that).
 
 ### Database Instance Strategies
 
@@ -106,10 +106,10 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 
 ### Schema Definition
 
-Schemas are defined using `table()` from `@eagerpatch/durable-db/schema` (not `sqliteTable` from drizzle-orm directly). The `table()` wrapper auto-converts table names to snake_case. Column names are omitted — they are derived from the JS property key and auto-snake_cased by the migration system (`casing: 'snake_case'`).
+Schemas are defined using `table()` from `durable-db/schema` (not `sqliteTable` from drizzle-orm directly). The `table()` wrapper auto-converts table names to snake_case. Column names are omitted — they are derived from the JS property key and auto-snake_cased by the migration system (`casing: 'snake_case'`).
 
 ```ts
-import { table, text, integer } from '@eagerpatch/durable-db/schema';
+import { table, text, integer } from 'durable-db/schema';
 
 export const userProfiles = table('userProfiles', {
   id: text().primaryKey(),

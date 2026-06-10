@@ -8,18 +8,18 @@
 // Mount the commands under a `db` group in your own Commander program
 // (e.g. `mycli db push`):
 //
-//   import { createDbCommand } from '@eagerpatch/durable-db/cli';
+//   import { createDbCommand } from 'durable-db/cli';
 //   program.addCommand(createDbCommand());
 //
 // Or register them flat on any command (e.g. `mycli push` — the
 // standalone `db` binary does this):
 //
-//   import { registerDbCommands } from '@eagerpatch/durable-db/cli';
+//   import { registerDbCommands } from 'durable-db/cli';
 //   registerDbCommands(program);
 //
 // Or use the programmatic API directly:
 //
-//   import { push, status } from '@eagerpatch/durable-db/cli';
+//   import { push, status } from 'durable-db/cli';
 //   const results = await push({ projectRoot: process.cwd() });
 //
 

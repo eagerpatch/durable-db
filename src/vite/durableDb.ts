@@ -15,10 +15,10 @@ import { loadDevState, saveDevState, getDevPaths } from '../cli/state';
 // Types
 // ============================================================================
 
-export interface DatabasePluginOptions {
-  /** Import path for the context module. Default: '@eagerpatch/durable-db/context' */
+export interface DurableDbOptions {
+  /** Import path for the context module. Default: 'durable-db/context' */
   contextImport?: string;
-  /** Import path for the registry module. Default: '@eagerpatch/durable-db/registry' */
+  /** Import path for the registry module. Default: 'durable-db/registry' */
   registryImport?: string;
   /** Directory containing database definitions. Default: 'src/databases' */
   databasesDir?: string;
@@ -37,11 +37,24 @@ interface ResolvedOptions {
 // Virtual Module IDs
 // ============================================================================
 
-const DURABLE_OBJECTS_ID = 'eagerpatch/durable-db/__durableObjects';
-const VIRTUAL_DO_MODULE_ID = '\0virtual:eagerpatch/durable-db/__durableObjects.js';
+const DURABLE_OBJECTS_ID = 'durable-db/__durableObjects';
+const VIRTUAL_DO_MODULE_ID = '\0virtual:durable-db/__durableObjects.js';
 
-const DEV_EPOCH_ID = 'eagerpatch/durable-db/__devEpoch';
-const VIRTUAL_DEV_EPOCH_MODULE_ID = '\0virtual:eagerpatch/durable-db/__devEpoch.js';
+const DEV_EPOCH_ID = 'durable-db/__devEpoch';
+const VIRTUAL_DEV_EPOCH_MODULE_ID = '\0virtual:durable-db/__devEpoch.js';
+
+/** Old org-prefixed spelling, still resolved for compatibility. */
+const LEGACY_ID_PREFIX = 'eagerpatch/';
+
+/** Match a virtual id in all accepted spellings (`virtual:` optional, legacy prefix). */
+function matchesVirtualId(id: string, canonicalId: string): boolean {
+  return (
+    id === canonicalId ||
+    id === `virtual:${canonicalId}` ||
+    id === `${LEGACY_ID_PREFIX}${canonicalId}` ||
+    id === `virtual:${LEGACY_ID_PREFIX}${canonicalId}`
+  );
+}
 
 /**
  * Generate the __devEpoch virtual module. Action stubs route every DO
@@ -263,10 +276,10 @@ async function findImportedDatabase(
 // Plugin
 // ============================================================================
 
-export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
+export function durableDb(options: DurableDbOptions = {}): Plugin {
   const state = new PluginState({
-    contextImport: options.contextImport ?? '@eagerpatch/durable-db/context',
-    registryImport: options.registryImport ?? '@eagerpatch/durable-db/registry',
+    contextImport: options.contextImport ?? 'durable-db/context',
+    registryImport: options.registryImport ?? 'durable-db/registry',
     databasesDir: options.databasesDir ?? 'src/databases',
     migrationsDir: options.migrationsDir ?? 'migrations',
   });
@@ -331,10 +344,10 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
     },
 
     resolveId(id) {
-      if (id === `virtual:${DURABLE_OBJECTS_ID}` || id === DURABLE_OBJECTS_ID) {
+      if (matchesVirtualId(id, DURABLE_OBJECTS_ID)) {
         return VIRTUAL_DO_MODULE_ID;
       }
-      if (id === `virtual:${DEV_EPOCH_ID}` || id === DEV_EPOCH_ID) {
+      if (matchesVirtualId(id, DEV_EPOCH_ID)) {
         return VIRTUAL_DEV_EPOCH_MODULE_ID;
       }
       return null;
@@ -459,4 +472,10 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
   };
 }
 
-export default databasePlugin;
+/** @deprecated Renamed to {@link durableDb}. */
+export const databasePlugin = durableDb;
+
+/** @deprecated Renamed to {@link DurableDbOptions}. */
+export type DatabasePluginOptions = DurableDbOptions;
+
+export default durableDb;

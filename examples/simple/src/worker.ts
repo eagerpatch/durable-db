@@ -1,5 +1,5 @@
-import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
-import { studio } from '@eagerpatch/durable-db/db';
+import { setTenantIdResolver } from 'durable-db';
+import { studio } from 'durable-db/db';
 import { destroyDatabase } from './databases/main';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
@@ -7,7 +7,7 @@ import { getUserWithPosts } from './databases/actions/getUsersWithPosts';
 import { getUser } from './databases/actions/getUser';
 
 // Export Durable Object classes - the plugin generates these
-export * from 'virtual:eagerpatch/durable-db/__durableObjects';
+export * from 'virtual:durable-db/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any): Promise<Response> {

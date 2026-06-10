@@ -38,7 +38,7 @@ export interface DevPaths {
 // Constants
 // ============================================================================
 
-const CACHE_DIR_NAME = '.cache/@eagerpatch/durable-db';
+const CACHE_DIR_NAME = '.cache/durable-db';
 const STATE_FILE_NAME = 'state.json';
 const DEV_MIGRATIONS_DIR = 'migrations';
 const DEV_SNAPSHOT_FILE = '_snapshot.json';

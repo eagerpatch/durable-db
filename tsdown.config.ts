@@ -7,7 +7,7 @@ export default defineConfig({
     'src/context/index.ts',
     'src/migrations/snapshot.ts',
     'src/migrations/generator.ts',
-    'src/vite/databasePlugin.ts',
+    'src/vite/durableDb.ts',
     'src/schema.ts',
     'src/registry.ts',
     'src/transport/protocol.ts',

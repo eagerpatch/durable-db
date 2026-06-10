@@ -1,4 +1,4 @@
-import { table, text, integer } from '@eagerpatch/durable-db/schema';
+import { table, text, integer } from 'durable-db/schema';
 
 export const users = table('users', {
   id: text().primaryKey(),

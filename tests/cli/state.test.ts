@@ -38,7 +38,7 @@ describe('CLI state management', () => {
     it('returns correct paths for a project', () => {
       const paths = getDevPaths(tempDir);
 
-      expect(paths.cacheDir).toContain('node_modules/.cache/@eagerpatch/durable-db');
+      expect(paths.cacheDir).toContain('node_modules/.cache/durable-db');
       expect(paths.stateFile).toContain('state.json');
       expect(paths.databaseDir('main')).toContain('databases/main');
       expect(paths.migrationsDir('main')).toContain('databases/main/migrations');

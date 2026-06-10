@@ -448,7 +448,7 @@ export function assertValidSchema(
         typeof value;
       throw new Error(
         `[db] Invalid schema: '${key}' is not a Drizzle table (got ${got}). ` +
-        `Make sure every value is defined with table() from '@eagerpatch/durable-db/schema'.`
+        `Make sure every value is defined with table() from 'durable-db/schema'.`
       );
     }
   }

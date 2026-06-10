@@ -260,7 +260,7 @@ function formatStatementForLog(statement: string, max = 120): string {
  *
  * @example
  * ```ts
- * import { SqliteDurableObject } from '@eagerpatch/durable-db/db';
+ * import { SqliteDurableObject } from 'durable-db/db';
  *
  * export class MyDatabaseDO extends SqliteDurableObject {
  *   migrations = {

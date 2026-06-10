@@ -1,7 +1,7 @@
 import { render, route } from "rwsdk/router";
 import { defineApp } from "rwsdk/worker";
 
-import { setTenantIdResolver } from "@eagerpatch/durable-db/context";
+import { setTenantIdResolver } from "durable-db";
 
 import { Document } from "@/app/document";
 import { setCommonHeaders } from "@/app/headers";
@@ -17,7 +17,7 @@ import { batchTrackEvents } from "./databases/actions/batchTrackEvents";
 import { getEventCounts } from "./databases/actions/getEventCounts";
 
 // Export Durable Object classes - the plugin generates these
-export * from "virtual:eagerpatch/durable-db/__durableObjects";
+export * from "virtual:durable-db/__durableObjects";
 
 export type AppContext = {};
 

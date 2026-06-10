@@ -1,5 +1,5 @@
 {
-  "name": "@eagerpatch/durable-db",
+  "name": "durable-db",
   "version": "0.0.1",
   "repository": {
     "type": "git",
@@ -32,8 +32,8 @@
       "import": "./dist/migrations/generator.js"
     },
     "./vite": {
-      "types": "./dist/vite/databasePlugin.d.ts",
-      "import": "./dist/vite/databasePlugin.js"
+      "types": "./dist/vite/durableDb.d.ts",
+      "import": "./dist/vite/durableDb.js"
     },
     "./registry": {
       "types": "./dist/registry.d.ts",
@@ -64,7 +64,7 @@
     "virtual.d.ts"
   ],
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public"
   },
   "scripts": {
     "build": "tsdown",

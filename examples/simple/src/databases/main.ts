@@ -1,4 +1,4 @@
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db';
 import { users, posts } from './schema';
 
 export const { action, destroyDatabase } = defineDatabase({

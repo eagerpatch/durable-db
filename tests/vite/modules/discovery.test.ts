@@ -199,7 +199,7 @@ describe('discovery', () => {
     it('returns null for package imports', () => {
       const result = resolveImportPath(
         path.join(tempDir, 'src', 'databases', 'main.ts'),
-        '@eagerpatch/durable-db/db'
+        'durable-db/db'
       );
 
       expect(result).toBeNull();

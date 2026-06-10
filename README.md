@@ -1,4 +1,4 @@
-# @eagerpatch/durable-db
+# durable-db
 
 Zero-configuration database abstraction for Cloudflare Durable Objects with SQLite.
 
@@ -38,14 +38,14 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
 ### 1. Install
 
 ```bash
-pnpm add @eagerpatch/durable-db
+pnpm add durable-db
 ```
 
 ### 2. Define your schema
 
 ```ts
 // src/databases/schema.ts
-import { table, text, integer } from '@eagerpatch/durable-db/schema';
+import { table, text, integer } from 'durable-db/schema';
 
 export const users = table('users', {
   id: text().primaryKey(),
@@ -65,7 +65,7 @@ Column names are derived from JS property keys and auto-converted to snake_case 
 
 ```ts
 // src/databases/main.ts
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -105,11 +105,11 @@ export const createUser = action({
 // vite.config.ts
 import { defineConfig } from 'vite';
 import { cloudflare } from '@cloudflare/vite-plugin';
-import { databasePlugin } from '@eagerpatch/durable-db/vite';
+import { durableDb } from 'durable-db/vite';
 
 export default defineConfig({
   plugins: [
-    databasePlugin(),
+    durableDb(),
     cloudflare(),
   ],
 });
@@ -119,14 +119,14 @@ export default defineConfig({
 
 ```ts
 // src/worker.ts
-import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
+import { setTenantIdResolver } from 'durable-db';
 import { createUser } from './databases/actions/createUser';
 
 // In a real app, resolve from authentication/session
 setTenantIdResolver(() => 'my-tenant');
 
 // Export the generated Durable Object classes
-export * from 'virtual:eagerpatch/durable-db/__durableObjects';
+export * from 'virtual:durable-db/__durableObjects';
 
 export default {
   async fetch(request: Request, env: any) {
@@ -136,12 +136,12 @@ export default {
 };
 ```
 
-For TypeScript support, add `@eagerpatch/durable-db/virtual` to your `tsconfig.json`:
+For TypeScript support, add `durable-db/virtual` to your `tsconfig.json`:
 
 ```json
 {
   "compilerOptions": {
-    "types": ["@eagerpatch/durable-db/virtual"]
+    "types": ["durable-db/virtual"]
   }
 }
 ```
@@ -160,7 +160,7 @@ pnpm dev             # Start the dev server
 Call `defineDatabase()` with a config object. The Vite plugin parses this at build time to generate a Durable Object class.
 
 ```ts
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db';
 import { users, posts } from './schema';
 
 export const { action } = defineDatabase({
@@ -252,7 +252,7 @@ Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery
 For `per-tenant` databases, actions need a tenant ID to know which Durable Object instance to use. Call `setTenantIdResolver()` once at startup to provide it:
 
 ```ts
-import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
+import { setTenantIdResolver } from 'durable-db';
 import { createUser } from './databases/actions/createUser';
 import { listUsers } from './databases/actions/listUsers';
 
@@ -278,7 +278,7 @@ export default {
 If your framework has request-scoped context (e.g. RWSDK's `getRequestInfo()`), use the resolver to bridge the two:
 
 ```ts
-import { setTenantIdResolver } from '@eagerpatch/durable-db/context';
+import { setTenantIdResolver } from 'durable-db';
 import { getRequestInfo } from 'rwsdk/worker';
 
 setTenantIdResolver(() => getRequestInfo().ctx.session!.shop);
@@ -347,7 +347,7 @@ When nothing changed anywhere:
 All databases are up to date.
 ```
 
-Dev migrations are stored in `node_modules/.cache/@eagerpatch/durable-db/` and are never committed to git. They are loaded automatically by the Vite plugin in dev mode.
+Dev migrations are stored in `node_modules/.cache/durable-db/` and are never committed to git. They are loaded automatically by the Vite plugin in dev mode.
 
 ### `db generate`
 
@@ -521,7 +521,7 @@ The commands are composable Commander commands, so a host CLI can re-use them:
 
 ```ts
 import { Command } from 'commander';
-import { createDbCommand, registerDbCommands } from '@eagerpatch/durable-db/cli';
+import { createDbCommand, registerDbCommands } from 'durable-db/cli';
 
 // As a nested `db` group: `mycli db push`
 program.addCommand(createDbCommand());
@@ -536,7 +536,7 @@ registerDbCommands(program);
 All CLI functions are also available for integration into other tools:
 
 ```ts
-import * as db from '@eagerpatch/durable-db/cli';
+import * as db from 'durable-db/cli';
 
 const pushResults = await db.push({ verbose: true });
 const statusResults = await db.status();
@@ -554,7 +554,7 @@ const validateResults = await db.validate({ noDev: false });
 Dev migrations are ephemeral migration files used during development for fast iteration.
 
 - **Created by**: `db push`
-- **Location**: `node_modules/.cache/@eagerpatch/durable-db/databases/<dbName>/migrations/`
+- **Location**: `node_modules/.cache/durable-db/databases/<dbName>/migrations/`
 - **Naming**: Content-hash based -- a single squashed `dev_<hash>.sql` that is replaced (not appended to) on every push with changes. The deterministic name lets the DO skip migrations it has already applied
 - **Lifecycle**: Cleared when you run `db generate` (consolidated into production) or `db reset`
 - **Never committed to git**
@@ -600,14 +600,14 @@ In development, each database instance key gets an epoch suffix to enable clean 
 
 When you run `db reset` (without `--keep-epoch`), a new epoch is generated. This causes all subsequent DO accesses to create fresh instances, effectively giving you a clean database without data from previous iterations.
 
-The epoch is a base36-encoded timestamp stored in `node_modules/.cache/@eagerpatch/durable-db/state.json`.
+The epoch is a base36-encoded timestamp stored in `node_modules/.cache/durable-db/state.json`.
 
-**How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:eagerpatch/durable-db/__devEpoch`) exporting `applyDevEpoch(key)`, and every generated stub routes its instance key through it. In dev the plugin embeds the current epoch from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches durable-db's dev cache directory and reloads on change, so both `db reset` (new epoch → fresh instances) and `db push` (new dev migration → re-embedded into the DO module) take effect on the next request without restarting.
+**How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:durable-db/__devEpoch`) exporting `applyDevEpoch(key)`, and every generated stub routes its instance key through it. In dev the plugin embeds the current epoch from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches durable-db's dev cache directory and reloads on change, so both `db reset` (new epoch → fresh instances) and `db push` (new dev migration → re-embedded into the DO module) take effect on the next request without restarting.
 
 ### Dev State Structure
 
 ```
-node_modules/.cache/@eagerpatch/durable-db/
+node_modules/.cache/durable-db/
   state.json                          # Global state (epoch, per-db push info)
   databases/
     main/
@@ -677,9 +677,9 @@ git commit -m "Add user profiles migration"
 ## Vite Plugin
 
 ```ts
-import { databasePlugin } from '@eagerpatch/durable-db/vite';
+import { durableDb } from 'durable-db/vite';
 
-databasePlugin({
+durableDb({
   databasesDir: 'src/databases',   // Where database files live
   migrationsDir: 'migrations',     // Where production migrations live
 });
@@ -691,15 +691,15 @@ databasePlugin({
 |--------|------|---------|-------------|
 | `databasesDir` | `string` | `'src/databases'` | Directory containing database definition files |
 | `migrationsDir` | `string` | `'migrations'` | Directory for production migrations, relative to project root. Each database gets a subdirectory (e.g. `migrations/main/`) |
-| `contextImport` | `string` | `'@eagerpatch/durable-db/context'` | Import path for the context module (for framework integrations) |
-| `registryImport` | `string` | `'@eagerpatch/durable-db/registry'` | Import path for the action registry module (for framework integrations) |
+| `contextImport` | `string` | `'durable-db/context'` | Import path for the context module (for framework integrations) |
+| `registryImport` | `string` | `'durable-db/registry'` | Import path for the action registry module (for framework integrations) |
 
 ### What the plugin does
 
 1. **Discovery**: Finds all `defineDatabase()` files in your databases directory (excludes `schema.ts`, `_*.ts`, `.d.ts`)
 2. **AST Parsing**: Uses Babel to extract database config and action definitions (no regexes)
 3. **Migration Loading**: Loads production migrations from disk; in dev mode also loads dev migrations from cache
-4. **Code Generation**: Produces a virtual module (`virtual:eagerpatch/durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods, plus a `virtual:eagerpatch/durable-db/__devEpoch` module that suffixes DO instance keys with the dev epoch (identity in production builds)
+4. **Code Generation**: Produces a virtual module (`virtual:durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods, plus a `virtual:durable-db/__devEpoch` module that suffixes DO instance keys with the dev epoch (identity in production builds)
 5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker. This applies to actions in separate files *and* actions defined in the database file itself
 6. **Wrangler Patching**: Automatically updates `wrangler.jsonc` with Durable Object bindings and SQLite migration entries
 7. **HMR**: Watches database files and invalidates the virtual module on change
@@ -717,7 +717,7 @@ For each `defineDatabase()` call, the plugin generates a class based on the file
 Export the generated classes from your worker entry point:
 
 ```ts
-export * from 'virtual:eagerpatch/durable-db/__durableObjects';
+export * from 'virtual:durable-db/__durableObjects';
 ```
 
 ### Action Transformation
@@ -774,7 +774,7 @@ Migrations are guaranteed to run before any browsable request — the generated 
 To serve the Outerbase Studio web interface, add a route in your worker that calls the `studio()` helper:
 
 ```ts
-import { studio } from '@eagerpatch/durable-db/db';
+import { studio } from 'durable-db/db';
 
 export default {
   async fetch(request: Request, env: any) {
@@ -916,11 +916,11 @@ After 3 consecutive failed migration attempts, PITR restore is skipped and the e
 
 ### Local dev: start from scratch
 
-In development, migrations run against ephemeral state cached under `node_modules/.cache/@eagerpatch/durable-db/`. Use whichever matches your situation:
+In development, migrations run against ephemeral state cached under `node_modules/.cache/durable-db/`. Use whichever matches your situation:
 
 - **Reset one tenant's data while keeping schema**: call `destroyDatabase()` from a route. This runs `ctx.storage.deleteAll()` on the current tenant's DO and re-runs migrations on the next call.
 - **Reset _every_ tenant's data for a database**: run `pnpm db reset` (or `pnpm db reset --database main`) — the dev server can keep running. Instance keys get a new `__dev_<epoch>` suffix, so every tenant rotates to a brand-new DO with empty SQLite on the next request. Add `--purge-local-storage` (dev server stopped) when you also want the orphaned instances' files deleted from `.wrangler/`.
-- **Drop everything and re-derive migrations from the schema**: `rm -rf node_modules/.cache/@eagerpatch/durable-db` and restart `pnpm dev`. The plugin regenerates dev migrations from the current schema.
+- **Drop everything and re-derive migrations from the schema**: `rm -rf node_modules/.cache/durable-db` and restart `pnpm dev`. The plugin regenerates dev migrations from the current schema.
 
 ### Snapshot corruption (`_snapshot.json`)
 
@@ -953,7 +953,7 @@ Pending requests time out after 30s by default and reject with `WebSocket reques
 | Export path | Source | Purpose |
 |---|---|---|
 | `./db` | `src/db/` | `defineDatabase()`, `SqliteDurableObject`, Kysely plugins |
-| `./vite` | `src/vite/databasePlugin.ts` | Vite plugin (`databasePlugin`) |
+| `./vite` | `src/vite/durableDb.ts` | Vite plugin (`durableDb`) |
 | `./vite/modules` | `src/vite/modules/` | Plugin internals: discovery, AST parsing, code generation, wrangler patching |
 | `./context` | `src/context/` | Tenant ID context (`setTenantIdResolver`, `getTenantId`) |
 | `./migrations` | `src/migrations/` | Snapshot-based migration generation via drizzle-kit |
@@ -1039,7 +1039,7 @@ src/
     generator.ts    # Migration file reading/writing
   registry.ts       # Action registration and RPC dispatch
   vite/
-    databasePlugin.ts        # Vite plugin entry
+    durableDb.ts             # Vite plugin entry
     modules/
       discovery.ts           # Database file discovery
       parser.ts              # Babel AST parsing

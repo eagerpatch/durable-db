@@ -97,50 +97,50 @@ describe('parseExpression', () => {
 
 describe('generateDurableObjectsModule', () => {
   it('imports SqliteDurableObject and type from db', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
-    expect(code).toMatch(/import\s*\{[^}]*SqliteDurableObject[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/db["']/);
-    expect(code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/db["']/);
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
+    expect(code).toMatch(/import\s*\{[^}]*SqliteDurableObject[^}]*\}\s*from\s*["']durable-db\/db["']/);
+    expect(code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']durable-db\/db["']/);
   });
 
   it('imports from registry module', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
-    expect(code).toMatch(/import\s*\{[^}]*getAction[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/registry["']/);
-    expect(code).toMatch(/import\s*\{[^}]*runWithDoContext[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/registry["']/);
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
+    expect(code).toMatch(/import\s*\{[^}]*getAction[^}]*\}\s*from\s*["']durable-db\/registry["']/);
+    expect(code).toMatch(/import\s*\{[^}]*runWithDoContext[^}]*\}\s*from\s*["']durable-db\/registry["']/);
   });
 
   it('generates class extending SqliteDurableObject', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('class MainDatabaseDO extends SqliteDurableObject');
   });
 
   it('includes migrations property', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('migrations = {}');
   });
 
   it('generates rpc method', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('async rpc(method, args, rpcContext)');
   });
 
   it('includes getAction call', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('getAction("main", method)');
   });
 
   it('includes runWithDoContext', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('runWithDoContext(');
   });
 
   it('handles multiple databases', () => {
-    const code = generateDurableObjectsModule([mockDatabase, globalDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase, globalDatabase], 'durable-db/registry');
     expect(code).toContain('class MainDatabaseDO');
     expect(code).toContain('class AnalyticsDO');
   });
 
   it('generates binding names object', () => {
-    const code = generateDurableObjectsModule([mockDatabase, globalDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase, globalDatabase], 'durable-db/registry');
     // Check that both bindings are present (format may vary)
     expect(code).toMatch(/["']main["']\s*:\s*["']MAIN_DATABASE_DO["']/);
     expect(code).toMatch(/["']analytics["']\s*:\s*["']ANALYTICS_DO["']/);
@@ -148,7 +148,7 @@ describe('generateDurableObjectsModule', () => {
 
   it('wraps class with Browsable() when browsable is true', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: true };
-    const code = generateDurableObjectsModule([db], '@eagerpatch/durable-db/registry', false);
+    const code = generateDurableObjectsModule([db], 'durable-db/registry', false);
     expect(code).toContain('Browsable');
     expect(code).toContain('_MainDatabaseDO_Base');
     // Should have migration guard overrides for fetch and __studio
@@ -158,21 +158,21 @@ describe('generateDurableObjectsModule', () => {
 
   it('wraps class with Browsable() when browsable is "development" and isDev', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: 'development' };
-    const code = generateDurableObjectsModule([db], '@eagerpatch/durable-db/registry', true);
+    const code = generateDurableObjectsModule([db], 'durable-db/registry', true);
     expect(code).toContain('Browsable');
     expect(code).toContain('_MainDatabaseDO_Base');
   });
 
   it('does not use Browsable() when browsable is "development" and not isDev', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: 'development' };
-    const code = generateDurableObjectsModule([db], '@eagerpatch/durable-db/registry', false);
+    const code = generateDurableObjectsModule([db], 'durable-db/registry', false);
     expect(code).not.toContain('Browsable');
     expect(code).not.toContain('_MainDatabaseDO_Base');
   });
 
   it('does not use Browsable() when browsable is false', () => {
     const db: DatabaseInfo = { ...mockDatabase, browsable: false };
-    const code = generateDurableObjectsModule([db], '@eagerpatch/durable-db/registry', true);
+    const code = generateDurableObjectsModule([db], 'durable-db/registry', true);
     expect(code).not.toContain('Browsable');
   });
 
@@ -181,42 +181,42 @@ describe('generateDurableObjectsModule', () => {
       ...mockDatabase,
       migrations: new Map([['001_init', [['CREATE TABLE users (id TEXT)']]]]),
     };
-    const code = generateDurableObjectsModule([dbWithMigrations], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([dbWithMigrations], 'durable-db/registry');
     expect(code).toContain('001_init');
     expect(code).toContain('chunks');
   });
 
   it('generates webSocketMessage method when transport is websocket', () => {
-    const code = generateDurableObjectsModule([wsDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([wsDatabase], 'durable-db/registry');
     expect(code).toContain('async webSocketMessage(ws, message)');
     expect(code).toContain('decodeRequest');
     expect(code).toContain('encodeResponse');
   });
 
   it('imports transport module when any db uses websocket', () => {
-    const code = generateDurableObjectsModule([wsDatabase], '@eagerpatch/durable-db/registry');
-    expect(code).toMatch(/import\s*\{[^}]*decodeRequest[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/transport\/protocol["']/);
-    expect(code).toMatch(/import\s*\{[^}]*encodeResponse[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/transport\/protocol["']/);
+    const code = generateDurableObjectsModule([wsDatabase], 'durable-db/registry');
+    expect(code).toMatch(/import\s*\{[^}]*decodeRequest[^}]*\}\s*from\s*["']durable-db\/transport\/protocol["']/);
+    expect(code).toMatch(/import\s*\{[^}]*encodeResponse[^}]*\}\s*from\s*["']durable-db\/transport\/protocol["']/);
   });
 
   it('does not import transport module when no db uses websocket', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
-    expect(code).not.toContain('@eagerpatch/durable-db/transport/');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
+    expect(code).not.toContain('durable-db/transport/');
   });
 
   it('still generates rpc method for websocket databases', () => {
-    const code = generateDurableObjectsModule([wsDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([wsDatabase], 'durable-db/registry');
     expect(code).toContain('async rpc(method, args, rpcContext)');
     expect(code).toContain('async webSocketMessage(ws, message)');
   });
 
   it('does not generate webSocketMessage for rpc databases', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).not.toContain('webSocketMessage');
   });
 
   it('generates dbTransports in ctx object', () => {
-    const code = generateDurableObjectsModule([mockDatabase, wsDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase, wsDatabase], 'durable-db/registry');
     expect(code).toContain('dbTransports');
   });
 });
@@ -229,8 +229,8 @@ describe('transformActionFile', () => {
   const defaultOptions = {
     dbName: 'main',
     database: mockDatabase,
-    contextImport: '@eagerpatch/durable-db/context',
-    registryImport: '@eagerpatch/durable-db/registry',
+    contextImport: 'durable-db/context',
+    registryImport: 'durable-db/registry',
   };
 
   it('returns null for empty actions', () => {
@@ -280,7 +280,7 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toMatch(/import\s*\{[^}]*getTenantId[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/context["']/);
+    expect(result!.code).toMatch(/import\s*\{[^}]*getTenantId[^}]*\}\s*from\s*["']durable-db\/context["']/);
   });
 
   it('adds cloudflare:workers env import', () => {
@@ -386,7 +386,7 @@ export const createUser = action({
 
     expect(result!.code).toContain('instanceKey = applyDevEpoch(getTenantId())');
     expect(result!.code).toMatch(
-      /import\s*\{[^}]*applyDevEpoch[^}]*\}\s*from\s*["']virtual:eagerpatch\/durable-db\/__devEpoch["']/
+      /import\s*\{[^}]*applyDevEpoch[^}]*\}\s*from\s*["']virtual:durable-db\/__devEpoch["']/
     );
   });
 
@@ -464,7 +464,7 @@ export const SOME_CONSTANT = 42;
       }],
     });
 
-    expect(result!.code).toMatch(/import\s*\{[^}]*WebSocketTransport[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/transport\/websocket["']/);
+    expect(result!.code).toMatch(/import\s*\{[^}]*WebSocketTransport[^}]*\}\s*from\s*["']durable-db\/transport\/websocket["']/);
   });
 
   it('does not import WebSocketTransport for rpc databases', () => {
@@ -485,19 +485,19 @@ export const SOME_CONSTANT = 42;
 
 describe('generateDurableObjectsModule - sys method', () => {
   it('generates sys method on DO class', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('async sys(command)');
   });
 
   it('sys method handles destroyDatabase command', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('command === "destroyDatabase"');
     expect(code).toContain('this.ctx.storage.deleteAll()');
     expect(code).toContain('this.resetMigrationState()');
   });
 
   it('sys method throws on unknown command', () => {
-    const code = generateDurableObjectsModule([mockDatabase], '@eagerpatch/durable-db/registry');
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('Unknown system command');
   });
 });
@@ -509,12 +509,12 @@ describe('generateDurableObjectsModule - sys method', () => {
 describe('transformDatabaseFile', () => {
   const defaultDbFileOptions = {
     database: mockDatabase,
-    contextImport: '@eagerpatch/durable-db/context',
+    contextImport: 'durable-db/context',
   };
 
   it('returns null when destroyDatabase is not destructured', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -531,7 +531,7 @@ export const { action } = defineDatabase({
 
   it('generates destroyDatabase stub for per-tenant database', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action, destroyDatabase } = defineDatabase({
@@ -552,7 +552,7 @@ export const { action, destroyDatabase } = defineDatabase({
 
   it('generates destroyDatabase stub for global database', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action, destroyDatabase } = defineDatabase({
@@ -573,7 +573,7 @@ export const { action, destroyDatabase } = defineDatabase({
 
   it('removes destroyDatabase from destructuring pattern', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action, destroyDatabase } = defineDatabase({
@@ -593,7 +593,7 @@ export const { action, destroyDatabase } = defineDatabase({
 
   it('adds cloudflare:workers env import', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 export const { action, destroyDatabase } = defineDatabase({ schema: {} });
 `;
     const result = transformDatabaseFile({
@@ -606,7 +606,7 @@ export const { action, destroyDatabase } = defineDatabase({ schema: {} });
 
   it('adds context import for per-tenant database', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 export const { action, destroyDatabase } = defineDatabase({ schema: {} });
 `;
     const result = transformDatabaseFile({
@@ -614,12 +614,12 @@ export const { action, destroyDatabase } = defineDatabase({ schema: {} });
       code,
     });
 
-    expect(result!.code).toMatch(/import\s*\{[^}]*getTenantId[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/context["']/);
+    expect(result!.code).toMatch(/import\s*\{[^}]*getTenantId[^}]*\}\s*from\s*["']durable-db\/context["']/);
   });
 
   it('does not add context import for global database', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 export const { action, destroyDatabase } = defineDatabase({ schema: {} });
 `;
     const result = transformDatabaseFile({
@@ -633,7 +633,7 @@ export const { action, destroyDatabase } = defineDatabase({ schema: {} });
 
   it('returns sourcemap', () => {
     const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 export const { action, destroyDatabase } = defineDatabase({ schema: {} });
 `;
     const result = transformDatabaseFile({
@@ -647,7 +647,7 @@ export const { action, destroyDatabase } = defineDatabase({ schema: {} });
 
   describe('same-file actions', () => {
     const dbFileWithAction = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action } = defineDatabase({
@@ -665,7 +665,7 @@ export const createUser = action({
         ...defaultDbFileOptions,
         code: dbFileWithAction,
         actionsInFile: [createUserAction],
-        registryImport: '@eagerpatch/durable-db/registry',
+        registryImport: 'durable-db/registry',
       });
 
       expect(result).not.toBeNull();
@@ -682,17 +682,17 @@ export const createUser = action({
         ...defaultDbFileOptions,
         code: dbFileWithAction,
         actionsInFile: [createUserAction],
-        registryImport: '@eagerpatch/durable-db/registry',
+        registryImport: 'durable-db/registry',
       });
 
       expect(result!.code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']arktype["']/);
       expect(result!.code).toMatch(/import\s*\{[^}]*env[^}]*\}\s*from\s*["']cloudflare:workers["']/);
-      expect(result!.code).toMatch(/import\s*\{[^}]*registerAction[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/registry["']/);
+      expect(result!.code).toMatch(/import\s*\{[^}]*registerAction[^}]*\}\s*from\s*["']durable-db\/registry["']/);
     });
 
     it('transforms both destroyDatabase and same-file actions together', () => {
       const code = `
-import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
 export const { action, destroyDatabase } = defineDatabase({
@@ -708,7 +708,7 @@ export const createUser = action({
         ...defaultDbFileOptions,
         code,
         actionsInFile: [createUserAction],
-        registryImport: '@eagerpatch/durable-db/registry',
+        registryImport: 'durable-db/registry',
       });
 
       expect(result).not.toBeNull();

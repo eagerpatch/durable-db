@@ -243,7 +243,7 @@ export const logEvent = action({
       });
 
       // Should use "global" as instance key
-      expect(transformed!.code).toMatch(/instanceKey\s*=\s*["']global["']/);
+      expect(transformed!.code).toMatch(/instanceKey\s*=\s*applyDevEpoch\(["']global["']\)/);
     });
 
     it('generates correct imports for websocket transport database', () => {

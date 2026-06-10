@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import type { DatabaseInfo, ActionInfo } from '../db';
@@ -8,6 +9,7 @@ import { parseDatabaseFile } from './modules/parser';
 import { patchWranglerConfig } from './modules/wrangler';
 import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
 import { loadMigrationFiles } from '../migrations/generator';
+import { loadDevState, saveDevState, getDevPaths } from '../cli/state';
 
 // ============================================================================
 // Types
@@ -37,6 +39,25 @@ interface ResolvedOptions {
 
 const DURABLE_OBJECTS_ID = 'eagerpatch/durable-db/__durableObjects';
 const VIRTUAL_DO_MODULE_ID = '\0virtual:eagerpatch/durable-db/__durableObjects.js';
+
+const DEV_EPOCH_ID = 'eagerpatch/durable-db/__devEpoch';
+const VIRTUAL_DEV_EPOCH_MODULE_ID = '\0virtual:eagerpatch/durable-db/__devEpoch.js';
+
+/**
+ * Generate the __devEpoch virtual module. Action stubs route every DO
+ * instance key through `applyDevEpoch()`:
+ * - dev: suffixes keys with the current epoch (`<key>__dev_<epoch>`), so a
+ *   `db reset` epoch bump rotates every database to a fresh DO instance
+ * - production builds: identity function, zero overhead beyond the call
+ */
+function generateDevEpochModule(epoch: string | null): string {
+  return [
+    `export const devEpoch = ${JSON.stringify(epoch)};`,
+    `export function applyDevEpoch(key) {`,
+    `  return devEpoch ? \`\${key}__dev_\${devEpoch}\` : key;`,
+    `}`,
+  ].join('\n');
+}
 
 // ============================================================================
 // State Management
@@ -161,11 +182,19 @@ class PluginState {
   }
 
   invalidateDOModule(): void {
+    this.invalidateVirtualModule(VIRTUAL_DO_MODULE_ID);
+  }
+
+  invalidateDevEpochModule(): void {
+    this.invalidateVirtualModule(VIRTUAL_DEV_EPOCH_MODULE_ID);
+  }
+
+  private invalidateVirtualModule(virtualId: string): void {
     if (!this.devServer) return;
 
     for (const mod of this.devServer.moduleGraph.idToModuleMap.values()) {
       const id = mod.id ?? '';
-      if (id === VIRTUAL_DO_MODULE_ID || id.startsWith(VIRTUAL_DO_MODULE_ID + '?')) {
+      if (id === virtualId || id.startsWith(virtualId + '?')) {
         this.devServer.moduleGraph.invalidateModule(mod);
       }
     }
@@ -227,6 +256,20 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
           state.invalidateDOModule();
         }
       });
+
+      // Watch the CLI dev-state file so a `db reset` (epoch bump) takes
+      // effect while the dev server is running: the __devEpoch virtual
+      // module is invalidated and stubs pick up the new instance-key
+      // suffix on the next request — fresh databases, no restart needed.
+      // (fs.watchFile because Vite's watcher ignores node_modules.)
+      const stateFile = getDevPaths(state.projectRoot).stateFile;
+      fs.unwatchFile(stateFile);
+      fs.watchFile(stateFile, { interval: 500 }, () => {
+        debugVite('Dev state changed, refreshing dev epoch');
+        state.invalidateDevEpochModule();
+        server.ws.send({ type: 'full-reload' });
+      });
+      server.httpServer?.once('close', () => fs.unwatchFile(stateFile));
     },
 
     buildStart() {
@@ -237,10 +280,29 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
       if (id === `virtual:${DURABLE_OBJECTS_ID}` || id === DURABLE_OBJECTS_ID) {
         return VIRTUAL_DO_MODULE_ID;
       }
+      if (id === `virtual:${DEV_EPOCH_ID}` || id === DEV_EPOCH_ID) {
+        return VIRTUAL_DEV_EPOCH_MODULE_ID;
+      }
       return null;
     },
 
     async load(id) {
+      if (id === VIRTUAL_DEV_EPOCH_MODULE_ID) {
+        // Read fresh on every load — the module is invalidated when the
+        // state file changes, so this always reflects the current epoch.
+        const isDev = state.config.command === 'serve';
+        let epoch: string | null = null;
+        if (isDev) {
+          // Persist immediately: loadDevState mints a new epoch when no
+          // state file exists, and an unsaved epoch would differ on every
+          // reload, silently orphaning dev databases.
+          const devState = loadDevState(state.projectRoot);
+          saveDevState(state.projectRoot, devState);
+          epoch = devState.epoch;
+        }
+        return { code: generateDevEpochModule(epoch) };
+      }
+
       if (id !== VIRTUAL_DO_MODULE_ID) return null;
 
       await state.initialize();
@@ -266,18 +328,33 @@ export function databasePlugin(options: DatabasePluginOptions = {}): Plugin {
 
       const cleanId = path.normalize(id.split('?', 1)[0]);
 
-      // Database definition files: transform if destroyDatabase is used, otherwise skip
+      // Database definition files: rewrite same-file action() definitions
+      // into RPC stubs and replace destroyDatabase (when destructured)
       const dbNameForPath = state.getDatabaseNameForPath(cleanId);
       if (dbNameForPath) {
         const database = state.databases.get(dbNameForPath);
         if (!database) return null;
 
-        return transformDatabaseFile({
+        const parsed = parseDatabaseFile(cleanId, code);
+
+        for (const action of parsed.actions) {
+          state.registerAction(action, dbNameForPath, cleanId);
+        }
+
+        const result = transformDatabaseFile({
           code,
           sourceFileName: cleanId,
           database,
+          actionsInFile: parsed.actions,
           contextImport: state.options.contextImport,
+          registryImport: state.options.registryImport,
         });
+
+        if (result && parsed.actions.length > 0 && state.config.command === 'serve') {
+          state.invalidateDOModule();
+        }
+
+        return result;
       }
 
       const parsed = parseDatabaseFile(cleanId, code);

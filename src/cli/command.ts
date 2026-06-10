@@ -120,8 +120,9 @@ export function createDbCommand(): Command {
     });
 
   db.command('reset')
-    .description('Reset dev state and create fresh DB instances')
+    .description('Reset dev state and create fresh DB instances (via epoch bump)')
     .option('--keep-epoch', 'Only clear dev migrations, keep the same epoch')
+    .option('--purge-local-storage', "Also delete workerd's persisted DO storage under .wrangler/ (requires the dev server to be stopped)")
     .option('--database <db>', 'Only reset this database')
     .option('-d, --databases-dir <dir>', 'Directory containing databases', 'src/databases')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations', 'migrations')
@@ -135,12 +136,13 @@ export function createDbCommand(): Command {
           },
           {
             keepEpoch: options.keepEpoch,
+            purgeLocalStorage: options.purgeLocalStorage,
             database: options.database,
           }
         );
 
         if (result.newEpoch) {
-          console.log(`✓ New epoch: ${result.newEpoch}`);
+          console.log(`✓ New epoch: ${result.newEpoch} — databases start fresh on the next request`);
         } else {
           console.log(`✓ Epoch unchanged`);
         }
@@ -149,6 +151,13 @@ export function createDbCommand(): Command {
           console.log(`✓ Reset databases: ${result.databases.join(', ')}`);
         } else {
           console.log(`· No databases to reset`);
+        }
+
+        if (result.clearedStorageDirs.length > 0) {
+          console.log(`✓ Purged local DO storage: ${result.clearedStorageDirs.join(', ')}`);
+          console.log(
+            '  Note: if a dev server was running, restart it — workerd keeps deleted DO state open until restart.'
+          );
         }
       } catch (error) {
         reportCliError(error, options.verbose);

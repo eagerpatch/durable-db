@@ -57,6 +57,10 @@ export const users = table('users', {
 
 Column names are derived from JS property keys and auto-converted to snake_case (e.g. `createdAt` → `created_at`). Table names passed to `table()` are also auto-snake_cased.
 
+**Date columns**: use `integer({ mode: 'timestamp' })` and pass `Date` values — they round-trip as `Date` objects automatically. Plain `text()` columns always round-trip verbatim: if you store an ISO string (`new Date().toISOString()`), you get the exact same string back, never a `Date`.
+
+> ⚠️ All tables referenced in `defineDatabase({ schema })` must be **exported from the schema module** and imported into the database file. Tables defined inline in the database file (or not exported) cannot be loaded by the migration CLI — `db push`/`db generate` will fail with an explicit error rather than silently generating empty migrations.
+
 ### 3. Define your database
 
 ```ts
@@ -229,13 +233,15 @@ Actions can live inline in the database file or in separate files:
 
 ```
 src/databases/
-  main.ts              # defineDatabase() call
+  main.ts              # defineDatabase() call (may also contain action() definitions)
   schema.ts            # Drizzle schema (excluded from action discovery)
   actions/
     createUser.ts      # import { action } from '../main'
     getUser.ts
     listUsers.ts
 ```
+
+Both styles are fully supported: the Vite plugin transforms `action()` definitions in the database file itself exactly like those in separate files — they're registered with the DO and rewritten into RPC stubs.
 
 Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery.
 
@@ -295,6 +301,15 @@ The `db` CLI manages your migration lifecycle. All commands share these options:
 | `-d, --databases-dir <dir>` | `src/databases` | Directory containing database definitions |
 | `-v, --verbose` | `false` | Show detailed output |
 
+**Schema loading is strict.** When a database declares tables in `defineDatabase({ schema })`, every command that loads the schema (`push`, `generate`, `status`, `validate`) fails with exit code 1 — instead of reporting "no changes" — if:
+
+- the tables are defined inline in the database file instead of a schema module
+- the schema import can't be resolved
+- the schema module fails to build
+- any declared table is missing from the schema module's exports
+
+A database with no `schema` declared at all is still skipped silently — that's a valid (if unusual) configuration.
+
 ### `db push`
 
 Push schema changes to dev migrations. This is the command you run most often during development.
@@ -311,24 +326,25 @@ db push --databases-dir ./src/db
 2. Parses each file for `defineDatabase()` calls
 3. For each database:
    - Loads the current production snapshot (`_snapshot.json` in the migrations directory)
-   - Checks if the production snapshot has changed since the last push (e.g. a teammate committed a migration) -- if so, **automatically resets dev state** for that database
-   - Loads the dev snapshot (falls back to the production snapshot if none exists yet)
    - Generates a fresh snapshot from your current Drizzle schema
    - Diffs the two snapshots to produce SQL migration statements
-   - If there are changes: writes an incremental dev migration file (e.g. `0001_dev.sql`) and updates the dev snapshot
+   - If there are changes: replaces any previous dev migration with a **single squashed migration** named after a hash of its content (e.g. `dev_a1b2c3d4.sql`). `CREATE TABLE`/`CREATE INDEX` statements get `IF NOT EXISTS` added so the squashed migration can overlay tables a previous dev migration already created
+   - If the same content hash already exists, nothing is rewritten — the DO recognizes the migration name and skips it
 
 **Output example:**
 
 ```
-[db:push] main: 0001_dev (3 statements)
-[db:push] analytics: no changes
+✓ main: dev_a1b2c3d4 (3 statements)
+· analytics: no changes
 ```
 
-If a production snapshot change is detected:
+When nothing changed anywhere:
 
 ```
-[db:push] Production snapshot changed for main -- dev state reset
-[db:push] main: 0001_dev (1 statement)
+· main: no changes
+· analytics: no changes
+
+All databases are up to date.
 ```
 
 Dev migrations are stored in `node_modules/.cache/@eagerpatch/durable-db/` and are never committed to git. They are loaded automatically by the Vite plugin in dev mode.
@@ -367,8 +383,9 @@ db generate --database main add_posts_table
 **Output example:**
 
 ```
-[db:generate] main: 20240315123045_add_user_bio (2 statements)
-  -> migrations/main/20240315123045_add_user_bio.sql
+✓ main: 20240315123045_add_user_bio
+  → migrations/main/20240315123045_add_user_bio.sql
+  2 statement(s)
 ```
 
 **Migration file naming:**
@@ -390,31 +407,32 @@ db status --verbose
 ```
 Dev Epoch: m1a2b3c
 
-main
-  Production migrations: 3
-  Dev migrations: 2
-  Uncommitted changes: 1 statement(s)
-  Pending SQL:
-    ALTER TABLE users ADD COLUMN bio TEXT
-  Last push: 2024-03-15T10:30:00.000Z
+📦 main
+   Production migrations: 3
+   Dev migrations: 1
+   📝 Uncommitted changes: 1 statement(s)
+   Pending SQL:
+     - ALTER TABLE users ADD COLUMN bio TEXT
+   Last push: 2024-03-15T10:30:00.000Z
 
-analytics
-  Production migrations: 1
-  Dev migrations: 0
-  Schema is up to date
+📦 analytics
+   Production migrations: 1
+   Dev migrations: 0
+   ✓ Schema is up to date
 ```
 
-Shows per-database: production migration count, dev migration count, whether there are uncommitted schema changes (pending SQL statements that haven't been pushed yet), and the last push timestamp.
+Shows per-database: production migration count, dev migration count, whether there are uncommitted schema changes (pending SQL statements that haven't been pushed yet), and the last push timestamp. If a teammate committed new production migrations since your last push, a `⚠️ Production snapshot changed - run 'db:reset' to sync` warning appears.
 
 ### `db reset`
 
-Reset dev state and (optionally) create fresh database instances.
+Reset dev state and create fresh database instances via an epoch bump.
 
 ```bash
 db reset
 db reset --keep-epoch
 db reset --database main
 db reset --database main --keep-epoch
+db reset --purge-local-storage
 ```
 
 **Extra flags:**
@@ -423,20 +441,24 @@ db reset --database main --keep-epoch
 |------|-------------|
 | `--keep-epoch` | Only clear dev migrations; keep the same DO instances |
 | `--database <db>` | Only reset this specific database |
+| `--purge-local-storage` | Also delete workerd's persisted DO storage under `.wrangler/` (requires the dev server to be stopped) |
 
 **Two modes:**
 
 | Mode | What happens |
 |------|-------------|
-| **Full reset** (default) | Bumps the epoch. All local DO instances start fresh on next access. Clears all dev migrations and snapshots. |
+| **Full reset** (default) | Bumps the epoch. All databases rotate to brand-new DO instances on the next request — fresh, empty SQLite with migrations re-applied. Clears all dev migrations and snapshots. Works while the dev server is running. |
 | **Keep epoch** (`--keep-epoch`) | Only clears dev migrations and snapshots. Existing DO instances keep running with their current data. |
+
+**How fresh instances work**: in dev, every DO instance key is suffixed with the current epoch (`<key>__dev_<epoch>`) by the generated stubs. Bumping the epoch makes `idFromName()` resolve to entirely new DO instances, so the old tables can never collide with the new schema. The Vite dev server watches the dev-state file and reloads automatically when the epoch changes — no restart needed.
+
+**Disk space**: the previous instances' SQLite files stay orphaned under `.wrangler/state/v3/do` until you purge them. Run `db reset --purge-local-storage` (with the dev server **stopped** — workerd keeps deleted storage open and breaks with `internal error; reference = …` until restart) or simply `rm -rf .wrangler` whenever you want the disk back. With `--database <db>`, only the storage directories matching that database's DO class are purged.
 
 **Output example:**
 
 ```
-[db:reset] New epoch: m1a2b3c -> n4d5e6f
-[db:reset] main: reset
-[db:reset] analytics: reset
+✓ New epoch: n4d5e6f — databases start fresh on the next request
+✓ Reset databases: main, analytics
 ```
 
 ### `db validate`
@@ -468,17 +490,22 @@ db validate --verbose
 **Output example (success):**
 
 ```
-[db:validate] main: 5 migrations applied (3 prod, 2 dev)
-[db:validate] main: schema matches
-[db:validate] All validations passed
+✓ main: 5 migration(s) (includes dev migrations)
+  Schema matches ✓
 ```
 
 **Output example (failure):**
 
 ```
-[db:validate] main: error in migration 20240315123045_bad
-  near "INVALID": syntax error
-[db:validate] Validation failed
+✗ main: 5 migration(s)
+  ✗ 20240315123045_bad[0]: near "INVALID": syntax error
+```
+
+Schema drift (migrations ran cleanly but produce a different schema than your Drizzle definition) is reported as:
+
+```
+  ⚠ Schema drift detected:
+    [missing] table users: column bio
 ```
 
 **Exit codes:**
@@ -498,8 +525,8 @@ import * as db from '@eagerpatch/durable-db/cli';
 const pushResults = await db.push({ verbose: true });
 const statusResults = await db.status();
 const generateResults = await db.generate({}, { name: 'add_bio' });
-const resetResult = await db.reset({}, { keepEpoch: false });
-const validateResults = await db.validate({}, { includeDev: true });
+const resetResult = await db.reset({}, { keepEpoch: false, purgeLocalStorage: false });
+const validateResults = await db.validate({ noDev: false });
 ```
 
 ---
@@ -512,7 +539,7 @@ Dev migrations are ephemeral migration files used during development for fast it
 
 - **Created by**: `db push`
 - **Location**: `node_modules/.cache/@eagerpatch/durable-db/databases/<dbName>/migrations/`
-- **Naming**: Sequential -- `0001_dev.sql`, `0002_dev.sql`, etc.
+- **Naming**: Content-hash based -- a single squashed `dev_<hash>.sql` that is replaced (not appended to) on every push with changes. The deterministic name lets the DO skip migrations it has already applied
 - **Lifecycle**: Cleared when you run `db generate` (consolidated into production) or `db reset`
 - **Never committed to git**
 
@@ -559,21 +586,22 @@ When you run `db reset` (without `--keep-epoch`), a new epoch is generated. This
 
 The epoch is a base36-encoded timestamp stored in `node_modules/.cache/@eagerpatch/durable-db/state.json`.
 
+**How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:eagerpatch/durable-db/__devEpoch`) exporting `applyDevEpoch(key)`, and every generated stub routes its instance key through it. In dev the plugin embeds the current epoch from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches `state.json` and invalidates the virtual module on change, so an epoch bump from `db reset` takes effect on the next request without restarting.
+
 ### Dev State Structure
 
 ```
 node_modules/.cache/@eagerpatch/durable-db/
-  state.json                          # Global state (epoch, per-db counters)
+  state.json                          # Global state (epoch, per-db push info)
   databases/
     main/
       _snapshot.json                  # Dev snapshot (schema state)
       migrations/
-        0001_dev.sql
-        0002_dev.sql
+        dev_a1b2c3d4.sql              # Single squashed dev migration (content-hash name)
     analytics/
       _snapshot.json
       migrations/
-        0001_dev.sql
+        dev_e5f6a7b8.sql
 ```
 
 The `state.json` file tracks:
@@ -604,7 +632,7 @@ db push
 pnpm dev
 
 # 4. Iterate: edit schema -> push -> refresh browser
-# 5. If you need a clean slate:
+# 5. If you need a clean slate (works while the dev server is running):
 db reset
 ```
 
@@ -626,7 +654,7 @@ git commit -m "Add user profiles migration"
 
 **Team collaboration:**
 
-When a teammate commits a production migration, `db push` automatically detects the snapshot hash change and resets your dev state for that database. Your next push rebuilds dev migrations cleanly on top of the new production baseline.
+`db push` always diffs against the *current* production snapshot, so after pulling a teammate's migration your next push rebuilds the squashed dev migration on top of the new baseline automatically. If your local DO instances already applied an outdated dev migration, run `db reset` to rotate to fresh instances — `db status` warns with `⚠️ Production snapshot changed` when this applies.
 
 ---
 
@@ -655,8 +683,8 @@ databasePlugin({
 1. **Discovery**: Finds all `defineDatabase()` files in your databases directory (excludes `schema.ts`, `_*.ts`, `.d.ts`)
 2. **AST Parsing**: Uses Babel to extract database config and action definitions (no regexes)
 3. **Migration Loading**: Loads production migrations from disk; in dev mode also loads dev migrations from cache
-4. **Code Generation**: Produces a virtual module (`virtual:eagerpatch/durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods
-5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker
+4. **Code Generation**: Produces a virtual module (`virtual:eagerpatch/durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods, plus a `virtual:eagerpatch/durable-db/__devEpoch` module that suffixes DO instance keys with the dev epoch (identity in production builds)
+5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker. This applies to actions in separate files *and* actions defined in the database file itself
 6. **Wrangler Patching**: Automatically updates `wrangler.jsonc` with Durable Object bindings and SQLite migration entries
 7. **HMR**: Watches database files and invalidates the virtual module on change
 
@@ -686,6 +714,7 @@ The plugin transforms each `action()` definition into two things:
 The stub function:
 - Validates args with ArkType
 - Checks if we're already inside the same DO (via AsyncLocalStorage) for a fast direct-call path
+- Computes the instance key (`getTenantId()` or `"global"`) and routes it through `applyDevEpoch()` (dev-epoch suffix in dev, identity in production — see [Epoch System](#epoch-system))
 - Otherwise, resolves the DO instance via `env.BINDING.idFromName(instanceKey)` and calls `stub.rpc()`
 
 ---
@@ -874,7 +903,7 @@ After 3 consecutive failed migration attempts, PITR restore is skipped and the e
 In development, migrations run against ephemeral state cached under `node_modules/.cache/@eagerpatch/durable-db/`. Use whichever matches your situation:
 
 - **Reset one tenant's data while keeping schema**: call `destroyDatabase()` from a route. This runs `ctx.storage.deleteAll()` on the current tenant's DO and re-runs migrations on the next call.
-- **Reset _every_ tenant's data for a database**: bump the dev epoch with `pnpm db reset` (or `pnpm db reset --database main`). Instance keys get a new `__dev_<epoch>` suffix, so every tenant starts from empty SQLite.
+- **Reset _every_ tenant's data for a database**: run `pnpm db reset` (or `pnpm db reset --database main`) — the dev server can keep running. Instance keys get a new `__dev_<epoch>` suffix, so every tenant rotates to a brand-new DO with empty SQLite on the next request. Add `--purge-local-storage` (dev server stopped) when you also want the orphaned instances' files deleted from `.wrangler/`.
 - **Drop everything and re-derive migrations from the schema**: `rm -rf node_modules/.cache/@eagerpatch/durable-db` and restart `pnpm dev`. The plugin regenerates dev migrations from the current schema.
 
 ### Snapshot corruption (`_snapshot.json`)
@@ -942,7 +971,7 @@ The library includes plugins for transparent data mapping between JavaScript and
 
 - **DrizzleDefaultsPlugin**: Auto-populates columns with Drizzle's `$defaultFn()` on INSERT (e.g. auto-generated IDs, `createdAt` timestamps) and `$onUpdateFn()` on UPDATE (e.g. `updatedAt` timestamps). Columns that are explicitly provided in the query are not overridden.
 - **SchemaPlugin**: Schema-aware extension of Kysely's `CamelCasePlugin`. Maps camelCase JS property names to snake_case SQL names for both tables and columns using Drizzle schema metadata. Falls back to standard CamelCasePlugin behavior for names not in the schema.
-- **DateSerializePlugin**: Converts `Date` objects to ISO strings (`YYYY-MM-DD HH:MM:SS`) for SQLite storage, and parses them back on read.
+- **DateSerializePlugin**: Converts `Date` objects to `YYYY-MM-DD HH:MM:SS` strings for SQLite storage, and parses them back into `Date` objects on read. The read path is deliberately conservative: only values in exactly the format the write path produces (also what SQLite's `CURRENT_TIMESTAMP` emits) are converted, and — when constructed with a schema — only for columns Drizzle declares as date-typed (e.g. `integer({ mode: 'timestamp' })`). User-stored strings in `text()` columns (ISO strings with a `T` separator, timezone, or milliseconds) round-trip verbatim.
 
 All three plugins are automatically configured when using `createDrizzlePlugins(schema)`.
 

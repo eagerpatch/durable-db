@@ -96,6 +96,8 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 - Dev migrations: ephemeral, stored in `node_modules/.cache/@eagerpatch/durable-db/`
 - Production migrations: `.sql` files in the Vite plugin's `migrationsDir` (default: `migrations/<dbName>/`), created via `db generate`
 - Dev epoch suffixing allows resetting local databases without conflicts
+- Schema loading (`loadSchema` in `src/cli/shared.ts`) is strict: declared-but-unloadable tables (inline definitions, unresolvable imports, missing exports, build failures) throw instead of silently producing "no changes". Only databases with zero declared tables are skipped.
+- Dev epoch wiring: generated stubs route every instance key through `applyDevEpoch()` from the virtual module `virtual:eagerpatch/durable-db/__devEpoch`. In dev the Vite plugin embeds the current epoch from `state.json` (and watches it, invalidating the module on change); in production builds the epoch is null and the function is the identity. `db reset` bumps the epoch → fresh DO instances on the next request, dev server running or not. `--purge-local-storage` optionally deletes the orphaned instances under `.wrangler/state/v3/do` (dev server must be stopped for that).
 
 ### Database Instance Strategies
 
@@ -122,12 +124,13 @@ export const userProfiles = table('userProfiles', {
 
 - **DrizzleDefaultsPlugin**: auto-populates columns with `$defaultFn()` on INSERT and `$onUpdateFn()` on UPDATE
 - **SchemaPlugin** (extends CamelCasePlugin): schema-aware camelCase ↔ snake_case for both table and column names, falls back to standard CamelCasePlugin
-- **DateSerializePlugin**: handles Date serialization/deserialization for SQLite
+- **DateSerializePlugin**: handles Date serialization/deserialization for SQLite. Writes Dates as `YYYY-MM-DD HH:MM:SS`; the read path only converts values in exactly that format back to `Date` (and, when constructed with a schema, only for Drizzle date-typed columns). User-stored ISO strings in `text()` columns round-trip verbatim — date-ish data should use `integer({ mode: 'timestamp' })`.
 
 ## Key Conventions
 
 - Database definition files live in `src/databases/`. Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery.
-- Actions can be defined inline in the database file or in separate files in the same directory.
+- Actions can be defined inline in the database file or in separate files in the same directory. Both are transformed identically: `transformDatabaseFile` handles same-file actions (plus `destroyDatabase`), `transformActionFile` handles separate files.
+- Schema tables must be defined in a schema module and imported into the database file — inline table definitions can't be loaded by the migration CLI and fail loudly.
 - The Vite plugin uses Babel (not regex) for all source code analysis.
 - Build output is ESM-only via tsdown.
 - Tests mirror source structure under `tests/`.

@@ -234,6 +234,77 @@ export const { action } = defineDatabase({
       expect(fs.existsSync(db1Dir)).toBe(false);
       expect(fs.existsSync(db2Dir)).toBe(true); // db2 should still exist
     });
+
+    it('keeps local DO storage by default (epoch bump handles freshness)', async () => {
+      const doDir = path.join(tempDir, '.wrangler', 'state', 'v3', 'do', 'worker-MainDatabaseDO');
+      fs.mkdirSync(doDir, { recursive: true });
+      fs.writeFileSync(path.join(doDir, 'abc123.sqlite'), 'fake sqlite');
+
+      const result = await reset({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      expect(fs.existsSync(doDir)).toBe(true);
+      expect(result.clearedStorageDirs).toEqual([]);
+    });
+
+    it('purges local DO storage when purgeLocalStorage is true', async () => {
+      const doDir = path.join(tempDir, '.wrangler', 'state', 'v3', 'do', 'worker-MainDatabaseDO');
+      fs.mkdirSync(doDir, { recursive: true });
+      fs.writeFileSync(path.join(doDir, 'abc123.sqlite'), 'fake sqlite');
+
+      const result = await reset(
+        { projectRoot: tempDir, databasesDir: 'src/databases' },
+        { purgeLocalStorage: true }
+      );
+
+      expect(fs.existsSync(doDir)).toBe(false);
+      expect(result.clearedStorageDirs).toHaveLength(1);
+      expect(result.clearedStorageDirs[0]).toContain('.wrangler');
+    });
+
+    it('reports no purged storage when .wrangler does not exist', async () => {
+      const result = await reset(
+        { projectRoot: tempDir, databasesDir: 'src/databases' },
+        { purgeLocalStorage: true }
+      );
+
+      expect(result.clearedStorageDirs).toEqual([]);
+    });
+
+    it('only purges the matching DO storage for a targeted reset', async () => {
+      // Two databases with discoverable definition files
+      createMockDatabase('main', `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
+export const users = sqliteTable('users', { id: text('id').primaryKey() });
+`);
+      fs.writeFileSync(
+        path.join(databasesDir, 'analytics.ts'),
+        `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action } = defineDatabase({
+  schema: { users },
+});
+`
+      );
+
+      const mainDoDir = path.join(tempDir, '.wrangler', 'state', 'v3', 'do', 'worker-MainDatabaseDO');
+      const analyticsDoDir = path.join(tempDir, '.wrangler', 'state', 'v3', 'do', 'worker-AnalyticsDatabaseDO');
+      fs.mkdirSync(mainDoDir, { recursive: true });
+      fs.mkdirSync(analyticsDoDir, { recursive: true });
+
+      const result = await reset(
+        { projectRoot: tempDir, databasesDir: 'src/databases' },
+        { database: 'main', purgeLocalStorage: true }
+      );
+
+      expect(fs.existsSync(mainDoDir)).toBe(false);
+      expect(fs.existsSync(analyticsDoDir)).toBe(true);
+      expect(result.clearedStorageDirs).toEqual([mainDoDir]);
+    });
   });
 
   describe('integration: reset and push', () => {

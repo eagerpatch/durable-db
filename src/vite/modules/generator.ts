@@ -12,6 +12,18 @@ const generate =
     : (_generate as unknown as { default: typeof _generate }).default;
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+/**
+ * Virtual module (served by the Vite plugin) exporting `applyDevEpoch(key)`.
+ * In dev it suffixes instance keys with the current dev epoch so `db reset`
+ * (which bumps the epoch) yields fresh DO instances; in production builds it
+ * is the identity function.
+ */
+export const DEV_EPOCH_IMPORT = 'virtual:eagerpatch/durable-db/__devEpoch';
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -827,14 +839,24 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
   return [doDecl, fastIf];
 }
 
+/**
+ * Build `applyDevEpoch(<baseKey>)` — instance keys always pass through the
+ * dev-epoch helper so `db reset` can rotate to fresh DO instances in dev.
+ */
+function buildInstanceKeyExpr(database: DatabaseInfo): t.CallExpression {
+  const baseKeyExpr =
+    database.instance === 'global'
+      ? t.stringLiteral('global')
+      : t.callExpression(t.identifier('getTenantId'), []);
+
+  return t.callExpression(t.identifier('applyDevEpoch'), [baseKeyExpr]);
+}
+
 function buildStubBodyStatements(config: StubConfig): t.Statement[] {
   const { action, database } = config;
 
   const bindingExpr = t.memberExpression(t.identifier('env'), t.identifier(database.bindingName));
-  const instanceKeyExpr =
-    database.instance === 'global'
-      ? t.stringLiteral('global')
-      : t.callExpression(t.identifier('getTenantId'), []);
+  const instanceKeyExpr = buildInstanceKeyExpr(database);
 
   const commonStatements: t.Statement[] = [
     // const argsSchema = type({...});
@@ -919,35 +941,38 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
 }
 
 // ============================================================================
-// Action File Transform
+// Action Transform (shared by action files and database definition files)
 // ============================================================================
 
-export function transformActionFile(options: TransformOptions) {
-  const {
-    code,
-    sourceFileName,
-    dbName,
-    database,
-    actionsInFile,
-    contextImport,
-    registryImport,
-  } = options;
+interface ActionTransformContext {
+  dbName: string;
+  database: DatabaseInfo;
+  actionsInFile: ActionInfo[];
+  contextImport: string;
+  registryImport: string;
+}
 
-  if (actionsInFile.length === 0) return null;
+/**
+ * Rewrite `export const x = action({...})` declarations in the given program
+ * body into validator + handler registration + RPC stub. Mutates `body` in
+ * place. Returns whether any transformation was applied.
+ */
+function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext): boolean {
+  const { dbName, database, actionsInFile, contextImport, registryImport } = ctx;
 
-  const actionNames = new Set(actionsInFile.map((a) => a.exportName));
-  const ast = parseProgram(code);
-  const body = ast.program.body;
+  if (actionsInFile.length === 0) return false;
 
   ensureNamedImports(body, 'arktype', ['type']);
   ensureNamedImports(body, contextImport, ['getTenantId']);
   ensureNamedImports(body, 'cloudflare:workers', ['env']);
   ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction']);
+  ensureNamedImports(body, DEV_EPOCH_IMPORT, ['applyDevEpoch']);
 
   if (database.transport === 'websocket') {
     ensureNamedImports(body, '@eagerpatch/durable-db/transport/websocket', ['WebSocketTransport']);
   }
 
+  const actionNames = new Set(actionsInFile.map((a) => a.exportName));
   const out: t.Statement[] = [];
 
   for (const stmt of body) {
@@ -1031,12 +1056,27 @@ export function transformActionFile(options: TransformOptions) {
     }
   }
 
-  ast.program.body = out;
+  body.splice(0, body.length, ...out);
+  return true;
+}
+
+// ============================================================================
+// Action File Transform
+// ============================================================================
+
+export function transformActionFile(options: TransformOptions) {
+  const { code, sourceFileName, ...ctx } = options;
+
+  if (ctx.actionsInFile.length === 0) return null;
+
+  const ast = parseProgram(code);
+  applyActionTransforms(ast.program.body, ctx);
+
   return generateWithMap(ast, sourceFileName);
 }
 
 // ============================================================================
-// Database Definition File Transform (for destroyDatabase)
+// Database Definition File Transform (destroyDatabase + same-file actions)
 // ============================================================================
 
 export interface TransformDatabaseFileOptions {
@@ -1044,20 +1084,57 @@ export interface TransformDatabaseFileOptions {
   sourceFileName?: string;
   database: DatabaseInfo;
   contextImport: string;
+  /** `action()` definitions that live in the database file itself. */
+  actionsInFile?: ActionInfo[];
+  registryImport?: string;
 }
 
 /**
- * Transform a database definition file to replace the `destroyDatabase` placeholder
- * with a generated stub that calls the DO's `sys("destroyDatabase")` method.
+ * Transform a database definition file:
+ * - replaces the `destroyDatabase` placeholder (when destructured) with a
+ *   generated stub that calls the DO's `sys("destroyDatabase")` method
+ * - rewrites same-file `action()` definitions into RPC stubs, exactly like
+ *   action files that import the factory — without this, same-file actions
+ *   pass discovery but throw "called without transformation" at runtime
  *
- * Returns null if `destroyDatabase` is not destructured from `defineDatabase()`.
+ * Returns null when there is nothing to transform.
  */
 export function transformDatabaseFile(options: TransformDatabaseFileOptions) {
-  const { code, sourceFileName, database, contextImport } = options;
+  const {
+    code,
+    sourceFileName,
+    database,
+    contextImport,
+    actionsInFile = [],
+    registryImport = '@eagerpatch/durable-db/registry',
+  } = options;
 
   const ast = parseProgram(code);
   const body = ast.program.body;
 
+  const destroyTransformed = applyDestroyDatabaseTransform(body, database, contextImport);
+  const actionsTransformed = applyActionTransforms(body, {
+    dbName: database.name,
+    database,
+    actionsInFile,
+    contextImport,
+    registryImport,
+  });
+
+  if (!destroyTransformed && !actionsTransformed) return null;
+
+  return generateWithMap(ast, sourceFileName);
+}
+
+/**
+ * Replace a destructured `destroyDatabase` with a generated stub.
+ * Mutates `body` in place. Returns whether the transform was applied.
+ */
+function applyDestroyDatabaseTransform(
+  body: t.Statement[],
+  database: DatabaseInfo,
+  contextImport: string
+): boolean {
   // Find the `export const { action, destroyDatabase } = defineDatabase(...)` pattern
   let found = false;
 
@@ -1087,20 +1164,18 @@ export function transformDatabaseFile(options: TransformDatabaseFileOptions) {
     }
   }
 
-  if (!found) return null;
+  if (!found) return false;
 
   // Add required imports
   ensureNamedImports(body, 'cloudflare:workers', ['env']);
+  ensureNamedImports(body, DEV_EPOCH_IMPORT, ['applyDevEpoch']);
   if (database.instance === 'per-tenant') {
     ensureNamedImports(body, contextImport, ['getTenantId']);
   }
 
   // Build the destroyDatabase stub function
   const bindingExpr = t.memberExpression(t.identifier('env'), t.identifier(database.bindingName));
-  const instanceKeyExpr =
-    database.instance === 'global'
-      ? t.stringLiteral('global')
-      : t.callExpression(t.identifier('getTenantId'), []);
+  const instanceKeyExpr = buildInstanceKeyExpr(database);
 
   const stubBody = t.blockStatement([
     // const instanceKey = getTenantId() or "global"
@@ -1149,7 +1224,7 @@ export function transformDatabaseFile(options: TransformDatabaseFileOptions) {
 
   body.push(t.exportNamedDeclaration(funcDecl));
 
-  return generateWithMap(ast, sourceFileName);
+  return true;
 }
 
 function isDefineDatabaseCallNode(node: t.Node | null | undefined): node is t.CallExpression {

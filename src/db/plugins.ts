@@ -21,7 +21,7 @@ import {
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { getTableConfig, SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
 import { getTableColumns, getTableName, is, isSQLWrapper, Table } from 'drizzle-orm';
-import { toCamelCase } from 'drizzle-orm/casing';
+import { toCamelCase, toSnakeCase } from 'drizzle-orm/casing';
 
 /**
  * Schema-aware CamelCasePlugin that uses Drizzle schema for column name mapping.
@@ -281,9 +281,16 @@ export const dateSerializers = {
    * Parses assuming UTC timezone
    */
   deserialize(value: string): Date {
+    const normalized = value.replace(' ', 'T');
+    // Strings that already carry timezone info (Z or ±HH:MM) must be parsed
+    // as-is — appending another 'Z' would produce an Invalid Date, which
+    // serializes to null over RPC/JSON.
+    if (/(?:Z|[+-]\d{2}:?\d{2})$/.test(normalized)) {
+      return new Date(normalized);
+    }
     // SQLite CURRENT_TIMESTAMP is UTC but without timezone indicator
     // Add 'Z' to make JavaScript parse it as UTC
-    return new Date(value.replace(' ', 'T') + 'Z');
+    return new Date(normalized + 'Z');
   },
 
   /**
@@ -292,15 +299,67 @@ export const dateSerializers = {
   isDateString(value: string): boolean {
     return /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(value);
   },
+
+  /**
+   * Check if a string matches exactly the format produced by serialize()
+   * (and SQLite's CURRENT_TIMESTAMP): `YYYY-MM-DD HH:MM:SS`.
+   *
+   * The read path only deserializes strings in this exact format. Anything
+   * else — full ISO strings with a 'T' separator, timezone, or milliseconds —
+   * was stored by the user as a plain string and must round-trip verbatim.
+   */
+  isSerializedDateString(value: string): boolean {
+    return /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value);
+  },
 };
 
 /**
+ * Collect the names of columns that Drizzle declares as date-typed
+ * (e.g. `integer({ mode: 'timestamp' })`). Includes both the SQL column
+ * name and the JS property name, since result rows may be seen in either
+ * form depending on where this plugin sits relative to CamelCasePlugin.
+ */
+function collectDateColumnNames(schema: Record<string, Table>): Set<string> {
+  const dateColumns = new Set<string>();
+
+  for (const table of Object.values(schema)) {
+    const columns = getTableColumns(table);
+    for (const [propertyName, column] of Object.entries(columns)) {
+      if (column.dataType === 'date') {
+        dateColumns.add(column.name);
+        dateColumns.add(propertyName);
+        // Implicit columns keep the JS property name as column.name at
+        // runtime; the actual SQL column is snake_cased by the migration
+        // layer, so cover that form too.
+        dateColumns.add(toSnakeCase(propertyName));
+      }
+    }
+  }
+
+  return dateColumns;
+}
+
+/**
  * Plugin that serializes/deserializes Date objects for SQLite
- * 
+ *
  * On query: Converts Date objects to ISO strings
- * On result: Converts ISO date strings back to Date objects
+ * On result: Converts stored date strings back to Date objects — but only
+ * for values in the exact format the write path produces, and (when a schema
+ * is provided) only for columns Drizzle declares as date-typed. Plain text
+ * columns holding date-looking strings round-trip verbatim.
  */
 export class DateSerializePlugin implements KyselyPlugin {
+  /**
+   * Names of date-typed columns (SQL and JS forms) when constructed with a
+   * schema; null means "no schema available", which falls back to matching
+   * on value format alone.
+   */
+  private dateColumns: Set<string> | null;
+
+  constructor(schema?: Record<string, Table>) {
+    this.dateColumns = schema ? collectDateColumnNames(schema) : null;
+  }
+
   transformQuery(args: PluginTransformQueryArgs): RootOperationNode {
     // Transform Date values in the query
     return this.transformNode(args.node) as RootOperationNode;
@@ -339,16 +398,26 @@ export class DateSerializePlugin implements KyselyPlugin {
 
   private transformRow(row: UnknownRow): UnknownRow {
     const result: UnknownRow = {};
-    
+
     for (const [key, value] of Object.entries(row)) {
-      if (typeof value === 'string' && dateSerializers.isDateString(value)) {
+      if (typeof value === 'string' && this.shouldDeserialize(key, value)) {
         result[key] = dateSerializers.deserialize(value);
       } else {
         result[key] = value;
       }
     }
-    
+
     return result;
+  }
+
+  private shouldDeserialize(key: string, value: string): boolean {
+    // With a schema, only columns Drizzle declares as date-typed qualify
+    if (this.dateColumns && !this.dateColumns.has(key)) {
+      return false;
+    }
+    // Only deserialize the exact format the write path produces. User-stored
+    // strings (ISO with 'T'/timezone/milliseconds) round-trip verbatim.
+    return dateSerializers.isSerializedDateString(value);
   }
 }
 
@@ -409,6 +478,6 @@ export function createDrizzlePlugins(
     plugins.push(new SchemaPlugin(schema));
   }
 
-  plugins.push(new DateSerializePlugin());
+  plugins.push(new DateSerializePlugin(schema as unknown as Record<string, Table>));
   return plugins;
 }

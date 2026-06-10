@@ -348,6 +348,28 @@ describe('DateSerializePlugin', () => {
       const deserialized = dateSerializers.deserialize(serialized);
       expect(deserialized.toISOString()).toBe(original.toISOString());
     });
+
+    it('does not double-append Z to strings that already carry a timezone', () => {
+      // Regression: deserialize used to blindly append 'Z', turning
+      // '...00.000Z' into '...00.000ZZ' → Invalid Date → null over RPC
+      const date = dateSerializers.deserialize('2025-06-15T14:30:45.123Z');
+      expect(Number.isNaN(date.getTime())).toBe(false);
+      expect(date.toISOString()).toBe('2025-06-15T14:30:45.123Z');
+    });
+
+    it('parses strings with explicit UTC offsets as-is', () => {
+      const date = dateSerializers.deserialize('2025-06-15T14:30:45+02:00');
+      expect(date.toISOString()).toBe('2025-06-15T12:30:45.000Z');
+    });
+
+    it('isSerializedDateString only matches the exact write format', () => {
+      expect(dateSerializers.isSerializedDateString('2025-06-15 14:30:45')).toBe(true);
+      // ISO strings (user-stored text) must NOT match
+      expect(dateSerializers.isSerializedDateString('2025-06-15T14:30:45')).toBe(false);
+      expect(dateSerializers.isSerializedDateString('2025-06-15T14:30:45.000Z')).toBe(false);
+      expect(dateSerializers.isSerializedDateString('2025-06-15 14:30:45.123')).toBe(false);
+      expect(dateSerializers.isSerializedDateString('not a date')).toBe(false);
+    });
   });
 
   describe('query transformation', () => {
@@ -390,6 +412,61 @@ describe('DateSerializePlugin', () => {
         queryId: {} as any,
       });
       expect(result.rows).toEqual([]);
+    });
+
+    it('round-trips user-stored ISO strings in text columns verbatim', async () => {
+      // Regression: `created: text()` holding new Date().toISOString() used
+      // to come back as Invalid Date (→ null over the action RPC)
+      const plugin = new DateSerializePlugin();
+      const iso = '2026-06-10T08:30:00.000Z';
+      const result = await plugin.transformResult({
+        result: { rows: [{ created: iso, created_at: iso, name: 'x' }] },
+        queryId: {} as any,
+      });
+
+      expect(result.rows[0].created).toBe(iso);
+      expect(result.rows[0].created_at).toBe(iso);
+    });
+
+    it('leaves T-separated strings without timezone alone', async () => {
+      const plugin = new DateSerializePlugin();
+      const result = await plugin.transformResult({
+        result: { rows: [{ created: '2026-06-10T08:30:00' }] },
+        queryId: {} as any,
+      });
+      expect(result.rows[0].created).toBe('2026-06-10T08:30:00');
+    });
+  });
+
+  describe('schema-aware result transformation', () => {
+    // products: createdAt is integer({ mode: 'timestamp' }) → date-typed;
+    // users: createdAt is text('created_at') → plain string column
+    it('deserializes date-typed columns', async () => {
+      const plugin = new DateSerializePlugin({ products: productsImplicit } as any);
+      const result = await plugin.transformResult({
+        result: { rows: [{ created_at: '2025-06-15 14:30:45' }] },
+        queryId: {} as any,
+      });
+      expect(result.rows[0].created_at).toBeInstanceOf(Date);
+    });
+
+    it('matches date-typed columns by JS property name too', async () => {
+      const plugin = new DateSerializePlugin({ products: productsImplicit } as any);
+      const result = await plugin.transformResult({
+        result: { rows: [{ createdAt: '2025-06-15 14:30:45' }] },
+        queryId: {} as any,
+      });
+      expect(result.rows[0].createdAt).toBeInstanceOf(Date);
+    });
+
+    it('never deserializes text columns, even with date-like names and values', async () => {
+      const plugin = new DateSerializePlugin({ users: usersExplicit } as any);
+      const result = await plugin.transformResult({
+        result: { rows: [{ created_at: '2025-06-15 14:30:45' }] },
+        queryId: {} as any,
+      });
+      // users.createdAt is text() — not a Drizzle date column
+      expect(result.rows[0].created_at).toBe('2025-06-15 14:30:45');
     });
   });
 });

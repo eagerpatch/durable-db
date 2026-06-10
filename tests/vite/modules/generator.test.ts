@@ -362,7 +362,7 @@ export const createUser = action({
       actionsInFile: [logEventAction],
     });
 
-    expect(result!.code).toContain('instanceKey = "global"');
+    expect(result!.code).toContain('instanceKey = applyDevEpoch("global")');
   });
 
   it('uses getTenantId() for per-tenant databases', () => {
@@ -374,6 +374,20 @@ export const createUser = action({
     });
 
     expect(result!.code).toContain('getTenantId()');
+  });
+
+  it('routes every instance key through applyDevEpoch', () => {
+    const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toContain('instanceKey = applyDevEpoch(getTenantId())');
+    expect(result!.code).toMatch(
+      /import\s*\{[^}]*applyDevEpoch[^}]*\}\s*from\s*["']virtual:eagerpatch\/durable-db\/__devEpoch["']/
+    );
   });
 
   it('transforms multiple actions', () => {
@@ -553,7 +567,7 @@ export const { action, destroyDatabase } = defineDatabase({
 
     expect(result).not.toBeNull();
     expect(result!.code).toContain('export async function destroyDatabase');
-    expect(result!.code).toContain('instanceKey = "global"');
+    expect(result!.code).toContain('instanceKey = applyDevEpoch("global")');
     expect(result!.code).not.toContain('getTenantId');
   });
 
@@ -629,5 +643,78 @@ export const { action, destroyDatabase } = defineDatabase({ schema: {} });
     });
 
     expect(result!.map).toBeDefined();
+  });
+
+  describe('same-file actions', () => {
+    const dbFileWithAction = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action } = defineDatabase({
+  schema: { users },
+});
+
+export const createUser = action({
+  args: { name: 'string', email: 'string.email' },
+  handler: async (db, args) => db.insertInto('users').values(args).execute(),
+});
+`;
+
+    it('rewrites same-file action() definitions into RPC stubs', () => {
+      const result = transformDatabaseFile({
+        ...defaultDbFileOptions,
+        code: dbFileWithAction,
+        actionsInFile: [createUserAction],
+        registryImport: '@eagerpatch/durable-db/registry',
+      });
+
+      expect(result).not.toBeNull();
+      expect(result!.code).toContain('export async function createUser(args)');
+      expect(result!.code).toContain('registerAction("main", "createUser"');
+      expect(result!.code).toContain('env.MAIN_DATABASE_DO.idFromName(instanceKey)');
+      expect(result!.code).toContain('stub.rpc("createUser", validatedArgs');
+      // The original placeholder call-site must be gone
+      expect(result!.code).not.toContain('createUser = action(');
+    });
+
+    it('adds the imports the stub needs', () => {
+      const result = transformDatabaseFile({
+        ...defaultDbFileOptions,
+        code: dbFileWithAction,
+        actionsInFile: [createUserAction],
+        registryImport: '@eagerpatch/durable-db/registry',
+      });
+
+      expect(result!.code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']arktype["']/);
+      expect(result!.code).toMatch(/import\s*\{[^}]*env[^}]*\}\s*from\s*["']cloudflare:workers["']/);
+      expect(result!.code).toMatch(/import\s*\{[^}]*registerAction[^}]*\}\s*from\s*["']@eagerpatch\/durable-db\/registry["']/);
+    });
+
+    it('transforms both destroyDatabase and same-file actions together', () => {
+      const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action, destroyDatabase } = defineDatabase({
+  schema: { users },
+});
+
+export const createUser = action({
+  args: { name: 'string', email: 'string.email' },
+  handler: async (db, args) => db.insertInto('users').values(args).execute(),
+});
+`;
+      const result = transformDatabaseFile({
+        ...defaultDbFileOptions,
+        code,
+        actionsInFile: [createUserAction],
+        registryImport: '@eagerpatch/durable-db/registry',
+      });
+
+      expect(result).not.toBeNull();
+      expect(result!.code).toContain('export async function destroyDatabase');
+      expect(result!.code).toContain('export async function createUser(args)');
+      expect(result!.code).toContain('stub.sys("destroyDatabase")');
+    });
   });
 });

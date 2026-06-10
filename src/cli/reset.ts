@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   loadDevState,
   saveDevState,
@@ -25,6 +26,14 @@ export interface ResetOptions {
   database?: string;
   /** Don't bump the epoch (only clear dev migrations) */
   keepEpoch?: boolean;
+  /**
+   * Also delete workerd's persisted DO storage under .wrangler/.
+   *
+   * Not needed for a fresh start — the epoch bump already rotates every
+   * database to a brand-new DO instance. This only reclaims the disk space
+   * of the orphaned instances, and requires the dev server to be stopped.
+   */
+  purgeLocalStorage?: boolean;
 }
 
 export interface ResetResult {
@@ -32,6 +41,61 @@ export interface ResetResult {
   newEpoch: string | null;
   /** Databases that were reset */
   databases: string[];
+  /** Local DO storage directories that were deleted (under .wrangler/) */
+  clearedStorageDirs: string[];
+}
+
+// ============================================================================
+// Local DO Storage (.wrangler)
+// ============================================================================
+
+/**
+ * Path where wrangler/miniflare persist local Durable Object storage.
+ * Both `wrangler dev` and the Cloudflare Vite plugin use this layout.
+ */
+function localDoStorageDir(projectRoot: string): string {
+  return path.join(projectRoot, '.wrangler', 'state', 'v3', 'do');
+}
+
+/**
+ * Delete workerd's persisted Durable Object storage.
+ *
+ * Opt-in via `--purge-local-storage`: a normal reset doesn't need this —
+ * the epoch bump gives every database a fresh DO instance — but the old
+ * instances' SQLite files stay on disk until purged. Must not run while
+ * the dev server is up: workerd keeps deleted storage open and the DO
+ * breaks until restart.
+ *
+ * When `className` is given, only storage directories whose name contains
+ * that database's DO class name are removed; otherwise the whole DO
+ * storage directory is removed.
+ *
+ * Returns the directories that were deleted.
+ */
+export function clearLocalDoStorage(projectRoot: string, className?: string): string[] {
+  const doDir = localDoStorageDir(projectRoot);
+  if (!fs.existsSync(doDir)) {
+    return [];
+  }
+
+  if (!className) {
+    fs.rmSync(doDir, { recursive: true, force: true });
+    debugCli('Cleared local DO storage: %s', doDir);
+    return [doDir];
+  }
+
+  // Miniflare persists each DO namespace in a directory that embeds the
+  // class name (e.g. `<worker>-MainDatabaseDO`). Match on that.
+  const cleared: string[] = [];
+  for (const entry of fs.readdirSync(doDir)) {
+    if (entry.includes(className)) {
+      const dir = path.join(doDir, entry);
+      fs.rmSync(dir, { recursive: true, force: true });
+      debugCli('Cleared local DO storage: %s', dir);
+      cleared.push(dir);
+    }
+  }
+  return cleared;
 }
 
 // ============================================================================
@@ -59,11 +123,12 @@ export async function reset(
   options: ResetOptions = {}
 ): Promise<ResetResult> {
   const { projectRoot = process.cwd(), databasesDir = 'src/databases' } = ctx;
-  const { database: targetDb, keepEpoch = false } = options;
+  const { database: targetDb, keepEpoch = false, purgeLocalStorage = false } = options;
 
   const result: ResetResult = {
     newEpoch: null,
     databases: [],
+    clearedStorageDirs: [],
   };
 
   // Load current dev state
@@ -83,6 +148,14 @@ export async function reset(
     delete devState.databases[targetDb];
     result.databases.push(targetDb);
     debugCli('Reset %s', targetDb);
+
+    if (purgeLocalStorage) {
+      const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir: 'migrations', database: targetDb });
+      const className = databases[0]?.className;
+      if (className) {
+        result.clearedStorageDirs = clearLocalDoStorage(projectRoot, className);
+      }
+    }
   } else {
     // Discover all databases and reset them
     const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir: 'migrations' });
@@ -106,6 +179,10 @@ export async function reset(
           debugCli('Cleaned up orphaned: %s', dir);
         }
       }
+    }
+
+    if (purgeLocalStorage) {
+      result.clearedStorageDirs = clearLocalDoStorage(projectRoot);
     }
   }
 

@@ -102,6 +102,12 @@ describe('resolveId', () => {
     expect(result).toBe('\0virtual:eagerpatch/durable-db/__durableObjects.js');
   });
 
+  it('resolves virtual:eagerpatch/durable-db/__devEpoch', async () => {
+    const resolveId = plugin.resolveId as Function;
+    const result = await resolveId('virtual:eagerpatch/durable-db/__devEpoch');
+    expect(result).toBe('\0virtual:eagerpatch/durable-db/__devEpoch.js');
+  });
+
   it('returns null for registry (now a real module)', async () => {
     const resolveId = plugin.resolveId as Function;
     expect(await resolveId('@eagerpatch/durable-db/registry')).toBeNull();
@@ -112,6 +118,76 @@ describe('resolveId', () => {
     expect(await resolveId('lodash')).toBeNull();
     expect(await resolveId('react')).toBeNull();
     expect(await resolveId('./utils')).toBeNull();
+  });
+});
+
+// ============================================================================
+// __devEpoch virtual module
+// ============================================================================
+
+describe('__devEpoch virtual module', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-epoch-'));
+    fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, 'node_modules'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  async function loadDevEpochModule(command: 'serve' | 'build'): Promise<string> {
+    const plugin = databasePlugin();
+    const configResolved = plugin.configResolved as Function;
+    await configResolved({ root: tempDir, command } as ResolvedConfig);
+
+    const load = plugin.load as Function;
+    const result = await load('\0virtual:eagerpatch/durable-db/__devEpoch.js');
+    return result.code;
+  }
+
+  it('embeds the current epoch in dev mode', async () => {
+    const { loadDevState, saveDevState } = await import('../../src/cli/state');
+    const state = loadDevState(tempDir);
+    state.epoch = 'testepoch';
+    saveDevState(tempDir, state);
+
+    const code = await loadDevEpochModule('serve');
+    expect(code).toContain('export const devEpoch = "testepoch"');
+    expect(code).toContain('export function applyDevEpoch');
+  });
+
+  it('persists a newly minted epoch so it stays stable across reloads', async () => {
+    const codeA = await loadDevEpochModule('serve');
+    const codeB = await loadDevEpochModule('serve');
+    expect(codeA).toBe(codeB);
+
+    const { loadDevState } = await import('../../src/cli/state');
+    const epoch = loadDevState(tempDir).epoch;
+    expect(codeA).toContain(`export const devEpoch = "${epoch}"`);
+  });
+
+  it('emits a null epoch (identity applyDevEpoch) for production builds', async () => {
+    const code = await loadDevEpochModule('build');
+    expect(code).toContain('export const devEpoch = null');
+  });
+
+  it('reflects an epoch bump (db reset) on the next load', async () => {
+    const plugin = databasePlugin();
+    const configResolved = plugin.configResolved as Function;
+    await configResolved({ root: tempDir, command: 'serve' } as ResolvedConfig);
+    const load = plugin.load as Function;
+
+    const before = (await load('\0virtual:eagerpatch/durable-db/__devEpoch.js')).code;
+
+    const { reset } = await import('../../src/cli/reset');
+    const { newEpoch } = await reset({ projectRoot: tempDir, databasesDir: 'src/databases' });
+
+    const after = (await load('\0virtual:eagerpatch/durable-db/__devEpoch.js')).code;
+    expect(after).not.toBe(before);
+    expect(after).toContain(`export const devEpoch = "${newEpoch}"`);
   });
 });
 
@@ -188,6 +264,32 @@ describe('transform', () => {
       path.join(tempDir, 'src', 'file.ts') + '?v=123'
     );
     expect(result).toBeNull();
+  });
+
+  it('transforms action() definitions inside the database file itself', async () => {
+    const dbFile = path.join(tempDir, 'src', 'databases', 'main.ts');
+    const code = `
+import { defineDatabase } from '@eagerpatch/durable-db/db';
+import { users } from './schema';
+
+export const { action } = defineDatabase({
+  schema: { users },
+});
+
+export const createUser = action({
+  args: { name: 'string' },
+  handler: async (db, args) => db.insertInto('users').values(args).execute(),
+});
+`;
+    fs.writeFileSync(dbFile, code);
+
+    const transform = plugin.transform as Function;
+    const result = await transform.call({ resolve: async () => null }, code, dbFile);
+
+    expect(result).not.toBeNull();
+    expect(result.code).toContain('export async function createUser(args)');
+    expect(result.code).toContain('registerAction("main", "createUser"');
+    expect(result.code).not.toContain('createUser = action(');
   });
 });
 

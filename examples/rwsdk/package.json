@@ -1,6 +1,6 @@
 {
   "name": "example-rwsdk",
-  "version": "1.0.3",
+  "version": "0.0.0",
   "description": "Multi-tenant analytics API example with RWSDK and WebSocket transport",
   "main": "index.js",
   "type": "module",

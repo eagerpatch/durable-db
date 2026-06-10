@@ -1,0 +1,17 @@
+{
+  "name": "durable-db-migration-smoke-test",
+  "main": "./worker.ts",
+  "compatibility_date": "2024-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TEST_DO", "class_name": "TestMigrationDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TestMigrationDO"]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+dist
+node_modules
+.idea
+.wrangler
+.claude/settings.local.json

@@ -96,7 +96,25 @@ class PluginState {
   config!: ResolvedConfig;
   devServer: ViteDevServer | null = null;
 
+  private selfDevStateWriteUntil = 0;
+
   constructor(readonly options: ResolvedOptions) {}
+
+  /**
+   * Mark an imminent write to the dev cache made by the plugin itself
+   * (persisting a freshly minted epoch on first run). The cache watcher
+   * ignores events inside this window — without it, the plugin's own
+   * bootstrap write would trigger a full reload on the very first dev-server
+   * run, before any client (or the Cloudflare worker's hot channel
+   * WebSocket) is connected.
+   */
+  markSelfDevStateWrite(): void {
+    this.selfDevStateWriteUntil = Date.now() + 1500;
+  }
+
+  isWithinSelfDevStateWriteWindow(): boolean {
+    return Date.now() <= this.selfDevStateWriteUntil;
+  }
 
   registerDatabaseFile(filePath: string, dbName: string): void {
     const abs = path.normalize(filePath);
@@ -168,7 +186,20 @@ class PluginState {
       if (this.options.patchWranglerConfig) {
         patchWranglerConfig(this.projectRoot, databases);
       } else {
-        checkWranglerConfig(this.projectRoot, databases);
+        const check = checkWranglerConfig(this.projectRoot, databases);
+        // In dev a missing binding fails the first request, so a warning is
+        // enough. In a production build it's invisible — the build succeeds
+        // and the deploy ships a worker with no DO bindings — so fail the
+        // build instead. wrangler.toml can't be parsed, so its check result
+        // is inconclusive and only warns.
+        if (!check.ok && !check.tomlOnly && this.config.command === 'build') {
+          throw new Error(
+            `[durable-db] wrangler config is missing Durable Object bindings/migrations for ` +
+            `discovered database(s) — deploying this build would ship a worker without them. ` +
+            `Add the JSON from the warning above to ${check.configPath ? path.basename(check.configPath) : 'wrangler.jsonc'}, ` +
+            `or opt in to automatic patching with durableDb({ patchWranglerConfig: true }).`
+          );
+        }
       }
     }
 
@@ -253,8 +284,18 @@ class PluginState {
     if (environments) {
       // The client environment's hot channel IS the legacy ws channel, so
       // this covers the browser and the worker without double-sending.
-      for (const env of Object.values(environments)) {
-        env.hot?.send({ type: 'full-reload' });
+      for (const [name, env] of Object.entries(environments)) {
+        // A channel whose transport isn't connected yet throws on send
+        // (@cloudflare/vite-plugin asserts "The WebSocket is undefined"
+        // before its module-runner WebSocket exists). Nothing is running
+        // there yet, so there's nothing to reload — skip it. The modules
+        // were already invalidated, so the environment loads fresh code
+        // once it does connect.
+        try {
+          env.hot?.send({ type: 'full-reload' });
+        } catch (error) {
+          debugVite('Skipped full-reload for environment %s (hot channel not ready): %O', name, error);
+        }
       }
     } else {
       this.devServer.ws.send({ type: 'full-reload' });
@@ -331,6 +372,10 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
 
       let reloadTimer: ReturnType<typeof setTimeout> | null = null;
       const onDevStateChange = () => {
+        if (state.isWithinSelfDevStateWriteWindow()) {
+          debugVite('Ignoring dev cache event caused by the plugin itself');
+          return;
+        }
         if (reloadTimer) clearTimeout(reloadTimer);
         reloadTimer = setTimeout(() => {
           debugVite('Dev state changed; reloading durable-db modules');
@@ -381,6 +426,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
           // retrigger the cache watcher and loop forever.
           const devState = loadDevState(state.projectRoot);
           if (!fs.existsSync(getDevPaths(state.projectRoot).stateFile)) {
+            state.markSelfDevStateWrite();
             saveDevState(state.projectRoot, devState);
           }
           epoch = devState.epoch;

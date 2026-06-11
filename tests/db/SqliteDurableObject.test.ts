@@ -114,6 +114,18 @@ class MockSqlStorage {
       return new MockSqlCursor([]);
     }
 
+    // Simulate plain CREATE TABLE (no IF NOT EXISTS) — throws when the
+    // table already exists, like real SQLite
+    const createMatch = sql.match(/^CREATE TABLE (?!IF NOT EXISTS)(\S+)/i);
+    if (createMatch) {
+      const tableName = createMatch[1];
+      if (this.tables.has(tableName)) {
+        throw new Error(`table \`${tableName}\` already exists at offset 13: SQLITE_ERROR`);
+      }
+      this.tables.set(tableName, []);
+      return new MockSqlCursor([]);
+    }
+
     // For test migrations that should fail
     if (/INVALID SQL/i.test(sql)) {
       throw new Error('near "INVALID": syntax error');
@@ -166,6 +178,7 @@ function createMockDurableObjectState(opts: {
 
 import {
   SqliteDurableObject,
+  MigrationSchemaConflictError,
   type Migrations,
 } from '../../src/db/SqliteDurableObject';
 
@@ -559,12 +572,50 @@ describe('SqliteDurableObject', () => {
       logSpy.mockRestore();
     });
 
-    it('propagates the original migration error when PITR restore itself fails', async () => {
-      // Simulate a workerd-like environment where getCurrentBookmark succeeds
-      // but onNextSessionRestoreBookmark rejects (partial PITR support).
+    it('disables PITR without error-level noise when the backend does not implement restore', async () => {
+      // Local workerd hands out bookmarks from getCurrentBookmark() but
+      // rejects the actual restore. That's not a failure worth shouting
+      // about — the backend was never going to support it.
+      const { state, abort } = createMockDurableObjectState({ pitrAvailable: true });
+      state.storage.onNextSessionRestoreBookmark = vi.fn().mockRejectedValue(
+        new Error("This Durable Object's storage back-end does not implement point-in-time recovery.")
+      );
+
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_bad': { chunks: [['INVALID SQL']] },
+      };
+
+      // The user should see the SQL syntax error — the real root cause.
+      await expect(dobj.fetch(new Request('http://test/'))).rejects.toThrow(
+        /near "INVALID": syntax error/
+      );
+
+      // No "PITR restore failed" / "Restoring to pre-migration bookmark"
+      // log lines that read like a second failure, and no abort.
+      const noisyLog = errSpy.mock.calls.find(
+        call => typeof call[0] === 'string' &&
+          (call[0].includes('PITR restore failed') || call[0].includes('Restoring to pre-migration bookmark'))
+      );
+      expect(noisyLog).toBeUndefined();
+      expect(abort).not.toHaveBeenCalled();
+
+      // PITR is disabled for this instance from now on, with the reason kept.
+      const status = await dobj.getMigrationStatus();
+      expect(status.pitrAvailable).toBe(false);
+      expect(status.pitrUnavailableReason).toContain('point-in-time recovery');
+
+      errSpy.mockRestore();
+    });
+
+    it('propagates the original migration error when PITR restore fails unexpectedly', async () => {
+      // A backend that claims PITR support but fails the restore for some
+      // other reason — that IS worth an error-level log.
       const { state } = createMockDurableObjectState({ pitrAvailable: true });
       state.storage.onNextSessionRestoreBookmark = vi.fn().mockRejectedValue(
-        new Error('storage back-end does not implement point-in-time recovery')
+        new Error('network blip during restore')
       );
 
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -586,7 +637,7 @@ describe('SqliteDurableObject', () => {
         call => typeof call[0] === 'string' && call[0].includes('PITR restore failed')
       );
       expect(pitrLog).toBeDefined();
-      expect(pitrLog![0]).toContain('does not implement point-in-time recovery');
+      expect(pitrLog![0]).toContain('network blip during restore');
 
       errSpy.mockRestore();
     });
@@ -642,6 +693,101 @@ describe('SqliteDurableObject', () => {
       expect(exhaustedLog).toBeDefined();
       expect(exhaustedLog![0]).toContain('20240101_bad');
       expect(exhaustedLog![0]).toContain('previous failure');
+
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('schema/journal conflict detection', () => {
+    function seedJournal(mockSql: MockSqlStorage, name: string) {
+      mockSql.exec(
+        'CREATE TABLE IF NOT EXISTS __migrations (name TEXT NOT NULL, chunk_index INTEGER NOT NULL, applied_at TEXT NOT NULL, PRIMARY KEY (name, chunk_index))'
+      );
+      mockSql.exec(
+        'INSERT INTO __migrations (name, chunk_index, applied_at) VALUES (?, ?, ?)',
+        name, 0, '2026-01-01T00:00:00.000Z'
+      );
+    }
+
+    it('explains journal drift when a regenerated migration hits "already exists"', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: false });
+
+      // Storage created under an old migration name: the table exists and
+      // the journal records only the old name.
+      mockSql.exec('CREATE TABLE notes (id TEXT PRIMARY KEY)');
+      seedJournal(mockSql, '20250101000000_old_name');
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20260610152524_migration': {
+          chunks: [['CREATE TABLE notes (id TEXT PRIMARY KEY)']],
+        },
+      };
+
+      const err = await dobj.fetch(new Request('http://test/')).then(
+        () => null,
+        (e) => e
+      );
+
+      expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+      // Names the failing migration and the untracked journal entries
+      expect(err.message).toContain('20260610152524_migration');
+      expect(err.message).toContain('20250101000000_old_name');
+      expect(err.message).toContain('renamed or regenerated');
+      // Actionable recovery for dev and production
+      expect(err.message).toContain('db reset');
+      expect(err.message).toContain('baseline');
+      // Original SQLite error preserved
+      expect(err.message).toContain('table `notes` already exists');
+      expect(err.cause).toBeInstanceOf(Error);
+
+      errSpy.mockRestore();
+    });
+
+    it('gives generic guidance when the journal is empty but the schema exists', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { state, mockSql } = createMockDurableObjectState({ pitrAvailable: false });
+
+      // Table exists but nothing was ever journaled (e.g. a previous attempt
+      // crashed partway through a chunk, or storage from an older version).
+      mockSql.exec('CREATE TABLE notes (id TEXT PRIMARY KEY)');
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20260610152524_migration': {
+          chunks: [['CREATE TABLE notes (id TEXT PRIMARY KEY)']],
+        },
+      };
+
+      const err = await dobj.fetch(new Request('http://test/')).then(
+        () => null,
+        (e) => e
+      );
+
+      expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+      expect(err.message).toContain('renamed or regenerated');
+      expect(err.message).toContain('db reset');
+
+      errSpy.mockRestore();
+    });
+
+    it('does not wrap unrelated migration errors', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { state } = createMockDurableObjectState({ pitrAvailable: false });
+
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = {
+        '20240101_bad': { chunks: [['INVALID SQL']] },
+      };
+
+      const err = await dobj.fetch(new Request('http://test/')).then(
+        () => null,
+        (e) => e
+      );
+
+      expect(err).not.toBeInstanceOf(MigrationSchemaConflictError);
+      expect(err.message).toContain('near "INVALID": syntax error');
 
       errSpy.mockRestore();
     });

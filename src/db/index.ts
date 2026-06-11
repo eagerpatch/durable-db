@@ -1,5 +1,5 @@
 export { defineDatabase } from './defineDatabase';
-export { SqliteDurableObject, createKyselyFromSql } from './SqliteDurableObject';
+export { SqliteDurableObject, createKyselyFromSql, MigrationSchemaConflictError } from './SqliteDurableObject';
 export type { Migration, Migrations, CreateKyselyOptions, SqlExecutor, MigrationAttemptInfo } from './SqliteDurableObject';
 
 // Re-export Outerbase Studio helper for worker-level UI route

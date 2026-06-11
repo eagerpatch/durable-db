@@ -235,6 +235,22 @@ export interface MigrationStatus {
 }
 
 /**
+ * Raised when a pending migration fails with "already exists": the storage
+ * holds schema objects the `__migrations` journal doesn't track. Common
+ * causes: migration files were renamed or regenerated after the storage was
+ * created, the storage was written by an older version of the database, or a
+ * previous attempt crashed partway through a chunk without PITR. Re-running
+ * can never succeed, so this carries recovery guidance instead of the raw
+ * SQLITE_ERROR.
+ */
+export class MigrationSchemaConflictError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'MigrationSchemaConflictError';
+  }
+}
+
+/**
  * Truncate a SQL statement for logging. Collapses whitespace so multi-line
  * statements render on one log line.
  */
@@ -470,41 +486,49 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           UPDATE __migration_attempts SET last_error = ? WHERE id = 'current'
         `, errorMessage);
 
-        const attempts = this.getMigrationAttempts();
-        const remaining = Math.max(0, MAX_PITR_ATTEMPTS + 1 - attempts.attemptCount);
-        const pendingNames = Array.from(new Set(pending.map(p => p.name))).join(', ');
-        console.error(
-          `[database] Migration failed (attempt ${attempts.attemptCount}/${MAX_PITR_ATTEMPTS + 1}, ` +
-          `${remaining} PITR-protected retries remaining). ` +
-          `Restoring to pre-migration bookmark. Pending: ${pendingNames || '(none)'}.`,
-          error
-        );
-
-        // Schedule restore and abort — the DO will restart with the counter
-        // already incremented (since we wrote it before the bookmark).
-        //
-        // If the restore call itself fails (some runtimes advertise PITR via
-        // getCurrentBookmark() but fail the actual restore) we must still
-        // surface the ORIGINAL migration error, not the PITR failure. That's
-        // what the user needs to fix; the PITR layer is just getting in the
-        // way of the real diagnostic.
+        // Schedule the restore BEFORE logging that we're restoring. Some
+        // runtimes (local workerd) hand out bookmarks from
+        // getCurrentBookmark() but don't implement the restore call — there
+        // an error-level "PITR restore failed" line reads like a second
+        // failure for a backend that was never going to support it, so we
+        // disable PITR for this instance and only debug-log it. A restore
+        // failure on a backend that *does* claim PITR support is still
+        // logged at error level, but the ORIGINAL migration error is what
+        // propagates either way — that's what the user needs to fix.
+        let restoreScheduled = false;
         try {
           await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
-          this.ctx.abort('Restoring to pre-migration bookmark');
+          restoreScheduled = true;
         } catch (pitrErr) {
           const pitrMessage = pitrErr instanceof Error ? pitrErr.message : String(pitrErr);
-          // If abort() threw (expected in production), re-throw so the DO
-          // tears down as intended. We detect this heuristically by the
-          // presence of our abort reason in the message — abort errors
-          // carry the reason we passed in.
-          if (pitrMessage.includes('Restoring to pre-migration bookmark')) {
-            throw pitrErr;
+          if (/does not (?:implement|support) point-in-time recovery/i.test(pitrMessage)) {
+            this.pitrAvailable = false;
+            this.pitrUnavailableReason = pitrMessage;
+            debugMigrations('PITR restore unsupported by this storage backend; disabling PITR (%s)', pitrMessage);
+          } else {
+            console.error(
+              `[database] PITR restore failed (${pitrMessage}). ` +
+              `Propagating the original migration error instead so you can fix the root cause.`
+            );
           }
+        }
+
+        if (restoreScheduled) {
+          const attempts = this.getMigrationAttempts();
+          const remaining = Math.max(0, MAX_PITR_ATTEMPTS + 1 - attempts.attemptCount);
+          const pendingNames = Array.from(new Set(pending.map(p => p.name))).join(', ');
           console.error(
-            `[database] PITR restore failed (${pitrMessage}). ` +
-            `Propagating the original migration error instead so you can fix the root cause.`
+            `[database] Migration failed (attempt ${attempts.attemptCount}/${MAX_PITR_ATTEMPTS + 1}, ` +
+            `${remaining} PITR-protected retries remaining). ` +
+            `Restoring to pre-migration bookmark. Pending: ${pendingNames || '(none)'}.`,
+            error
           );
-          // fall through to `throw error` below
+
+          // abort() throws in production — the DO tears down and restarts
+          // with the restored state (counter included, since it was written
+          // before the bookmark). In runtimes where abort() returns, fall
+          // through to propagating the migration error.
+          this.ctx.abort('Restoring to pre-migration bookmark');
         }
       }
 
@@ -591,9 +615,59 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           `[database] Migration chunk failed: ${name}[${chunkIndex}]${location}`,
           error
         );
-        throw error;
+        throw this.toSchemaConflictError(error, name, chunkIndex) ?? error;
       }
     }
+  }
+
+  /**
+   * Translate an "already exists" failure on a pending migration into a
+   * {@link MigrationSchemaConflictError}. A chunk is only executed when the
+   * journal has no row for it, so "already exists" means storage and journal
+   * disagree about what has been applied — retrying can never succeed, and
+   * the raw SQLITE_ERROR doesn't tell the user how to get unstuck.
+   * Returns null when the error isn't this case.
+   */
+  private toSchemaConflictError(
+    error: unknown,
+    name: string,
+    chunkIndex: number
+  ): MigrationSchemaConflictError | null {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/already exists/i.test(message)) return null;
+
+    let journalNames: string[] = [];
+    try {
+      journalNames = (this.sql.exec(
+        'SELECT DISTINCT name FROM __migrations'
+      ).toArray() as Array<{ name: string }>).map((row) => row.name);
+    } catch {
+      // Journal unreadable — fall through to the generic guidance.
+    }
+
+    const known = new Set(Object.keys(this.migrations));
+    const untracked = journalNames.filter((n) => !known.has(n));
+
+    const likelyCause = untracked.length > 0
+      ? `The journal records migrations this build doesn't know about (${untracked.join(', ')}), ` +
+        `which usually means the migration files were renamed or regenerated after this ` +
+        `database's storage was created.`
+      : `This usually means the storage was created by migrations under different names ` +
+        `(renamed or regenerated migration files), by an older version of this database, ` +
+        `or that a previous attempt crashed partway through a chunk.`;
+
+    return new MigrationSchemaConflictError(
+      `Migration "${name}" (chunk ${chunkIndex}) tried to create a schema object that ` +
+      `already exists in storage, but the __migrations journal has no record of this ` +
+      `migration being applied. ${likelyCause} ` +
+      `To recover in local dev, run \`db reset\` to rotate to a fresh database ` +
+      `(add --purge-local-storage to also delete the orphaned instance data, or wipe ` +
+      `.wrangler/state yourself). In production, restore the original migration names, or ` +
+      `baseline the journal by inserting rows into __migrations for the migrations whose ` +
+      `schema is already present. ` +
+      `Original error: ${message}`,
+      { cause: error }
+    );
   }
 
   /**

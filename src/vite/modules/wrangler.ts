@@ -279,6 +279,12 @@ export interface WranglerCheckResult {
   /** DO classes missing from any migrations[].new_sqlite_classes entry */
   missingSqliteClasses: string[];
   ok: boolean;
+  /**
+   * True when the project only has a wrangler.toml — the check can't parse
+   * it, so `ok: false` may be a false negative and callers shouldn't treat
+   * it as fatal.
+   */
+  tomlOnly: boolean;
 }
 
 /**
@@ -302,6 +308,7 @@ export function checkWranglerConfig(
     missingBindings: [],
     missingSqliteClasses: [],
     ok: true,
+    tomlOnly: !configPath && fs.existsSync(path.join(projectRoot, 'wrangler.toml')),
   };
 
   let config: WranglerConfig = {};
@@ -345,7 +352,7 @@ export function checkWranglerConfig(
     // Verification and patching only understand wrangler.jsonc/json. If the
     // project uses wrangler.toml, say so explicitly instead of suggesting a
     // second config file.
-    const hasToml = !configPath && fs.existsSync(path.join(projectRoot, 'wrangler.toml'));
+    const hasToml = result.tomlOnly;
     const where = configPath
       ? path.basename(configPath)
       : hasToml

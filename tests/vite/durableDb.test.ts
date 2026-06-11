@@ -157,24 +157,70 @@ export const { action } = defineDatabase({ schema: { users } });
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  async function initializePlugin(options?: Parameters<typeof durableDb>[0]) {
+  async function initializePlugin(
+    options?: Parameters<typeof durableDb>[0],
+    command: 'serve' | 'build' = 'build'
+  ) {
     const plugin = durableDb(options);
     const configResolved = plugin.configResolved as Function;
-    await configResolved({ root: tempDir, command: 'build' } as ResolvedConfig);
+    await configResolved({ root: tempDir, command } as ResolvedConfig);
     const load = plugin.load as Function;
     await load('\0virtual:durable-db/__durableObjects.js');
   }
 
-  it('does not modify wrangler config by default, but warns with the missing JSON', async () => {
+  it('does not modify wrangler config in dev, but warns with the missing JSON', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const configPath = path.join(tempDir, 'wrangler.jsonc');
     fs.writeFileSync(configPath, '{"name": "my-worker"}');
 
-    await initializePlugin();
+    await initializePlugin(undefined, 'serve');
 
     expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
     expect(warnSpy).toHaveBeenCalled();
     expect(warnSpy.mock.calls[0][0]).toContain('MAIN_DATABASE_DO');
+    warnSpy.mockRestore();
+  });
+
+  it('fails a production build when bindings are missing and patching is off', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+
+    await expect(initializePlugin(undefined, 'build')).rejects.toThrow(
+      /missing Durable Object bindings/
+    );
+
+    // Config still untouched, and the JSON-to-add warning was printed first
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('does not fail the build when the config already has the bindings', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, JSON.stringify({
+      name: 'my-worker',
+      durable_objects: {
+        bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }],
+      },
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO'] }],
+    }));
+
+    await initializePlugin(undefined, 'build');
+
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('only warns on build when the project uses wrangler.toml (unverifiable)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fs.writeFileSync(path.join(tempDir, 'wrangler.toml'), 'name = "my-worker"\n');
+
+    await initializePlugin(undefined, 'build');
+
+    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy.mock.calls[0][0]).toContain('wrangler.toml');
     warnSpy.mockRestore();
   });
 
@@ -263,6 +309,97 @@ describe('__devEpoch virtual module', () => {
 });
 
 // ============================================================================
+// dev cache watcher
+// ============================================================================
+
+describe('dev cache watcher', () => {
+  let tempDir: string;
+  let closeServer: (() => void) | null = null;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-watcher-'));
+    fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, 'node_modules'), { recursive: true });
+  });
+
+  afterEach(() => {
+    closeServer?.();
+    closeServer = null;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  function createMockServer() {
+    const closeHandlers: Array<() => void> = [];
+    const makeGraph = () => ({ idToModuleMap: new Map(), invalidateModule: vi.fn() });
+
+    const clientSend = vi.fn();
+    // Mimics @cloudflare/vite-plugin's hot channel before its module-runner
+    // WebSocket is connected — send() asserts synchronously.
+    const workerSend = vi.fn(() => {
+      throw new Error('The WebSocket is undefined');
+    });
+
+    const server = {
+      watcher: { on: vi.fn() },
+      httpServer: {
+        once: (_event: string, cb: () => void) => {
+          closeHandlers.push(cb);
+        },
+      },
+      ws: { send: vi.fn() },
+      moduleGraph: makeGraph(),
+      environments: {
+        client: { moduleGraph: makeGraph(), hot: { send: clientSend } },
+        worker: { moduleGraph: makeGraph(), hot: { send: workerSend } },
+      },
+    };
+
+    closeServer = () => closeHandlers.forEach((cb) => cb());
+    return { server, clientSend, workerSend };
+  }
+
+  it('does not trigger a reload for the plugin\'s own bootstrap state write', async () => {
+    const plugin = durableDb();
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
+    const { server, clientSend, workerSend } = createMockServer();
+    (plugin.configureServer as Function)(server);
+
+    // First load of __devEpoch on a fresh project mints and persists the
+    // epoch — that write must not bounce back through the cache watcher as
+    // a full reload (on a real first run no hot channel is connected yet).
+    const load = plugin.load as Function;
+    await load('\0virtual:durable-db/__devEpoch.js');
+
+    // Give the fs watcher and the reload debounce ample time to fire
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    expect(clientSend).not.toHaveBeenCalled();
+    expect(workerSend).not.toHaveBeenCalled();
+  });
+
+  it('survives a hot channel that throws on send and still reloads the rest', async () => {
+    const plugin = durableDb();
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
+    const { server, clientSend, workerSend } = createMockServer();
+    (plugin.configureServer as Function)(server);
+
+    // External change, like the CLI writing state.json (`db reset`)
+    const { loadDevState, saveDevState } = await import('../../src/cli/state');
+    const devState = loadDevState(tempDir);
+    devState.epoch = 'bumped';
+    saveDevState(tempDir, devState);
+
+    await vi.waitFor(
+      () => {
+        expect(workerSend).toHaveBeenCalledWith({ type: 'full-reload' });
+        expect(clientSend).toHaveBeenCalledWith({ type: 'full-reload' });
+      },
+      { timeout: 3000 }
+    );
+  });
+});
+
+// ============================================================================
 // transform
 // ============================================================================
 
@@ -277,9 +414,11 @@ describe('transform', () => {
     plugin = durableDb();
 
     const configResolved = plugin.configResolved as Function;
+    // serve mode: these tests exercise transform, not the build-time
+    // wrangler config check (which fails hard on missing bindings)
     await configResolved({
       root: tempDir,
-      command: 'build',
+      command: 'serve',
     } as ResolvedConfig);
   });
 

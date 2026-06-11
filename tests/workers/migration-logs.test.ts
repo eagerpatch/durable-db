@@ -65,6 +65,20 @@ describe('migration E2E (real workerd)', () => {
     expect(caught!.message).toMatch(/syntax error|NOT VALID|INVALID/i);
   });
 
+  it('disables PITR for the instance after workerd rejects the restore call', async () => {
+    const stub = newStub();
+
+    // The failed migration triggers a restore attempt; workerd's local
+    // storage rejects it with "does not implement point-in-time recovery".
+    // That should downgrade the instance to PITR-off (with the reason kept)
+    // instead of logging an error-level "PITR restore failed" every run.
+    await stub.fetch(new Request('http://test/')).catch(() => null);
+
+    const status = await stub.getMigrationStatus();
+    expect(status.pitrAvailable).toBe(false);
+    expect(status.pitrUnavailableReason).toMatch(/point-in-time recovery/i);
+  });
+
   it('getMigrationStatus reports applied vs pending against a real DO', async () => {
     const stub = newStub();
 

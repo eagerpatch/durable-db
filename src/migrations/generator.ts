@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Snapshot } from './snapshot';
@@ -272,6 +273,29 @@ export async function loadSchemaModule(
 }
 
 /**
+ * Where to drop the transient transpiled-schema `.mjs`. We want a
+ * directory that (a) is on the app's node_modules resolution chain
+ * so the bundle's bare imports resolve, and (b) is NOT inside the
+ * watched `src/` tree (so dev-server watchers don't react to it).
+ * The app's `node_modules/.cache/durable-db/` satisfies both; if no
+ * node_modules is found walking up from the schema, fall back to the
+ * OS temp dir (the schema bundle's externals are usually resolvable
+ * relative to cwd in that case too).
+ */
+function resolveTempDir(schemaPath: string): string {
+  let dir = path.dirname(path.resolve(schemaPath));
+  while (true) {
+    if (fs.existsSync(path.join(dir, 'node_modules'))) {
+      return path.join(dir, 'node_modules', '.cache', 'durable-db');
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return path.join(os.tmpdir(), 'durable-db');
+}
+
+/**
  * Build schema module with esbuild and return the exports
  * This is useful when the schema is TypeScript and needs transpilation
  */
@@ -297,8 +321,17 @@ export async function buildAndLoadSchema(
     throw new Error(`Unexpected esbuild output for ${schemaPath}`);
   }
 
-  // Write to temp file
-  const tempDir = path.dirname(schemaPath);
+  // Write the bundled schema to a temp `.mjs` and import it. esbuild
+  // ran with `bundle: true` + `packages: 'external'`, so the output
+  // inlines every relative import and keeps only bare node_modules
+  // specifiers — which means the temp file only needs to sit
+  // somewhere that resolves the app's node_modules, NOT next to the
+  // schema. We write it under `node_modules/.cache/durable-db/` rather
+  // than into `src/`: dropping a transient file into the watched
+  // source tree makes dev-server watchers (e.g. rwsdk's directive
+  // scan) race the create/delete and error with ENOENT in a loop.
+  const tempDir = resolveTempDir(schemaPath);
+  fs.mkdirSync(tempDir, { recursive: true });
   const tempFile = path.join(tempDir, `_schema_temp_${Date.now()}.mjs`);
 
   try {

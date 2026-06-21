@@ -261,7 +261,7 @@ export const createUser = action({
     expect(result!.code).toContain('export async function createUser');
   });
 
-  it('adds arktype import', () => {
+  it('imports arktype `type` from the registry subpath (not bare arktype)', () => {
     const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
     const result = transformActionFile({
       ...defaultOptions,
@@ -269,7 +269,11 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']arktype["']/);
+    // `type` is re-exported from durable-db/registry (an always-resolvable
+    // subpath) so apps never carry a bare `arktype` import their bundler can't
+    // hoist; it routes to durable-db's single inlined arktype instance.
+    expect(result!.code).toMatch(/import\s*\{[^}]*\btype\b[^}]*\}\s*from\s*["']durable-db\/registry["']/);
+    expect(result!.code).not.toMatch(/from\s*["']arktype["']/);
   });
 
   it('adds context import', () => {
@@ -685,7 +689,8 @@ export const createUser = action({
         registryImport: 'durable-db/registry',
       });
 
-      expect(result!.code).toMatch(/import\s*\{[^}]*type[^}]*\}\s*from\s*["']arktype["']/);
+      expect(result!.code).toMatch(/import\s*\{[^}]*\btype\b[^}]*\}\s*from\s*["']durable-db\/registry["']/);
+      expect(result!.code).not.toMatch(/from\s*["']arktype["']/);
       expect(result!.code).toMatch(/import\s*\{[^}]*env[^}]*\}\s*from\s*["']cloudflare:workers["']/);
       expect(result!.code).toMatch(/import\s*\{[^}]*registerAction[^}]*\}\s*from\s*["']durable-db\/registry["']/);
     });

@@ -2,6 +2,14 @@ import { type } from 'arktype';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { WebSocketTransport } from './transport/websocket';
 
+// Re-export arktype's `type` so the action-file transform can inject it from
+// HERE (a durable-db subpath that always resolves in the consumer's worker)
+// instead of bare `arktype` — which a pnpm app never hoists to its root, and
+// which the cloudflare vite plugin's getWorkerEntryExportTypes then fails to
+// resolve. With arktype inlined into this dist (tsdown noExternal), this is the
+// SAME single instance durable-db validates with — no second scope registry.
+export { type };
+
 // ============================================================================
 // Types
 // ============================================================================

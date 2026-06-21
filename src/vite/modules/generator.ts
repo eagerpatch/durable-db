@@ -962,10 +962,14 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
 
   if (actionsInFile.length === 0) return false;
 
-  ensureNamedImports(body, 'arktype', ['type']);
   ensureNamedImports(body, contextImport, ['getTenantId']);
   ensureNamedImports(body, 'cloudflare:workers', ['env']);
-  ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction']);
+  // `type` comes from the registry subpath (which re-exports arktype's `type`),
+  // NOT bare `arktype`: the latter isn't hoisted to a pnpm app's root, so the
+  // injected import fails to resolve in the cloudflare plugin's worker-entry
+  // evaluation. registryImport always resolves there (it's already injected),
+  // and routes to durable-db's single inlined arktype instance.
+  ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction', 'type']);
   ensureNamedImports(body, DEV_EPOCH_IMPORT, ['applyDevEpoch']);
 
   if (database.transport === 'websocket') {

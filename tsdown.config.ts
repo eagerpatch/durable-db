@@ -14,6 +14,7 @@ export default defineConfig({
     'src/transport/websocket.ts',
     'src/cli/index.ts',
     'src/cli/bin.ts',
+    'src/testing/index.ts',
   ],
   fixedExtension: false,
   format: 'esm',

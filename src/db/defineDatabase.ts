@@ -10,6 +10,23 @@ import type {
 } from './types';
 
 /**
+ * Non-enumerable property the source `action()` stashes on the function it
+ * returns, carrying the original `{ args, handler }` config plus the compiled
+ * arktype validator. The production Vite transform replaces `action()`
+ * call-sites entirely, so this only ever exists in the UNTRANSFORMED world —
+ * i.e. tests. The `durable-db/testing` harness reads it to run a handler
+ * against a real in-memory database. See src/testing/index.ts.
+ */
+export const ACTION_TEST_META = Symbol.for('durable-db.actionTestMeta');
+
+/** Shape stashed under {@link ACTION_TEST_META}. */
+export interface ActionTestMeta {
+  args: ArgsSchema;
+  handler: (db: any, args: any, ctx?: any) => unknown;
+  validator: ReturnType<typeof type>;
+}
+
+/**
  * Define a database with its schema and migrations.
  *
  * This function is transformed at build time by the durable-db Vite plugin.
@@ -77,6 +94,20 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
         'Make sure the durable-db plugin is configured in your Vite config.'
       );
     };
+
+    // Stash the handler + validator so the test harness can run this action
+    // against a real in-memory db (the production transform never reaches this
+    // code path — it rewrites the call-site). Non-enumerable so it stays
+    // invisible to anything iterating the function's own keys.
+    Object.defineProperty(actionFn, ACTION_TEST_META, {
+      value: {
+        args: actionConfig.args,
+        handler: actionConfig.handler,
+        validator,
+      } satisfies ActionTestMeta,
+      enumerable: false,
+      configurable: true,
+    });
 
     return actionFn;
   };

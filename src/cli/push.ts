@@ -80,7 +80,7 @@ async function pushDatabase(
     migrationName: null,
   };
 
-  const schema = await loadSchema(db);
+  const schema = await loadSchema(db, projectRoot);
   if (!schema) {
     return result;
   }

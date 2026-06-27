@@ -3,6 +3,7 @@ import { generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual
 import type { Snapshot } from '../migrations/snapshot';
 import { loadSnapshot, buildAndLoadSchema } from '../migrations/generator';
 import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
+import { loadViteAliases } from '../vite/modules/aliasResolver';
 import { parseDatabaseFile } from '../vite/modules/parser';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
@@ -92,8 +93,16 @@ export function discoverDatabases(opts: DiscoverOptions): DatabaseInfo[] {
  * missing exports) throws — silently skipping a database is how a typo in
  * schema.ts becomes "why is my migration empty" 20 minutes later, or worse,
  * a generated migration that DROPs tables that still exist in production.
+ *
+ * `projectRoot` enables alias resolution for non-relative schema imports
+ * (e.g. `@/databases/schema`): the project's Vite `resolve.alias` is loaded
+ * (cached) and used as the source of truth. Omit it to resolve relative
+ * imports only.
  */
-export async function loadSchema(db: DatabaseInfo): Promise<Record<string, unknown> | null> {
+export async function loadSchema(
+  db: DatabaseInfo,
+  projectRoot?: string
+): Promise<Record<string, unknown> | null> {
   if (db.schemaTableNames.length === 0) {
     debugCli('Skipping %s: no schema defined', db.name);
     return null;
@@ -108,11 +117,16 @@ export async function loadSchema(db: DatabaseInfo): Promise<Record<string, unkno
     );
   }
 
-  const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
+  const aliases = projectRoot ? await loadViteAliases(projectRoot) : undefined;
+  const schemaPath = resolveImportPath(db.filePath, db.schemaImport, aliases);
   if (!schemaPath) {
     throw new Error(
       `[db] Database '${db.name}': could not resolve schema import '${db.schemaImport}' ` +
-      `from ${db.filePath}.`
+      `from ${db.filePath}.` +
+      (db.schemaImport.startsWith('.')
+        ? ''
+        : ` '${db.schemaImport}' looks like an alias — ensure it's defined in the project's ` +
+          `Vite config (resolve.alias / tsconfig paths wired into Vite).`)
     );
   }
 

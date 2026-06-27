@@ -4,8 +4,21 @@ import _generate from '@babel/generator';
 import * as t from '@babel/types';
 import type { NodePath } from '@babel/traverse';
 import * as path from 'node:path';
+import type { Alias } from 'vite';
 import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../../db';
 import { debugVite } from '../../utils/debug';
+import { applyAliases } from './aliasResolver';
+
+/** Options for {@link parseDatabaseFile}. */
+export interface ParseDatabaseFileOptions {
+  /**
+   * Resolved Vite `resolve.alias` entries, captured by the plugin in
+   * `configResolved`. Used to recognize an `action` factory imported through an
+   * alias (e.g. `import { action } from '@/databases/main'`). Omitted in the CLI
+   * (which doesn't transform actions), where only relative imports are tracked.
+   */
+  aliases?: readonly Alias[];
+}
 
 // Handle both ESM and CJS module formats for Babel
 const traverse = typeof _traverse === 'function' ? _traverse : (_traverse as any).default;
@@ -93,7 +106,11 @@ export function findActionCallsInSource(
  *
  * This uses clean AST traversal - no regexes
  */
-export function parseDatabaseFile(filePath: string, code: string): ParsedDatabaseFile {
+export function parseDatabaseFile(
+  filePath: string,
+  code: string,
+  options: ParseDatabaseFileOptions = {}
+): ParsedDatabaseFile {
   const ast = parseCode(code);
 
   const result: ParsedDatabaseFile = {
@@ -121,10 +138,20 @@ export function parseDatabaseFile(filePath: string, code: string): ParsedDatabas
           
           result.localImports.set(localName, { source, imported });
           
-          // If importing 'action' from a relative path, track it as the action factory
-          // This handles: import { action } from '../main'
-          // or: import { action as myAction } from '../database'
-          if (imported === 'action' && source.startsWith('.')) {
+          // If importing 'action' from the database's own file, track it as the
+          // action factory. This handles:
+          //   import { action } from '../main'           (relative)
+          //   import { action as myAction } from '../db'  (relative, renamed)
+          //   import { action } from '@/databases/main'   (Vite resolve.alias)
+          // We accept relative imports, or Vite aliases that resolve to a real
+          // file — but NOT bare npm package imports, so a genuine third-party
+          // `action` export isn't mistaken for the factory. Aliases come from the
+          // project's Vite config (captured by the plugin), not from re-parsing
+          // tsconfig ourselves.
+          if (
+            imported === 'action' &&
+            (source.startsWith('.') || applyAliases(source, options.aliases) !== null)
+          ) {
             actionFnName = localName;
           }
         } else if (t.isImportDefaultSpecifier(specifier)) {

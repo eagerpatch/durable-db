@@ -1,4 +1,5 @@
 import { resolveImportPath } from '../vite/modules/discovery';
+import { loadViteAliases } from '../vite/modules/aliasResolver';
 import {
   loadMigrationFiles,
   buildAndLoadSchema,
@@ -246,7 +247,8 @@ async function validateDatabase(
 
     // ---- Path B: Schema from scratch (dual-path comparison) ----
     if (db.schemaImport && db.schemaTableNames.length > 0) {
-      const schemaPath = resolveImportPath(db.filePath, db.schemaImport);
+      const aliases = await loadViteAliases(projectRoot);
+      const schemaPath = resolveImportPath(db.filePath, db.schemaImport, aliases);
 
       if (schemaPath) {
         try {

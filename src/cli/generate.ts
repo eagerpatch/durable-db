@@ -72,7 +72,7 @@ export async function generate(
   }
 
   for (const db of databases) {
-    const result = await generateDatabase(db, customName);
+    const result = await generateDatabase(db, customName, projectRoot);
     results.push(result);
 
     // Clear dev state for this database if migration was generated
@@ -96,6 +96,7 @@ export async function generate(
 async function generateDatabase(
   db: DatabaseInfo,
   customName: string | undefined,
+  projectRoot: string,
 ): Promise<GenerateResult> {
   const result: GenerateResult = {
     database: db.name,
@@ -105,7 +106,7 @@ async function generateDatabase(
     migrationPath: null,
   };
 
-  const schema = await loadSchema(db);
+  const schema = await loadSchema(db, projectRoot);
   if (!schema) {
     return result;
   }

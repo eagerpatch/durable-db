@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { Alias } from 'vite';
+import { applyAliases, resolveFileCandidate } from './aliasResolver';
 
 /**
  * Options for database discovery
@@ -89,46 +91,31 @@ export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile
 }
 
 /**
- * Resolve a relative import path to an absolute path
+ * Resolve an import path to an absolute path.
  *
- * Tries various extensions and index files
+ * Relative imports (starting with `.`) are the fast path — resolved directly
+ * against the importing file's directory. Non-relative imports are resolved
+ * through the project's Vite `resolve.alias` entries (e.g. `@/databases/schema`,
+ * `~/foo`); bare package imports that match no alias resolve to `null`. Both
+ * paths use the same extension / index file probing.
+ *
+ * `aliases` is the resolved Vite alias array — the source of truth for aliases.
+ * Callers in a standalone (no-plugin) context obtain it via `loadViteAliases()`;
+ * when omitted, only relative imports resolve.
  */
 export function resolveImportPath(
   fromFile: string,
-  importSource: string
+  importSource: string,
+  aliases?: readonly Alias[]
 ): string | null {
-  // Only handle relative imports
-  if (!importSource.startsWith('.')) {
-    return null;
+  if (importSource.startsWith('.')) {
+    const dir = path.dirname(fromFile);
+    const resolved = path.resolve(dir, importSource);
+    return resolveFileCandidate(resolved);
   }
 
-  const dir = path.dirname(fromFile);
-  const resolved = path.resolve(dir, importSource);
-
-  // Try exact path first (if already has extension)
-  if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-    return resolved;
-  }
-
-  // Try common extensions
-  const extensions = ['.ts', '.tsx', '.js', '.jsx'];
-  for (const ext of extensions) {
-    const withExt = resolved + ext;
-    if (fs.existsSync(withExt)) {
-      return withExt;
-    }
-  }
-
-  // Try index files (for directory imports)
-  const indexFiles = ['index.ts', 'index.tsx', 'index.js', 'index.jsx'];
-  for (const indexFile of indexFiles) {
-    const indexPath = path.join(resolved, indexFile);
-    if (fs.existsSync(indexPath)) {
-      return indexPath;
-    }
-  }
-
-  return null;
+  // Non-relative: resolve through Vite's aliases before giving up.
+  return applyAliases(importSource, aliases);
 }
 
 /**

@@ -1,5 +1,18 @@
 # durable-db
 
+## 0.1.1
+
+### Patch Changes
+
+- Resolve Vite path aliases (e.g. `@/databases/schema`) in `src/databases/`
+  imports, not just relative paths. The schema-import resolver and the action()
+  call-site transform now resolve non-relative specifiers through the project's
+  Vite `resolve.alias` config (the single source of truth — it already includes
+  aliases wired in from tsconfig `paths` by frameworks like rwsdk). The Vite
+  plugin reads the resolved config / uses Vite's own resolver; the CLI loads the
+  Vite config to obtain the aliases. Relative imports are unchanged (fast path),
+  and resolution falls back to relative-only if no Vite config is available.
+
 ## 0.1.0
 
 ### Minor Changes

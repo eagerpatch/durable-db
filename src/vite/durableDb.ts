@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Plugin, ResolvedConfig, ViteDevServer } from 'vite';
+import type { Alias, Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import type { DatabaseInfo, ActionInfo } from '../db';
 import { debugVite } from '../utils/debug';
 
@@ -96,6 +96,15 @@ class PluginState {
   config!: ResolvedConfig;
   devServer: ViteDevServer | null = null;
 
+  /**
+   * Vite's resolved `resolve.alias` entries (the source of truth for aliases,
+   * including tsconfig `paths` wired in by frameworks like rwsdk). Passed to the
+   * parser so an `action` factory imported through an alias is recognized.
+   */
+  get aliases(): readonly Alias[] {
+    return this.config?.resolve?.alias ?? [];
+  }
+
   private selfDevStateWriteUntil = 0;
 
   constructor(readonly options: ResolvedOptions) {}
@@ -170,7 +179,7 @@ class PluginState {
 
     for (const file of files) {
       const code = readFile(file.absolutePath);
-      const parsed = parseDatabaseFile(file.absolutePath, code);
+      const parsed = parseDatabaseFile(file.absolutePath, code, { aliases: this.aliases });
 
       if (parsed.database) {
         parsed.database.migrationsDir = path.resolve(this.projectRoot, this.options.migrationsDir, parsed.database.name);
@@ -466,7 +475,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         const database = state.databases.get(dbNameForPath);
         if (!database) return null;
 
-        const parsed = parseDatabaseFile(cleanId, code);
+        const parsed = parseDatabaseFile(cleanId, code, { aliases: state.aliases });
 
         for (const action of parsed.actions) {
           state.registerAction(action, dbNameForPath, cleanId);
@@ -488,7 +497,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         return result;
       }
 
-      const parsed = parseDatabaseFile(cleanId, code);
+      const parsed = parseDatabaseFile(cleanId, code, { aliases: state.aliases });
       if (parsed.actions.length === 0) return null;
 
       const importedDbName = await findImportedDatabase(

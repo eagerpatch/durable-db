@@ -23,6 +23,14 @@ const generate =
  */
 export const DEV_EPOCH_IMPORT = 'virtual:durable-db/__devEpoch';
 
+// Local name for the arktype `type` we inject from the registry into a USER's action
+// file. Aliased (not bare `type`) so it never clashes with the app's own
+// `import { type } from '@shoplayer/framework'` — a duplicate top-level binding that
+// rollup tolerated but rolldown (Vite 8+) rejects with "Identifier 'type' has already
+// been declared". The injected import still routes to durable-db's inlined arktype
+// instance (see the comment at the injection site).
+const ARKTYPE_LOCAL = '__ddType';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -62,14 +70,24 @@ export function parseExpression(code: string): t.Expression {
 // AST Builders - Imports
 // ============================================================================
 
-function createNamedImport(names: string[], source: string): t.ImportDeclaration {
-  const specifiers = names.map((name) =>
-    t.importSpecifier(t.identifier(name), t.identifier(name))
-  );
+// An import name is either a bare name (local === imported) or an aliased pair.
+// Aliasing matters when an injected import would otherwise clash with a name the
+// user already has in scope — e.g. `type`, which apps import from their framework.
+type ImportName = string | { imported: string; local: string };
+
+function asImportName(n: ImportName): { imported: string; local: string } {
+  return typeof n === 'string' ? { imported: n, local: n } : n;
+}
+
+function createNamedImport(names: ImportName[], source: string): t.ImportDeclaration {
+  const specifiers = names.map((n) => {
+    const { imported, local } = asImportName(n);
+    return t.importSpecifier(t.identifier(local), t.identifier(imported));
+  });
   return t.importDeclaration(specifiers, t.stringLiteral(source));
 }
 
-function ensureNamedImports(body: t.Statement[], source: string, names: string[]): void {
+function ensureNamedImports(body: t.Statement[], source: string, names: ImportName[]): void {
   const existing = body.find(
     (s): s is t.ImportDeclaration => t.isImportDeclaration(s) && s.source.value === source
   );
@@ -81,6 +99,8 @@ function ensureNamedImports(body: t.Statement[], source: string, names: string[]
     return;
   }
 
+  // Dedupe by imported name so re-running over an already-transformed file is a no-op
+  // (the local alias, if any, is preserved on the existing specifier).
   const have = new Set(
     existing.specifiers
     .filter((sp): sp is t.ImportSpecifier => t.isImportSpecifier(sp))
@@ -88,8 +108,9 @@ function ensureNamedImports(body: t.Statement[], source: string, names: string[]
   );
 
   for (const n of names) {
-    if (!have.has(n)) {
-      existing.specifiers.push(t.importSpecifier(t.identifier(n), t.identifier(n)));
+    const { imported, local } = asImportName(n);
+    if (!have.has(imported)) {
+      existing.specifiers.push(t.importSpecifier(t.identifier(local), t.identifier(imported)));
     }
   }
 }
@@ -859,11 +880,11 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
   const instanceKeyExpr = buildInstanceKeyExpr(database);
 
   const commonStatements: t.Statement[] = [
-    // const argsSchema = type({...});
+    // const argsSchema = __ddType({...});
     t.variableDeclaration('const', [
       t.variableDeclarator(
         t.identifier('argsSchema'),
-        t.callExpression(t.identifier('type'), [parseExpression(action.argsSchemaSource)])
+        t.callExpression(t.identifier(ARKTYPE_LOCAL), [parseExpression(action.argsSchemaSource)])
       ),
     ]),
 
@@ -968,8 +989,14 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
   // NOT bare `arktype`: the latter isn't hoisted to a pnpm app's root, so the
   // injected import fails to resolve in the cloudflare plugin's worker-entry
   // evaluation. registryImport always resolves there (it's already injected),
-  // and routes to durable-db's single inlined arktype instance.
-  ensureNamedImports(body, registryImport, ['registerAction', 'getDoContext', 'callAction', 'type']);
+  // and routes to durable-db's single inlined arktype instance. Imported under an
+  // alias (ARKTYPE_LOCAL) so it never collides with the app's own `type` import.
+  ensureNamedImports(body, registryImport, [
+    'registerAction',
+    'getDoContext',
+    'callAction',
+    { imported: 'type', local: ARKTYPE_LOCAL },
+  ]);
   ensureNamedImports(body, DEV_EPOCH_IMPORT, ['applyDevEpoch']);
 
   if (database.transport === 'websocket') {
@@ -1001,12 +1028,12 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
       const validatorId = t.identifier(`__validator_${exportName}`);
       const handlerId = t.identifier(`__handler_${exportName}`);
 
-      // const __validator_X = type(<schema>);
+      // const __validator_X = __ddType(<schema>);
       replaced.push(
         t.variableDeclaration('const', [
           t.variableDeclarator(
             validatorId,
-            t.callExpression(t.identifier('type'), [parseExpression(action.argsSchemaSource)])
+            t.callExpression(t.identifier(ARKTYPE_LOCAL), [parseExpression(action.argsSchemaSource)])
           ),
         ])
       );

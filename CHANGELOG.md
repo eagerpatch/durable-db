@@ -1,5 +1,18 @@
 # durable-db
 
+## 0.1.2
+
+### Patch Changes
+
+- Alias the injected `type` import so it never collides with an app's own `type`
+  import. The action transform injects `import { …, type } from "durable-db/registry"`
+  into the user's file; if the app already does `import { type } from '…'` (e.g.
+  arktype's `type` re-exported by a framework), the two top-level `type` bindings are a
+  duplicate declaration. Rollup tolerated it, but rolldown (Vite 8+) rejects it with
+  `Identifier 'type' has already been declared`. The injected `type` is now imported
+  under an internal alias (`__ddType`) and the generated validators reference that,
+  so the transform still routes to durable-db's own arktype instance with no clash.
+
 ## 0.1.1
 
 ### Patch Changes

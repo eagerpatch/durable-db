@@ -261,6 +261,29 @@ export const createUser = action({
     expect(result!.code).toContain('export async function createUser');
   });
 
+  it('structuredClones the RPC result so it is RSC-serializable (strips Symbol.dispose)', () => {
+    const code = `
+import { action } from './main';
+
+export const createUser = action({
+  args: { name: 'string' },
+  handler: async (db, args) => db.insertInto('users').values(args).execute()
+});
+`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    // The page→DO path RPCs to the Durable Object; Cloudflare's RPC attaches a
+    // top-level Symbol.dispose that React Server Components refuse to serialize,
+    // so the stub result is structuredClone'd (drops symbol keys, preserves
+    // Date/Map/Set) before being returned.
+    expect(result!.code).toContain('stub.rpc(');
+    expect(result!.code).toContain('.then(structuredClone)');
+  });
+
   it('imports arktype `type` from the registry subpath (not bare arktype)', () => {
     const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
     const result = transformActionFile({

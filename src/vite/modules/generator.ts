@@ -956,8 +956,22 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
 
   return [
     ...commonStatements,
-    // return stub.rpc(...)
-    t.returnStatement(buildRpcCall(action)),
+    // return stub.rpc(...).then(structuredClone)
+    //
+    // Cloudflare's Durable Object RPC attaches a top-level `Symbol.dispose` to
+    // the returned object (explicit resource management for the RPC call). React
+    // Server Components refuse to serialize symbol-keyed props ("Objects with
+    // symbol properties like Symbol.dispose are not supported"), so an action
+    // result returned from a "use server" function — or passed straight to a
+    // client component as a prop — throws. structuredClone yields a plain clone
+    // with all symbol keys dropped (and, unlike a JSON round-trip, preserves
+    // Date/Map/Set). `.then(structuredClone)` keeps this path non-async.
+    t.returnStatement(
+      t.callExpression(
+        t.memberExpression(buildRpcCall(action), t.identifier('then')),
+        [t.identifier('structuredClone')]
+      )
+    ),
   ];
 }
 

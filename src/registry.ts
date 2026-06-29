@@ -161,5 +161,14 @@ export async function callAction(
     return wsTransport.call(actionName, validated, ctx.instanceKey);
   }
 
-  return stub.rpc(actionName, validated, { instanceKey: ctx.instanceKey });
+  // Cloudflare's Durable Object RPC attaches a `Symbol.dispose` to the
+  // TOP-LEVEL returned object (explicit-resource-management for the RPC call).
+  // React Server Components refuse to serialize symbol-keyed props ("Objects
+  // with symbol properties like Symbol.dispose are not supported"), so an action
+  // result returned from a "use server" function or passed straight to a client
+  // component throws. structuredClone returns a plain clone with all symbol keys
+  // dropped — and, unlike a JSON round-trip, preserves Date/Map/Set/etc. The
+  // direct-call and WebSocket paths above already yield plain values.
+  const result = await stub.rpc(actionName, validated, { instanceKey: ctx.instanceKey });
+  return structuredClone(result);
 }

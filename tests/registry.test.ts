@@ -358,6 +358,35 @@ describe('callAction', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it('strips the RPC Symbol.dispose so results are RSC-serializable plain clones', async () => {
+    registerAction('analytics', 'getThing', { validator: (args) => args, handler: vi.fn() });
+
+    // Cloudflare's DO RPC attaches a Symbol.dispose to the top-level result;
+    // React Server Components refuse to serialize symbol-keyed props.
+    const createdAt = new Date('2026-01-01T00:00:00.000Z');
+    const rpcResult: Record<string | symbol, unknown> = { id: 'x', createdAt };
+    rpcResult[Symbol.dispose] = () => {};
+    const rpcSpy = vi.fn().mockResolvedValue(rpcResult);
+
+    const ctx = createMockContext('main');
+    ctx.env = {
+      ANALYTICS_DO: {
+        idFromName: vi.fn().mockReturnValue({ id: 'analytics-id' }),
+        get: vi.fn().mockReturnValue({ rpc: rpcSpy }),
+      },
+    };
+
+    const result = (await callAction({}, 'analytics', 'getThing', {}, ctx)) as Record<string, unknown>;
+
+    // No symbol-keyed props survive, and it's a clone (not the RPC object).
+    expect(Object.getOwnPropertySymbols(result)).toHaveLength(0);
+    expect(result).not.toBe(rpcResult);
+    // Data preserved — including the Date type (structuredClone, not a JSON round-trip).
+    expect(result.id).toBe('x');
+    expect(result.createdAt).toBeInstanceOf(Date);
+    expect((result.createdAt as Date).toISOString()).toBe('2026-01-01T00:00:00.000Z');
+  });
+
   it('calls handler directly with same db reference inside DO context', async () => {
     const mockDb = { mock: 'db-instance' };
     const handler = vi.fn().mockResolvedValue({ ok: true });

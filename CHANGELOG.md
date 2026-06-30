@@ -1,5 +1,12 @@
 # durable-db
 
+## 0.1.7
+
+### Patch Changes
+
+- 02bf9f2: Register all actions in the Durable Object's isolate at startup. The action registry is a module singleton populated when an action file loads, but the generated DO module didn't import action files — so it relied on the request path having loaded them. That holds in dev (one shared isolate) and via in-app navigation, but a Durable Object is a separate, persistent isolate in production: a freshly deep-linked route whose action the DO never loaded threw `Unknown action "X" (was it imported?)`. The generated DO module now side-effect-imports every action-defining file (discovered recursively under the databases dir), so all actions register at DO startup regardless of entry route.
+- 02bf9f2: Fix `EvalError: Code generation from strings disallowed` (500) in production Cloudflare Workers. arktype compiles validators with `new Function` (runtime codegen), which Workers allow at startup but block during request handling — so a route's action `args` schema that compiles at request time crashed. arktype's `envHasCsp()` auto-probe mis-detects this (it runs at startup, where codegen still works). durable-db now re-exports `type` from an explicitly jitless (eval-free) arktype scope, so every `type({...})` is interpreted rather than compiled — independent of bundle init order. Dev was unaffected because its workerd allows codegen.
+
 ## 0.1.6
 
 ### Patch Changes

@@ -458,6 +458,29 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
     },
 
     async transform(code, id) {
+      // Workaround for a Rolldown (Vite 8) tree-shaking correctness bug that
+      // drops Drizzle base classes from the production worker bundle.
+      // `drizzle-orm` ships `"sideEffects": false`, so Rolldown treats every
+      // Drizzle module as pure and free to delete when its exports look unused.
+      // Drizzle's classes form deep circular graphs that Rolldown wraps in lazy
+      // `__esm(() => { … })` init closures; when a base class is referenced ONLY
+      // via `class Sub extends Base` from inside another lazy-wrapped module,
+      // Rolldown fails to count that `extends` as a use of `Base` — it then
+      // empties `Base`'s init closure AND removes the hoisted `var Base`, leaving
+      // the surviving `extends Base` reference dangling:
+      //   Uncaught ReferenceError: TypedQueryBuilder is not defined
+      // (binding absent, not TDZ-undefined). Production build only; dev is fine.
+      // `build.rollupOptions.treeshake.moduleSideEffects` can't fix it (a
+      // package's own `sideEffects` field outranks it), but a plugin hook's
+      // `moduleSideEffects` return value DOES outrank package.json — so tagging
+      // Drizzle's modules side-effectful here forces Rolldown to keep their
+      // bodies (base-class declarations included). Runs before the node_modules
+      // skip below because Drizzle lives in node_modules. Remove once Rolldown
+      // fixes the cyclic-`extends` tree-shaking bug.
+      if (/[\\/]drizzle-orm[\\/]/.test(id)) {
+        return { code, map: null, moduleSideEffects: true };
+      }
+
       // Skip virtual modules and node_modules
       if (id.startsWith('\0') || id.includes('node_modules')) return null;
 

@@ -4,7 +4,7 @@ import type { Alias, Plugin, ResolvedConfig, ViteDevServer } from 'vite';
 import type { DatabaseInfo, ActionInfo } from '../db';
 import { debugVite } from '../utils/debug';
 
-import { discoverDatabaseFiles, readFile } from './modules/discovery';
+import { discoverDatabaseFiles, discoverActionFiles, readFile } from './modules/discovery';
 import { parseDatabaseFile } from './modules/parser';
 import { patchWranglerConfig, checkWranglerConfig } from './modules/wrangler';
 import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
@@ -448,10 +448,17 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
       await state.initialize();
 
       const isDev = state.config.command === 'serve';
+      // Action files are side-effect-imported by the generated DO module so every
+      // action registers in the DO's isolate at startup (see discoverActionFiles).
+      const actionFiles = discoverActionFiles({
+        projectRoot: state.projectRoot,
+        databasesDir: state.options.databasesDir,
+      });
       const code = generateDurableObjectsModule(
         Array.from(state.databases.values()),
         state.options.registryImport,
-        isDev
+        isDev,
+        actionFiles
       );
 
       return { code };

@@ -39,4 +39,4 @@ export type { Kysely, CompiledQuery, QueryResult, KyselyPlugin } from 'kysely';
 export { CamelCasePlugin } from 'kysely';
 
 // Re-export arktype for users who want custom validation
-export { type } from 'arktype';
+export { type } from '../arktypeConfig'; // jitless `type` — eval-free for Workers

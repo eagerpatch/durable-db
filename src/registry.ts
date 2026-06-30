@@ -1,4 +1,4 @@
-import { type } from 'arktype';
+import { type } from './arktypeConfig'; // jitless `type` — eval-free for Workers
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { WebSocketTransport } from './transport/websocket';
 

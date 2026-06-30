@@ -26,8 +26,9 @@ export {
 // Kysely re-exports
 export type { Kysely } from 'kysely';
 
-// Arktype re-export
-export { type } from 'arktype';
+// Arktype re-export — jitless (eval-free) `type` so Workers don't 500 on
+// request-time validator codegen. See ./arktypeConfig.
+export { type } from './arktypeConfig';
 
 // Types
 export type {

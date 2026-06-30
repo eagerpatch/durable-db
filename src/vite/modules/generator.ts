@@ -175,7 +175,8 @@ function generateWithMap(ast: t.File, sourceFileName?: string) {
 export function generateDurableObjectsModule(
   databases: DatabaseInfo[],
   registryImport: string,
-  isDev: boolean = false
+  isDev: boolean = false,
+  actionFiles: string[] = []
 ): string {
   const bindingNamesExpr = buildBindingNamesObject(databases);
   const dbTransportsExpr = buildDbTransportsObject(databases);
@@ -187,6 +188,12 @@ export function generateDurableObjectsModule(
   const imports: t.ImportDeclaration[] = [
     createNamedImport(['SqliteDurableObject', 'type'], 'durable-db/db'),
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
+    // Side-effect imports of every action-defining file, so their
+    // `registerAction(...)` calls run at DO startup and populate the registry in
+    // the DO's (separate, persistent) isolate — not just whatever the request
+    // path happened to import. Without this, deep-linked routes throw
+    // `Unknown action "X" (was it imported?)` in production.
+    ...actionFiles.map((file) => t.importDeclaration([], t.stringLiteral(file))),
   ];
 
   if (anyBrowsable) {

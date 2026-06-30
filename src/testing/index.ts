@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import type { DatabaseSync } from 'node:sqlite';
-import { type } from 'arktype';
+import { type } from '../arktypeConfig'; // jitless `type` — eval-free for Workers
 import type { Kysely } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { createKyselyFromSql } from '../db/kysely';

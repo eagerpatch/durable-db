@@ -91,6 +91,49 @@ export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile
 }
 
 /**
+ * Recursively find action-defining files under the databases directory.
+ *
+ * The generated Durable Object module side-effect-imports these so every
+ * `action()` runs its `registerAction(...)` at DO startup — populating the
+ * action registry in the DO's isolate. Without this the registry is only
+ * populated by whatever the request path imported, which works in dev (one
+ * shared isolate) and via in-app navigation, but a Durable Object is a separate
+ * persistent isolate in production: a freshly deep-linked route whose action the
+ * DO never loaded throws `Unknown action "X" (was it imported?)`.
+ *
+ * Returns absolute paths of `.ts`/`.tsx` files that call `action(` (the factory
+ * invocation), excluding tests, declarations, and `_`-prefixed helpers. Helper
+ * modules without their own actions are pulled in transitively by the action
+ * files that import them, so they don't need to be listed here.
+ */
+export function discoverActionFiles(options: DiscoveryOptions): string[] {
+  const { projectRoot, databasesDir } = options;
+  const absoluteDir = path.join(projectRoot, databasesDir);
+  if (!fs.existsSync(absoluteDir)) return [];
+
+  const results: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('_') || entry.name === 'node_modules') continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!/\.tsx?$/.test(entry.name)) continue;
+      if (/\.d\.ts$/.test(entry.name) || /\.(test|spec)\.tsx?$/.test(entry.name)) continue;
+      try {
+        if (/\baction\s*\(/.test(fs.readFileSync(full, 'utf-8'))) results.push(full);
+      } catch {
+        /* unreadable — skip */
+      }
+    }
+  };
+  walk(absoluteDir);
+  return results;
+}
+
+/**
  * Resolve an import path to an absolute path.
  *
  * Relative imports (starting with `.`) are the fast path — resolved directly

@@ -1,4 +1,4 @@
-import { type } from 'arktype';
+import { type } from '../arktypeConfig'; // jitless `type` — eval-free for Workers
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import type {
   DatabaseConfig,

@@ -1,7 +1,7 @@
 import type { Kysely } from 'kysely';
 import type { Kyselify } from 'drizzle-orm/kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
-import { type as arkType } from 'arktype';
+import { type as arkType } from '../arktypeConfig'; // jitless `type` — eval-free for Workers
 
 /**
  * Base type for ArkType schema definitions.

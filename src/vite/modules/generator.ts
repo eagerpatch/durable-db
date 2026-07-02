@@ -1,5 +1,6 @@
 import type { DatabaseInfo, ActionInfo } from '../../db';
 
+import path from 'node:path';
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
 import { parse } from '@babel/parser';
@@ -149,6 +150,56 @@ function buildBindingNamesObject(databases: DatabaseInfo[]): t.ObjectExpression 
   return t.objectExpression(properties);
 }
 
+// ============================================================================
+// Schema imports for the generated DO
+// ============================================================================
+
+/**
+ * Local identifier for a schema table imported into the generated module —
+ * aliased so it can never collide with anything else in scope.
+ */
+function schemaLocalName(db: DatabaseInfo, tableName: string): string {
+  const safe = (s: string) => s.replace(/[^A-Za-z0-9_$]/g, '_');
+  return `__schema_${safe(db.name)}_${safe(tableName)}`;
+}
+
+function hasSchema(db: DatabaseInfo): boolean {
+  return !!db.schemaImport && db.schemaTableNames.length > 0;
+}
+
+/**
+ * Import declaration bringing a database's schema tables into the generated
+ * module, so the DO class can carry `schema = { … }` and build its Kysely with
+ * the full schema-aware plugin chain (exact column mapping, defaults, date and
+ * boolean deserialization) — the same plugins app code gets everywhere else.
+ * Relative specifiers are resolved against the database file (the generated
+ * module lives at a virtual id, not next to the user's code); aliases and
+ * package specifiers pass through for Vite to resolve.
+ */
+function buildSchemaImport(db: DatabaseInfo): t.ImportDeclaration {
+  const source = db.schemaImport!.startsWith('.')
+    ? path.resolve(path.dirname(db.filePath), db.schemaImport!)
+    : db.schemaImport!;
+  return createNamedImport(
+    db.schemaTableNames.map((tableName) => ({
+      imported: tableName,
+      local: schemaLocalName(db, tableName),
+    })),
+    source
+  );
+}
+
+function buildSchemaProperty(db: DatabaseInfo): t.ClassProperty {
+  return t.classProperty(
+    t.identifier('schema'),
+    t.objectExpression(
+      db.schemaTableNames.map((tableName) =>
+        t.objectProperty(t.identifier(tableName), t.identifier(schemaLocalName(db, tableName)))
+      )
+    )
+  );
+}
+
 function buildDbTransportsObject(databases: DatabaseInfo[]): t.ObjectExpression {
   const properties = databases.map((db) =>
     t.objectProperty(t.stringLiteral(db.name), t.stringLiteral(db.transport))
@@ -194,6 +245,8 @@ export function generateDurableObjectsModule(
     // path happened to import. Without this, deep-linked routes throw
     // `Unknown action "X" (was it imported?)` in production.
     ...actionFiles.map((file) => t.importDeclaration([], t.stringLiteral(file))),
+    // Schema tables for each DO's `schema = {…}` property (aliased locals).
+    ...databases.filter(hasSchema).map(buildSchemaImport),
   ];
 
   if (anyBrowsable) {
@@ -280,6 +333,9 @@ function buildDurableObjectStatements(
     t.identifier('migrations'),
     buildMigrationsObject(db.migrations)
   );
+  const dataProperties = hasSchema(db)
+    ? [migrationsProperty, buildSchemaProperty(db)]
+    : [migrationsProperty];
 
   const sysMethod = buildSysMethod();
   const classMethods: t.ClassMethod[] = [rpcMethod, sysMethod];
@@ -293,7 +349,7 @@ function buildDurableObjectStatements(
     const classDecl = t.classDeclaration(
       t.identifier(db.className),
       t.identifier('SqliteDurableObject'),
-      t.classBody([migrationsProperty, ...classMethods])
+      t.classBody([...dataProperties, ...classMethods])
     );
     return [t.exportNamedDeclaration(classDecl)];
   }
@@ -303,7 +359,7 @@ function buildDurableObjectStatements(
   const innerClass = t.classExpression(
     null,
     t.identifier('SqliteDurableObject'),
-    t.classBody([migrationsProperty])
+    t.classBody([...dataProperties])
   );
   const browsableWrapped = t.callExpression(
     t.callExpression(t.identifier('Browsable'), []),

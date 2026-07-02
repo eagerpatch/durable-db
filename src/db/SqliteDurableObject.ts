@@ -1,5 +1,6 @@
 import { DurableObject } from 'cloudflare:workers';
 import { Kysely } from 'kysely';
+import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { debugMigrations } from '../utils/debug';
 import {
   createKyselyFromSql,
@@ -137,9 +138,28 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   abstract migrations: Migrations;
 
   /**
+   * Optional Drizzle schema (the same object passed to `defineDatabase`).
+   * When set — the generated Durable Object populates it — the Kysely
+   * instance is built with the full schema-aware plugin chain
+   * (createDrizzlePlugins: defaults, exact column mapping, date and boolean
+   * deserialization). Without it only the schema-less plugins apply.
+   *
+   * Subclass field initializers run after this constructor, so `db` is built
+   * lazily on first access rather than in the constructor.
+   */
+  schema?: Record<string, SQLiteTableWithColumns<any>>;
+
+  private _db: Kysely<any> | undefined;
+
+  /**
    * The Kysely database instance - available after migrations run
    */
-  protected db!: Kysely<any>;
+  protected get db(): Kysely<any> {
+    if (!this._db) {
+      this._db = createKyselyFromSql(this.sql, this.schema ? { schema: this.schema } : {});
+    }
+    return this._db;
+  }
 
   /**
    * Raw SQLite storage access
@@ -167,7 +187,6 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.db = createKyselyFromSql(this.sql);
   }
 
   /**

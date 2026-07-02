@@ -1,5 +1,15 @@
 # durable-db
 
+## 0.1.9
+
+### Patch Changes
+
+- The generated Durable Object now carries the database's Drizzle schema and builds its Kysely with the full schema-aware plugin chain.
+
+  Previously the DO used the base class's schema-less Kysely (`createKyselyFromSql(sql)` with only CamelCase + heuristic date handling), so the schema-aware plugins — `DrizzleDefaultsPlugin` (defaultFn/onUpdateFn), `SchemaPlugin` (exact column-name mapping), schema-gated date deserialization, and the new `BooleanDeserializePlugin` — never ran on the production action path. Most visibly: `integer({ mode: 'boolean' })` columns read back as raw storage values instead of booleans.
+
+  The Vite plugin now emits an aliased import of the schema tables into the generated module and a `schema = { … }` class property; `SqliteDurableObject` builds `db` lazily (subclass field initializers run after the constructor) with the schema when present. Subclassing without a schema keeps the old behavior.
+
 ## 0.1.8
 
 ### Patch Changes

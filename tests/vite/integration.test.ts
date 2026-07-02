@@ -103,6 +103,16 @@ export const getUser = action({
       expect(doModule).toMatch(/async rpc/);
       expect(doModule).toMatch(/getAction/);
 
+      // The generated DO must import the Drizzle schema (aliased) and carry it
+      // as a class property, so its Kysely gets the full schema-aware plugin
+      // chain (defaults, exact column mapping, date/boolean deserialization) —
+      // without this, boolean columns read back as raw storage values in
+      // production. The relative './schema' import is resolved against the
+      // database file since the generated module lives at a virtual id.
+      expect(doModule).toMatch(/import { users as __schema_main_users } from/);
+      expect(doModule).toContain(path.join('src', 'databases', 'schema'));
+      expect(doModule).toMatch(/schema = \{\s*users: __schema_main_users\s*\}/);
+
       // 5. Generate wrangler config
       const wranglerConfig = generateRequiredConfig([parsed.database!]);
 

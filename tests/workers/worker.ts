@@ -1,4 +1,4 @@
-export { TestMigrationDO, TestHappyDO } from './test-do';
+export { TestMigrationDO, TestHappyDO, TestKyselyDO } from './test-do';
 
 /**
  * Placeholder worker entry — tests interact with DOs directly via the

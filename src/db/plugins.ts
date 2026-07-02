@@ -422,6 +422,76 @@ export class DateSerializePlugin implements KyselyPlugin {
 }
 
 /**
+ * Collect the names of columns Drizzle declares as boolean-typed
+ * (`integer({ mode: 'boolean' })`). Mirrors collectDateColumnNames: covers
+ * the SQL column name, the JS property name, and the snake_cased property
+ * name, so it works on either side of the CamelCasePlugin.
+ */
+function collectBooleanColumnNames(schema: Record<string, Table>): Set<string> {
+  const booleanColumns = new Set<string>();
+
+  for (const table of Object.values(schema)) {
+    const columns = getTableColumns(table);
+    for (const [propertyName, column] of Object.entries(columns)) {
+      if (column.dataType === 'boolean') {
+        booleanColumns.add(column.name);
+        booleanColumns.add(propertyName);
+        booleanColumns.add(toSnakeCase(propertyName));
+      }
+    }
+  }
+
+  return booleanColumns;
+}
+
+/**
+ * Plugin that deserializes boolean-mode columns on read.
+ *
+ * SQLite stores booleans as INTEGER 1/0 (the write side is normalized in the
+ * driver — see normalizeParameter in kysely.ts), so schema-declared boolean
+ * columns come back as numbers and must be mapped to real booleans. Legacy
+ * rows written before the driver normalization existed carry TEXT
+ * 'true'/'false' — those are mapped too, so old data keeps reading correctly.
+ * Anything unrecognized round-trips verbatim rather than being guessed at.
+ */
+export class BooleanDeserializePlugin implements KyselyPlugin {
+  private booleanColumns: Set<string>;
+
+  constructor(schema: Record<string, Table>) {
+    this.booleanColumns = collectBooleanColumnNames(schema);
+  }
+
+  transformQuery(args: PluginTransformQueryArgs): RootOperationNode {
+    return args.node;
+  }
+
+  async transformResult(args: PluginTransformResultArgs): Promise<QueryResult<UnknownRow>> {
+    if (this.booleanColumns.size === 0) return args.result;
+    return {
+      ...args.result,
+      rows: args.result.rows.map((row) => this.transformRow(row)),
+    };
+  }
+
+  private transformRow(row: UnknownRow): UnknownRow {
+    const result: UnknownRow = {};
+    for (const [key, value] of Object.entries(row)) {
+      result[key] = this.booleanColumns.has(key) ? this.toBoolean(value) : value;
+    }
+    return result;
+  }
+
+  private toBoolean(value: unknown): unknown {
+    if (value === null || value === undefined || typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'bigint') return value !== 0n;
+    if (value === 'true' || value === '1') return true;
+    if (value === 'false' || value === '0') return false;
+    return value;
+  }
+}
+
+/**
  * Validate that a schema object is shaped like a record of Drizzle tables.
  *
  * Throws a descriptive error pointing at the offending key when the schema
@@ -461,6 +531,7 @@ export function assertValidSchema(
  * - DrizzleDefaultsPlugin: auto-populates defaultFn/onUpdateFn values
  * - SchemaPlugin (extends CamelCasePlugin): schema-aware camelCase ↔ snake_case
  * - DateSerializePlugin: Date ↔ SQLite text serialization
+ * - BooleanDeserializePlugin: boolean-mode columns read back as booleans
  *
  * When camelCase is false, SchemaPlugin is omitted.
  */
@@ -479,5 +550,6 @@ export function createDrizzlePlugins(
   }
 
   plugins.push(new DateSerializePlugin(schema as unknown as Record<string, Table>));
+  plugins.push(new BooleanDeserializePlugin(schema as unknown as Record<string, Table>));
   return plugins;
 }

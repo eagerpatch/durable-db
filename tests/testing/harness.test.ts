@@ -77,14 +77,13 @@ describe('createTestDatabase', () => {
     const t = await createTestDatabase({ schema });
     cleanup = t.destroy;
 
-    // Booleans bind as 0/1 and read back as 0/1 — exactly like production
-    // (durable-db's plugin chain converts dates, not booleans; apps coerce with
-    // `!!row.col`). The harness faithfully reproduces that.
+    // Booleans bind as 0/1 on disk but the plugin chain reads them back as
+    // real booleans — exactly like production.
     const saved = await t.run(upsertSettings, { autoBook: true });
-    expect(saved.autoBook).toBe(1);
+    expect(saved.autoBook).toBe(true);
 
     const read = await t.run(getSettings, {});
-    expect(read?.autoBook).toBe(1);
+    expect(read?.autoBook).toBe(true);
   });
 
   it('upserts on the conflict key rather than duplicating', async () => {
@@ -96,7 +95,7 @@ describe('createTestDatabase', () => {
 
     const rows = await t.db.selectFrom('settings').selectAll().execute();
     expect(rows).toHaveLength(1);
-    expect(rows[0].autoBook).toBe(1);
+    expect(rows[0].autoBook).toBe(true);
   });
 
   it('handles update-vs-insert by business key and stamps a Date column', async () => {

@@ -14,6 +14,7 @@ import {
   SchemaPlugin,
   DrizzleDefaultsPlugin,
   DateSerializePlugin,
+  BooleanDeserializePlugin,
   dateSerializers,
   createDrizzlePlugins,
   extractDefaults,
@@ -476,21 +477,23 @@ describe('DateSerializePlugin', () => {
 // ---------------------------------------------------------------------------
 
 describe('createDrizzlePlugins', () => {
-  it('returns DrizzleDefaultsPlugin, SchemaPlugin, and DateSerializePlugin by default', () => {
+  it('returns DrizzleDefaults, Schema, DateSerialize and BooleanDeserialize plugins by default', () => {
     const schema = { users: usersExplicit };
     const plugins = createDrizzlePlugins(schema);
-    expect(plugins).toHaveLength(3);
+    expect(plugins).toHaveLength(4);
     expect(plugins[0]).toBeInstanceOf(DrizzleDefaultsPlugin);
     expect(plugins[1]).toBeInstanceOf(SchemaPlugin);
     expect(plugins[2]).toBeInstanceOf(DateSerializePlugin);
+    expect(plugins[3]).toBeInstanceOf(BooleanDeserializePlugin);
   });
 
   it('omits SchemaPlugin when camelCase is false', () => {
     const schema = { users: usersExplicit };
     const plugins = createDrizzlePlugins(schema, false);
-    expect(plugins).toHaveLength(2);
+    expect(plugins).toHaveLength(3);
     expect(plugins[0]).toBeInstanceOf(DrizzleDefaultsPlugin);
     expect(plugins[1]).toBeInstanceOf(DateSerializePlugin);
+    expect(plugins[2]).toBeInstanceOf(BooleanDeserializePlugin);
   });
 
   it('throws a helpful error when schema contains a non-table value', () => {
@@ -504,7 +507,7 @@ describe('createDrizzlePlugins', () => {
 
   it('accepts an empty schema object', () => {
     const plugins = createDrizzlePlugins({});
-    expect(plugins).toHaveLength(3);
+    expect(plugins).toHaveLength(4);
   });
 });
 

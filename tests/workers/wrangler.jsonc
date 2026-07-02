@@ -5,13 +5,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "TEST_DO", "class_name": "TestMigrationDO" }
+      { "name": "TEST_DO", "class_name": "TestMigrationDO" },
+      { "name": "TEST_KYSELY_DO", "class_name": "TestKyselyDO" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestMigrationDO"]
+      "new_sqlite_classes": ["TestMigrationDO", "TestKyselyDO"]
     }
   ]
 }

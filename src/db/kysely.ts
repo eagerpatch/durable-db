@@ -34,6 +34,115 @@ export interface CreateKyselyOptions {
   camelCase?: boolean;
 }
 
+// workerd's SQLite build uses SQLITE_MAX_VARIABLE_NUMBER = 100 — any statement
+// with more bound parameters throws "too many SQL variables". Multi-row
+// inserts hit this instantly (24 rows × 7 columns = 168 params broke a real
+// app), and so do large `WHERE … IN (…)` lists. When a compiled query exceeds
+// the limit we inline the parameters as escaped SQL literals instead — still
+// one statement, identical semantics (RETURNING, ON CONFLICT, changes() all
+// behave the same).
+const MAX_BOUND_PARAMETERS = 100;
+
+/**
+ * workerd has no boolean binding type and silently stringifies JS booleans
+ * (storing TEXT 'true' in an INTEGER column); node:sqlite rejects them
+ * outright. Normalize to SQLite's 1/0 convention before the value reaches
+ * either. `undefined` → NULL for the same reason.
+ */
+function normalizeParameter(value: unknown): unknown {
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (value === undefined) return null;
+  return value;
+}
+
+function escapeLiteral(value: unknown): string {
+  if (value === null || value === undefined) return 'NULL';
+  if (typeof value === 'boolean') return value ? '1' : '0';
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error(`[db] Cannot inline non-finite number parameter (${value})`);
+    }
+    return String(value);
+  }
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'string') {
+    if (value.includes('\0')) {
+      throw new Error('[db] Cannot inline a string parameter containing a NUL byte');
+    }
+    return `'${value.replaceAll("'", "''")}'`;
+  }
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+    const bytes =
+      value instanceof ArrayBuffer
+        ? new Uint8Array(value)
+        : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    let hex = '';
+    for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+    return `X'${hex}'`;
+  }
+  throw new Error(`[db] Cannot inline SQL parameter of type ${typeof value}`);
+}
+
+/**
+ * Replace each `?` placeholder in `sql` with the escaped literal of its
+ * parameter. A real scanner, not a regex: '…' string literals ('' escapes),
+ * "…" quoted identifiers, `--` line comments and C-style block comments are
+ * skipped, so a `?` inside any of them is never touched.
+ *
+ * Exported for tests.
+ */
+export function inlineParameters(sql: string, parameters: readonly unknown[]): string {
+  let out = '';
+  let p = 0;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === ch) {
+          if (sql[j + 1] === ch) {
+            j += 2;
+            continue;
+          }
+          break;
+        }
+        j++;
+      }
+      out += sql.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      let j = sql.indexOf('\n', i);
+      if (j === -1) j = sql.length;
+      out += sql.slice(i, j);
+      i = j - 1;
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      let j = sql.indexOf('*/', i + 2);
+      j = j === -1 ? sql.length : j + 2;
+      out += sql.slice(i, j);
+      i = j - 1;
+      continue;
+    }
+    if (ch === '?') {
+      if (p >= parameters.length) {
+        throw new Error('[db] Query has more `?` placeholders than parameters while inlining');
+      }
+      out += escapeLiteral(parameters[p++]);
+      continue;
+    }
+    out += ch;
+  }
+  if (p !== parameters.length) {
+    throw new Error(
+      `[db] Inlined ${p} parameter(s) but the query provided ${parameters.length} — placeholder/parameter mismatch`,
+    );
+  }
+  return out;
+}
+
 /**
  * A Kysely driver that uses Cloudflare DO SQLite storage
  */
@@ -92,7 +201,14 @@ class CloudflareSqliteConnection implements DatabaseConnection {
   }
 
   async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
-    const { sql: queryStr, parameters } = compiledQuery;
+    let queryStr = compiledQuery.sql;
+    let parameters: readonly unknown[] = compiledQuery.parameters.map(normalizeParameter);
+
+    // Over workerd's 100-bound-parameter limit: inline as escaped literals.
+    if (parameters.length > MAX_BOUND_PARAMETERS) {
+      queryStr = inlineParameters(queryStr, parameters);
+      parameters = [];
+    }
 
     // Check if this is a SELECT/RETURNING query
     const isSelect = /^\s*(SELECT|RETURNING)/i.test(queryStr) ||

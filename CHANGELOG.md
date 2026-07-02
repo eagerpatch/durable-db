@@ -1,5 +1,16 @@
 # durable-db
 
+## 0.1.8
+
+### Patch Changes
+
+- Two Kysely-over-SqlStorage driver fixes, both found in the field and both invisible to the node-based unit suites:
+
+  - **Statements with more than 100 bound parameters no longer throw `too many SQL variables`.** workerd's SQLite is compiled with `SQLITE_MAX_VARIABLE_NUMBER = 100`, so a modest multi-row insert (24 rows × 7 columns = 168 params) or a large `WHERE … IN (…)` list blew up. Past the limit, the driver now inlines parameters as escaped SQL literals (a real scanner that never touches `?` inside string literals, quoted identifiers, or comments) — still a single statement with identical semantics.
+  - **Boolean columns round-trip as booleans.** workerd has no boolean binding type and silently stringified JS `true` into TEXT `'true'` (which then failed `'boolean'` arg validation downstream, and made a stored `'false'` truthy). The driver now normalizes boolean bindings to SQLite's 1/0 (and `undefined` → NULL), and a new schema-aware `BooleanDeserializePlugin` maps `integer({ mode: 'boolean' })` columns back to real booleans on read — including legacy TEXT `'true'`/`'false'` rows written by the old driver.
+
+  Covered by a new workerd E2E suite (`tests/workers/kysely-e2e.test.ts`) that runs the production plugin chain against a real DO SqlStorage.
+
 ## 0.1.7
 
 ### Patch Changes

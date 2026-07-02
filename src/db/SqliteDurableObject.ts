@@ -444,7 +444,8 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       // carry a statement index of its own.
       let currentIndex = -1;
       let currentStatement: string | null = null;
-      try {
+
+      const applyChunk = () => {
         for (let i = 0; i < statements.length; i++) {
           const statement = statements[i];
           if (!statement.trim()) continue;
@@ -462,6 +463,23 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           chunkIndex,
           new Date().toISOString()
         );
+      };
+
+      try {
+        // Each chunk commits atomically WITH its journal row. Without this, a
+        // crash (or a dev server killed mid-boot) between a CREATE TABLE and
+        // the journal insert leaves the schema applied but unrecorded —
+        // storage that throws MigrationSchemaConflictError on every retry.
+        // PITR shields production from that, but local dev has no PITR.
+        // `transactionSync` rolls back automatically when the callback throws;
+        // explicit BEGIN isn't allowed in DO SQLite. Mocked/test storages may
+        // not implement it — fall back to inline execution there.
+        const storage = this.ctx.storage as { transactionSync?: <T>(cb: () => T) => T };
+        if (typeof storage.transactionSync === 'function') {
+          storage.transactionSync(applyChunk);
+        } else {
+          applyChunk();
+        }
 
         debugMigrations('Migration chunk applied: %s[%d]', name, chunkIndex);
       } catch (error) {

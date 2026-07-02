@@ -1,5 +1,15 @@
 # durable-db
 
+## 0.1.10
+
+### Patch Changes
+
+- Migration chunks now commit atomically with their journal row (`storage.transactionSync`).
+
+  Previously each chunk's statements and the `__migrations` journal insert ran as separate writes. A crash — or a dev server killed mid-boot — between a `CREATE TABLE` and the journal insert left the schema applied but unrecorded: storage that throws `MigrationSchemaConflictError` ("table already exists ... journal has no record") on every subsequent boot. Production is shielded by the PITR bookmark restore, but local dev has no PITR, so the only way out was `db reset --purge-local-storage`.
+
+  With `transactionSync`, a failed or interrupted chunk rolls back completely — either the whole chunk plus its journal row lands, or nothing does. Mocked/test storages without `transactionSync` fall back to the old inline execution.
+
 ## 0.1.9
 
 ### Patch Changes

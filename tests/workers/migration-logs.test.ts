@@ -107,3 +107,19 @@ describe('migration E2E (real workerd)', () => {
     expect(status.attempts.lastError).toMatch(/syntax error|NOT VALID|INVALID/i);
   });
 });
+
+describe('chunk atomicity (real workerd)', () => {
+  // Regression for "poisoned storage": a chunk that fails (or a process
+  // killed mid-chunk) must not leave part of its schema behind with no
+  // journal row — that state throws MigrationSchemaConflictError on every
+  // subsequent boot, and local dev has no PITR to undo it. Each chunk now
+  // commits atomically with its journal row via storage.transactionSync.
+  it('rolls back a failed chunk completely (no partial schema)', async () => {
+    const stub = newStub() as DurableObjectStub & { listTables: () => Promise<string[]> };
+    const tables = await stub.listTables();
+    // 20240101_ok applied; 20240201_bad's CREATE TABLE must have rolled back
+    // together with the statement that failed after it.
+    expect(tables).toContain('test_ok');
+    expect(tables).not.toContain('test_bad_pre');
+  });
+});

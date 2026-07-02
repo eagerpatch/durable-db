@@ -22,6 +22,19 @@ export class TestMigrationDO extends SqliteDurableObject {
       ],
     },
   };
+
+  /** User tables present in storage (journal/attempt tables excluded). */
+  async listTables(): Promise<string[]> {
+    try {
+      await this.ensureMigrations();
+    } catch {
+      // expected — the bad migration throws; we want the state it left behind
+    }
+    return this.sql
+      .exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT GLOB '__*' AND name NOT GLOB '_cf*' AND name NOT GLOB 'sqlite_*'`)
+      .toArray()
+      .map((r) => (r as { name: string }).name);
+  }
 }
 
 /** A DO with only successful migrations — used for the happy-path smoke. */

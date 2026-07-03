@@ -2,7 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { validate } from '../../src/cli/validate';
+
+const drizzleOrmDir = fileURLToPath(new URL('../../node_modules/drizzle-orm', import.meta.url));
 import { saveDevMigration, getDevPaths } from '../../src/cli/state';
 
 describe('validate command', () => {
@@ -31,6 +34,12 @@ describe('validate command', () => {
 
     // Create database file
     if (schemaContent) {
+      // The schema is compiled into tempDir and imported from there, so
+      // drizzle-orm must be resolvable from the temp project root.
+      const drizzleLink = path.join(tempDir, 'node_modules', 'drizzle-orm');
+      if (!fs.existsSync(drizzleLink)) {
+        fs.symlinkSync(drizzleOrmDir, drizzleLink, 'dir');
+      }
       fs.writeFileSync(path.join(databasesDir, 'schema.ts'), schemaContent);
       fs.writeFileSync(
         path.join(databasesDir, `${name}.ts`),
@@ -263,6 +272,112 @@ export const { action } = defineDatabase({});
     expect(results).toHaveLength(1);
     expect(results[0].migrationCount).toBe(0);
     expect(results[0].migrationsValid).toBe(true);
+  });
+
+  describe('schema drift comparison', () => {
+    const schemaContent = `
+import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+export const users = sqliteTable('users', {
+  id: text('id').primaryKey(),
+  email: text('email'),
+  name: text('name').notNull(),
+});
+`;
+
+    it('accepts a table built with CREATE + ALTER ADD COLUMN (sqlite_master text rewrite)', async () => {
+      // SQLite rewrites the stored CREATE statement when a column is added
+      // via ALTER, and the column lands last regardless of where the schema
+      // declares it — neither may be reported as drift.
+      setupDatabase('main', {
+        schemaContent,
+        migrations: [
+          {
+            name: '20240101_create_users',
+            sql: 'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL, `name` text NOT NULL);',
+          },
+          {
+            name: '20240102_add_email',
+            sql: 'ALTER TABLE `users` ADD `email` text;',
+          },
+        ],
+      });
+
+      const results = await validate({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].migrationsValid).toBe(true);
+      expect(results[0].schemaDiffs).toEqual([]);
+      expect(results[0].schemaMatches).toBe(true);
+    });
+
+    it('still detects a column missing from migrations', async () => {
+      setupDatabase('main', {
+        schemaContent,
+        migrations: [
+          {
+            name: '20240101_create_users',
+            sql: 'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL, `name` text NOT NULL);',
+          },
+        ],
+      });
+
+      const results = await validate({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].schemaMatches).toBe(false);
+      expect(results[0].schemaDiffs.some(d => d.includes('users.email') && d.includes('only in schema'))).toBe(true);
+    });
+
+    it('still detects a column type/constraint mismatch', async () => {
+      setupDatabase('main', {
+        schemaContent,
+        migrations: [
+          {
+            name: '20240101_create_users',
+            sql: 'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL, `email` integer, `name` text NOT NULL);',
+          },
+        ],
+      });
+
+      const results = await validate({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].schemaMatches).toBe(false);
+      expect(results[0].schemaDiffs.some(d => d.includes('users.email') && d.includes('differs'))).toBe(true);
+    });
+
+    it('still detects a table missing from the schema', async () => {
+      setupDatabase('main', {
+        schemaContent,
+        migrations: [
+          {
+            name: '20240101_create_users',
+            sql: [
+              'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL, `email` text, `name` text NOT NULL);',
+              'CREATE TABLE `orphans` (`id` text PRIMARY KEY NOT NULL);',
+            ].join('\n'),
+          },
+        ],
+      });
+
+      const results = await validate({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      expect(results).toHaveLength(1);
+      expect(results[0].schemaMatches).toBe(false);
+      expect(results[0].schemaDiffs).toContain('Table only in migrations: orphans');
+    });
   });
 
   it('collects multiple errors from different migrations', async () => {

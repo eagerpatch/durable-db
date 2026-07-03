@@ -66,13 +66,21 @@ interface SqliteMasterRow {
 }
 
 /**
- * Extract and normalize schema from a SQLite database.
- * Returns a sorted list of CREATE statements from sqlite_master.
+ * Extract and normalize non-table schema objects (indexes, views, triggers)
+ * from a SQLite database. Returns a sorted list of CREATE statements from
+ * sqlite_master.
+ *
+ * Tables are deliberately excluded: SQLite stores a table's CREATE statement
+ * as the original text and rewrites it on `ALTER TABLE ... ADD COLUMN` (the
+ * new column is spliced in before the closing paren), so the stored text of a
+ * migrated table never string-matches a from-scratch CREATE even when the
+ * schemas are identical. Tables are compared structurally instead — see
+ * {@link extractTableStructures}.
  */
-function extractSchema(db: SqliteDatabase): string[] {
+function extractNonTableSchema(db: SqliteDatabase): string[] {
   const rows = db.prepare(
     `SELECT type, name, tbl_name, sql FROM sqlite_master
-     WHERE type IN ('table', 'index', 'view', 'trigger')
+     WHERE type IN ('index', 'view', 'trigger')
        AND name NOT LIKE 'sqlite_%'
        AND name NOT LIKE '\\_\\_%' ESCAPE '\\'
      ORDER BY type, name`
@@ -81,6 +89,170 @@ function extractSchema(db: SqliteDatabase): string[] {
   return rows
     .filter(r => r.sql != null)
     .map(r => normalizeSql(r.sql!));
+}
+
+interface PragmaTableInfoRow {
+  cid: number;
+  name: string;
+  type: string;
+  notnull: number;
+  dflt_value: string | null;
+  pk: number;
+}
+
+interface PragmaIndexListRow {
+  seq: number;
+  name: string;
+  unique: number;
+  origin: string; // 'c' = CREATE INDEX, 'u' = UNIQUE constraint, 'pk' = PRIMARY KEY
+  partial: number;
+}
+
+interface PragmaForeignKeyRow {
+  id: number;
+  seq: number;
+  table: string;
+  from: string;
+  to: string | null;
+  on_update: string;
+  on_delete: string;
+}
+
+interface TableStructure {
+  /** Column name → canonical descriptor ("text NOT NULL DEFAULT 'x' PK 1") */
+  columns: Map<string, string>;
+  /** Canonical signatures of UNIQUE constraints (from auto-indexes), sorted */
+  uniques: string[];
+  /** Canonical signatures of foreign keys, sorted */
+  foreignKeys: string[];
+}
+
+/**
+ * Extract the structural shape of every user table via PRAGMA introspection.
+ *
+ * This is the drift comparison for tables: it reflects what SQLite actually
+ * enforces rather than the stored CREATE text, so it is immune to how the
+ * table came to be (fresh CREATE vs. CREATE + ALTERs) and to column order,
+ * which is irrelevant for the named-column access the framework generates.
+ *
+ * Not covered (not exposed by PRAGMAs): CHECK constraints, column collations,
+ * and WITHOUT ROWID / STRICT table options.
+ */
+function extractTableStructures(db: SqliteDatabase): Map<string, TableStructure> {
+  const tables = db.prepare(
+    `SELECT name FROM sqlite_master
+     WHERE type = 'table'
+       AND name NOT LIKE 'sqlite_%'
+       AND name NOT LIKE '\\_\\_%' ESCAPE '\\'
+     ORDER BY name`
+  ).all() as Array<{ name: string }>;
+
+  const structures = new Map<string, TableStructure>();
+
+  for (const { name } of tables) {
+    const columns = new Map<string, string>();
+    const columnRows = db.prepare(
+      `SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)`
+    ).all(name) as PragmaTableInfoRow[];
+    for (const col of columnRows) {
+      const parts = [col.type.replace(/\s+/g, ' ').trim().toLowerCase() || '(dynamic)'];
+      if (col.notnull) parts.push('NOT NULL');
+      if (col.dflt_value != null) parts.push(`DEFAULT ${col.dflt_value}`);
+      if (col.pk) parts.push(`PK ${col.pk}`);
+      columns.set(col.name, parts.join(' '));
+    }
+
+    const uniques: string[] = [];
+    const indexRows = db.prepare(
+      `SELECT seq, name, "unique", origin, partial FROM pragma_index_list(?)`
+    ).all(name) as PragmaIndexListRow[];
+    for (const idx of indexRows) {
+      // Only UNIQUE-constraint auto-indexes; CREATE INDEX statements keep
+      // their sqlite_master text and are compared textually.
+      if (idx.origin !== 'u') continue;
+      const cols = (db.prepare(
+        `SELECT name FROM pragma_index_info(?) ORDER BY seqno`
+      ).all(idx.name) as Array<{ name: string | null }>)
+        .map(c => c.name ?? '(expr)');
+      uniques.push(`(${cols.join(', ')})`);
+    }
+    uniques.sort();
+
+    const fkRows = db.prepare(
+      `SELECT id, seq, "table", "from", "to", on_update, on_delete FROM pragma_foreign_key_list(?)
+       ORDER BY id, seq`
+    ).all(name) as PragmaForeignKeyRow[];
+    const fkGroups = new Map<number, PragmaForeignKeyRow[]>();
+    for (const row of fkRows) {
+      const group = fkGroups.get(row.id) ?? [];
+      group.push(row);
+      fkGroups.set(row.id, group);
+    }
+    const foreignKeys = [...fkGroups.values()].map(group => {
+      const from = group.map(r => r.from).join(', ');
+      const to = group.map(r => r.to ?? '(implicit pk)').join(', ');
+      const { table, on_update, on_delete } = group[0];
+      return `(${from}) → ${table}(${to}) ON UPDATE ${on_update} ON DELETE ${on_delete}`;
+    }).sort();
+
+    structures.set(name, { columns, uniques, foreignKeys });
+  }
+
+  return structures;
+}
+
+/**
+ * Diff table structures. Returns a list of human-readable differences.
+ */
+function diffTableStructures(
+  fromMigrations: Map<string, TableStructure>,
+  fromSchema: Map<string, TableStructure>,
+): string[] {
+  const diffs: string[] = [];
+
+  for (const [name, migrated] of fromMigrations) {
+    const fresh = fromSchema.get(name);
+    if (!fresh) {
+      diffs.push(`Table only in migrations: ${name}`);
+      continue;
+    }
+
+    for (const [col, descriptor] of migrated.columns) {
+      const other = fresh.columns.get(col);
+      if (other === undefined) {
+        diffs.push(`Column ${name}.${col} only in migrations: ${descriptor}`);
+      } else if (other !== descriptor) {
+        diffs.push(`Column ${name}.${col} differs — migrations: ${descriptor}; schema: ${other}`);
+      }
+    }
+    for (const [col, descriptor] of fresh.columns) {
+      if (!migrated.columns.has(col)) {
+        diffs.push(`Column ${name}.${col} only in schema: ${descriptor}`);
+      }
+    }
+
+    if (migrated.uniques.join(' | ') !== fresh.uniques.join(' | ')) {
+      diffs.push(
+        `Unique constraints on ${name} differ — migrations: [${migrated.uniques.join(' | ') || 'none'}]; ` +
+        `schema: [${fresh.uniques.join(' | ') || 'none'}]`
+      );
+    }
+
+    if (migrated.foreignKeys.join(' | ') !== fresh.foreignKeys.join(' | ')) {
+      diffs.push(
+        `Foreign keys on ${name} differ — migrations: [${migrated.foreignKeys.join(' | ') || 'none'}]; ` +
+        `schema: [${fresh.foreignKeys.join(' | ') || 'none'}]`
+      );
+    }
+  }
+
+  for (const name of fromSchema.keys()) {
+    if (!fromMigrations.has(name)) {
+      diffs.push(`Table only in schema: ${name}`);
+    }
+  }
+
+  return diffs;
 }
 
 /**
@@ -263,10 +435,19 @@ async function validateDatabase(
                 schemaDb.exec(stmt.endsWith(';') ? stmt : `${stmt};`);
               }
 
-              // Compare schemas
-              const migratedSchema = extractSchema(migrationsDb);
-              const freshSchema = extractSchema(schemaDb);
-              const diffs = diffSchemas(migratedSchema, freshSchema);
+              // Compare schemas — tables structurally (PRAGMA-based, immune
+              // to ALTER TABLE rewriting the stored CREATE text), everything
+              // else textually.
+              const diffs = [
+                ...diffTableStructures(
+                  extractTableStructures(migrationsDb),
+                  extractTableStructures(schemaDb),
+                ),
+                ...diffSchemas(
+                  extractNonTableSchema(migrationsDb),
+                  extractNonTableSchema(schemaDb),
+                ),
+              ];
 
               if (diffs.length > 0) {
                 result.schemaMatches = false;

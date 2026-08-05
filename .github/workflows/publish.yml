@@ -41,7 +41,7 @@ jobs:
       - name: Create release PR or publish
         uses: changesets/action@v1
         with:
-          publish: npx changeset publish
+          publish: bash scripts/release.sh
           title: "Version package"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

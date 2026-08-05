@@ -36,17 +36,39 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
  * }
  * ```
  */
+/**
+ * Inside a Durable Object the instance key IS the tenant (per-tenant DBs key
+ * their instances by tenant id, plus an optional `__dev_<epoch>` suffix in
+ * dev). The registry publishes its DoContext store getter on globalThis — see
+ * the note there for why this is not a module import — so getTenantId() works
+ * in action handlers without the worker-side resolver, which the DO execution
+ * context never registers.
+ */
+function tenantIdFromDoContext(): string | null {
+  const getStore = (globalThis as Record<symbol, unknown>)[
+    Symbol.for('durable-db.doContext')
+  ] as (() => { instanceKey?: string } | undefined) | undefined;
+  const key = getStore?.()?.instanceKey;
+  if (!key || key === 'global') return null;
+  const suffixAt = key.lastIndexOf('__dev_');
+  return suffixAt === -1 ? key : key.slice(0, suffixAt);
+}
+
 export function getTenantId(): string {
   if (tenantIdResolver) return tenantIdResolver();
+
+  const doTenant = tenantIdFromDoContext();
+  if (doTenant) return doTenant;
 
   throw new Error('getTenantId() called without a resolver. Call setTenantIdResolver() first.');
 }
 
 /**
- * Check if a tenant ID resolver is configured.
+ * Check if a tenant ID resolver is configured (or a Durable Object context
+ * can supply the tenant).
  */
 export function hasTenantId(): boolean {
-  return tenantIdResolver !== null;
+  return tenantIdResolver !== null || tenantIdFromDoContext() !== null;
 }
 
 /**

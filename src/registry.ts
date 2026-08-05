@@ -42,6 +42,16 @@ const actionsByDb = new Map<string, Map<string, ActionDefinition>>();
 const als = new AsyncLocalStorage<DoContext>();
 const wsTransportCache = new Map<string, WebSocketTransport>();
 
+// Publish the DO-context store getter on globalThis so getTenantId() (in
+// context/index.ts) can fall back to it inside a Durable Object, where the
+// consumer's worker-side setTenantIdResolver never ran. Deliberately NOT a
+// module-level wire: bundlers routinely produce two copies of this package in
+// one worker (a prebundled 'durable-db/registry' inside generated DO stubs, a
+// source-served 'durable-db/context' inside a framework) and a module-to-module
+// registration only reaches its own copy — globalThis crosses copy boundaries.
+(globalThis as Record<symbol, unknown>)[Symbol.for('durable-db.doContext')] = () =>
+  als.getStore();
+
 function getOrCreateWsTransport(
   bindingName: string,
   instanceKey: string,

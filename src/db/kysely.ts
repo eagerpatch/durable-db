@@ -187,7 +187,7 @@ function createCompiledQuery(sql: string, parameters: readonly unknown[] = []): 
     sql,
     parameters,
     query: { kind: 'RawNode', sqlFragments: [sql], parameters: [] },
-  } as CompiledQuery;
+  } as unknown as CompiledQuery;
 }
 
 /**

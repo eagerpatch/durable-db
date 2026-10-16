@@ -144,7 +144,7 @@ export async function createTestDatabase<TSchema = any>(
             '(no test metadata). Pass an export created by `action({ … })`.'
         );
       }
-      const validated = meta.validator(args);
+      const validated = (meta.validator as (input: unknown) => unknown)(args);
       if (validated instanceof type.errors) {
         throw new Error(`Invalid args for action: ${validated.summary}`);
       }

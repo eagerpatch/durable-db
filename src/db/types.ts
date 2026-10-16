@@ -2,6 +2,7 @@ import type { Kysely } from 'kysely';
 import type { Kyselify } from 'drizzle-orm/kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { type as arkType } from '../arktypeConfig'; // jitless `type` — eval-free for Workers
+import type { type as ArkTypeNs } from 'arktype'; // the namespace (validate/infer) lives on arktype's own export
 
 /**
  * Base type for ArkType schema definitions.
@@ -45,8 +46,8 @@ export type DrizzleToKysely<
  *   - arkType.validate<Def>  → definition shape with DSL validation/autocomplete
  *   - arkType.infer<Def>     → inferred output type
  */
-export type ArkDef<Def> = arkType.validate<Def>;
-export type InferArgs<Def> = arkType.infer<Def>;
+export type ArkDef<Def> = ArkTypeNs.validate<Def>;
+export type InferArgs<Def> = ArkTypeNs.infer<Def>;
 
 /**
  * Context passed to action handlers

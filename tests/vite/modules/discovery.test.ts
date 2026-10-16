@@ -237,7 +237,8 @@ describe('database sources', () => {
       projectRoot: tempDir,
       databasesDir: [{ dir: 'src/databases' }, { dir: 'extensions/invoicing/databases', prefix: 'invoicing' }],
     });
-    expect(files.map((f) => [f.name, f.relativePath, f.prefix])).toEqual([
+    // Every .ts file is listed (the parser later keeps the defineDatabase() ones).
+    expect(files.filter((f) => f.name.endsWith('main')).map((f) => [f.name, f.relativePath, f.prefix])).toEqual([
       ['main', path.join('src', 'databases', 'main.ts'), undefined],
       ['invoicing-main', path.join('extensions', 'invoicing', 'databases', 'main.ts'), 'invoicing'],
     ]);
@@ -250,7 +251,7 @@ describe('database sources', () => {
       projectRoot: tempDir,
       databasesDir: [{ dir: path.join(tempDir, 'extensions', 'invoicing', 'databases'), prefix: 'invoicing' }, { dir: 'nowhere' }],
     });
-    expect(files.map((f) => f.name)).toEqual(['invoicing-main']);
+    expect(files.map((f) => f.name)).toEqual(['invoicing-actions', 'invoicing-main']);
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });

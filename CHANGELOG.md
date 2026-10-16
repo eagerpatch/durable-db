@@ -1,5 +1,13 @@
 # durable-db
 
+## 0.1.13
+
+### Patch Changes
+
+- 03a93d0: commander 15: a host CLI on commander 15 can mount `createDbCommand()` without its top-level help
+  throwing (`sub.helpGroup is not a function` — commander 15's help calls a method commander 13's
+  Command lacks).
+
 ## 0.1.12
 
 ### Patch Changes

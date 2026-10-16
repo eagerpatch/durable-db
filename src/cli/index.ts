@@ -25,6 +25,8 @@
 
 // Composable Commander commands
 export { createDbCommand, registerDbCommands } from './command';
+export type { DbCommandDefaults } from './command';
+export type { DatabaseSource } from '../vite/modules/discovery';
 
 // State management
 export {

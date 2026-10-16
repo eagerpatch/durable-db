@@ -1,3 +1,4 @@
+import type { DatabaseSource } from '../vite/modules/discovery';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import {
@@ -17,7 +18,7 @@ import { debugCli } from '../utils/debug';
 
 export interface GenerateContext {
   projectRoot?: string;
-  databasesDir?: string;
+  databasesDir?: string | DatabaseSource[];
   migrationsDir?: string;
   verbose?: boolean;
 }

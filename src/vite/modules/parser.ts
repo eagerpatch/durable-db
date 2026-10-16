@@ -18,6 +18,8 @@ export interface ParseDatabaseFileOptions {
    * (which doesn't transform actions), where only relative imports are tracked.
    */
   aliases?: readonly Alias[];
+  /** Prepended to the database name (`<prefix>-<file>`): a host framework mounting a module's databases. */
+  namePrefix?: string;
 }
 
 // Handle both ESM and CJS module formats for Babel
@@ -170,7 +172,7 @@ export function parseDatabaseFile(
 
       // Check if this is a defineDatabase call
       if (isDefineDatabaseCall(init)) {
-        const dbInfo = extractDatabaseInfo(nodePath, init, filePath, result.localImports);
+        const dbInfo = extractDatabaseInfo(nodePath, init, filePath, result.localImports, options.namePrefix);
         if (dbInfo) {
           result.database = dbInfo;
         }
@@ -260,7 +262,8 @@ function extractDatabaseInfo(
   declaratorPath: NodePath<t.VariableDeclarator>,
   callExpr: t.CallExpression,
   filePath: string,
-  imports: Map<string, { source: string; imported: string }>
+  imports: Map<string, { source: string; imported: string }>,
+  namePrefix?: string
 ): DatabaseInfo | null {
   const configArg = callExpr.arguments[0];
   if (!t.isObjectExpression(configArg)) {
@@ -333,7 +336,8 @@ function extractDatabaseInfo(
     }
   }
 
-  const name = path.basename(filePath).replace(/\.(ts|js)$/, '');
+  const base = path.basename(filePath).replace(/\.(ts|js)$/, '');
+  const name = namePrefix ? `${namePrefix}-${base}` : base;
 
   return {
     filePath,

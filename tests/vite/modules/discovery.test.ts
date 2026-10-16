@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import {
   discoverDatabaseFiles,
+  discoverActionFiles,
+  databaseName,
   readFile,
   resolveImportPath,
   __resetDiscoveryWarnings,
@@ -215,5 +217,49 @@ describe('discovery', () => {
 
       expect(result).toBeNull();
     });
+  });
+});
+
+describe('database sources', () => {
+  let tempDir: string;
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-sources-'));
+    fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'main.ts'), 'export const x = 1;');
+    fs.mkdirSync(path.join(tempDir, 'extensions', 'invoicing', 'databases'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'extensions', 'invoicing', 'databases', 'main.ts'), 'export const x = 1;');
+    fs.writeFileSync(path.join(tempDir, 'extensions', 'invoicing', 'databases', 'actions.ts'), 'export const a = action({});');
+  });
+  afterEach(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+
+  it('discovers several directories, prefixing the names of a source that has a prefix', () => {
+    const files = discoverDatabaseFiles({
+      projectRoot: tempDir,
+      databasesDir: [{ dir: 'src/databases' }, { dir: 'extensions/invoicing/databases', prefix: 'invoicing' }],
+    });
+    expect(files.map((f) => [f.name, f.relativePath, f.prefix])).toEqual([
+      ['main', path.join('src', 'databases', 'main.ts'), undefined],
+      ['invoicing-main', path.join('extensions', 'invoicing', 'databases', 'main.ts'), 'invoicing'],
+    ]);
+    expect(databaseName('main.ts', 'invoicing')).toBe('invoicing-main');
+  });
+
+  it('accepts absolute directories and skips missing ones silently in a list', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const files = discoverDatabaseFiles({
+      projectRoot: tempDir,
+      databasesDir: [{ dir: path.join(tempDir, 'extensions', 'invoicing', 'databases'), prefix: 'invoicing' }, { dir: 'nowhere' }],
+    });
+    expect(files.map((f) => f.name)).toEqual(['invoicing-main']);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('finds action files in every source', () => {
+    const actions = discoverActionFiles({
+      projectRoot: tempDir,
+      databasesDir: [{ dir: 'src/databases' }, { dir: 'extensions/invoicing/databases', prefix: 'invoicing' }],
+    });
+    expect(actions).toEqual([path.join(tempDir, 'extensions', 'invoicing', 'databases', 'actions.ts')]);
   });
 });

@@ -1,3 +1,4 @@
+import type { DatabaseSource } from '../vite/modules/discovery';
 import * as crypto from 'node:crypto';
 import {
   saveDevMigration,
@@ -14,7 +15,7 @@ import { debugCli } from '../utils/debug';
 
 export interface PushContext {
   projectRoot?: string;
-  databasesDir?: string;
+  databasesDir?: string | DatabaseSource[];
   migrationsDir?: string;
   verbose?: boolean;
 }

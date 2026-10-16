@@ -7,6 +7,7 @@ import { debugVite } from '../utils/debug';
 import { discoverDatabaseFiles, discoverActionFiles, readFile } from './modules/discovery';
 import { parseDatabaseFile } from './modules/parser';
 import { patchWranglerConfig, checkWranglerConfig } from './modules/wrangler';
+import { databaseSources, type DatabaseSource } from './modules/discovery';
 import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
 import { loadMigrationFiles } from '../migrations/generator';
 import { loadDevState, saveDevState, getDevPaths } from '../cli/state';
@@ -21,7 +22,7 @@ export interface DurableDbOptions {
   /** Import path for the registry module. Default: 'durable-db/registry' */
   registryImport?: string;
   /** Directory containing database definitions. Default: 'src/databases' */
-  databasesDir?: string;
+  databasesDir?: string | DatabaseSource[];
   /** Directory for production migrations, relative to project root. Default: 'migrations' */
   migrationsDir?: string;
   /**
@@ -36,7 +37,7 @@ export interface DurableDbOptions {
 interface ResolvedOptions {
   contextImport: string;
   registryImport: string;
-  databasesDir: string;
+  databasesDir: string | DatabaseSource[];
   migrationsDir: string;
   patchWranglerConfig: boolean;
 }
@@ -179,7 +180,7 @@ class PluginState {
 
     for (const file of files) {
       const code = readFile(file.absolutePath);
-      const parsed = parseDatabaseFile(file.absolutePath, code, { aliases: this.aliases });
+      const parsed = parseDatabaseFile(file.absolutePath, code, { aliases: this.aliases, namePrefix: file.prefix });
 
       if (parsed.database) {
         parsed.database.migrationsDir = path.resolve(this.projectRoot, this.options.migrationsDir, parsed.database.name);
@@ -361,10 +362,10 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
       state.devServer = server;
       state.reset();
 
-      const absoluteDbDir = path.join(state.projectRoot, state.options.databasesDir);
+      const absoluteDbDirs = databaseSources(state.options.databasesDir).map((source) => path.resolve(state.projectRoot, source.dir));
       server.watcher.on('change', (file) => {
         const normalized = path.normalize(file);
-        if (normalized.startsWith(absoluteDbDir) && /\.tsx?$/.test(normalized)) {
+        if (absoluteDbDirs.some((dir) => normalized.startsWith(dir)) && /\.tsx?$/.test(normalized)) {
           state.invalidateDOModule();
         }
       });
@@ -576,5 +577,6 @@ export const databasePlugin = durableDb;
 
 /** @deprecated Renamed to {@link DurableDbOptions}. */
 export type DatabasePluginOptions = DurableDbOptions;
+export type { DatabaseSource };
 
 export default durableDb;

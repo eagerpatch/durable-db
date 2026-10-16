@@ -3,6 +3,7 @@ import { generateSnapshotFromSchema, generateMigrationStatements, snapshotsEqual
 import type { Snapshot } from '../migrations/snapshot';
 import { loadSnapshot, buildAndLoadSchema } from '../migrations/generator';
 import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
+import type { DatabaseSource } from '../vite/modules/discovery';
 import { loadViteAliases } from '../vite/modules/aliasResolver';
 import { parseDatabaseFile } from '../vite/modules/parser';
 import type { DatabaseInfo } from '../db';
@@ -35,7 +36,8 @@ export function reportCliError(error: unknown, verbose = false): void {
 
 export interface DiscoverOptions {
   projectRoot: string;
-  databasesDir: string;
+  /** A directory, or several with name prefixes — see DiscoveryOptions. */
+  databasesDir: string | DatabaseSource[];
   migrationsDir: string;
   /** Only return databases matching this name */
   database?: string;
@@ -64,7 +66,7 @@ export function discoverDatabases(opts: DiscoverOptions): DatabaseInfo[] {
 
   for (const file of files) {
     const code = readFile(file.absolutePath);
-    const parsed = parseDatabaseFile(file.absolutePath, code);
+    const parsed = parseDatabaseFile(file.absolutePath, code, { namePrefix: file.prefix });
 
     if (!parsed.database) {
       continue;

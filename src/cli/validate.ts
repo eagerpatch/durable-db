@@ -1,3 +1,4 @@
+import type { DatabaseSource } from '../vite/modules/discovery';
 import { resolveImportPath } from '../vite/modules/discovery';
 import { loadViteAliases } from '../vite/modules/aliasResolver';
 import {
@@ -15,7 +16,7 @@ import { debugCli } from '../utils/debug';
 
 export interface ValidateContext {
   projectRoot?: string;
-  databasesDir?: string;
+  databasesDir?: string | DatabaseSource[];
   migrationsDir?: string;
   verbose?: boolean;
   /** Skip dev migrations, only validate prod */

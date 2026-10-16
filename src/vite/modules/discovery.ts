@@ -9,8 +9,33 @@ import { applyAliases, resolveFileCandidate } from './aliasResolver';
 export interface DiscoveryOptions {
   /** Project root directory */
   projectRoot: string;
-  /** Directory containing database definitions (relative to projectRoot) */
-  databasesDir: string;
+  /**
+   * Where database definitions live: a directory (relative to projectRoot,
+   * or absolute), or several — each optionally with a name prefix, so a
+   * host framework can mount a module's databases next to the app's own
+   * (`{ dir: 'extensions/invoicing/databases', prefix: 'invoicing' }` →
+   * `invoicing-main`, class `InvoicingMainDatabaseDO`).
+   */
+  databasesDir: string | DatabaseSource[];
+}
+
+/** One place database definitions are discovered from. */
+export interface DatabaseSource {
+  /** Directory, relative to the project root or absolute. */
+  dir: string;
+  /** Prepended to every database name found here (`<prefix>-<file>`). */
+  prefix?: string;
+}
+
+/** The sources a `databasesDir` option names. */
+export function databaseSources(databasesDir: string | DatabaseSource[]): DatabaseSource[] {
+  return typeof databasesDir === 'string' ? [{ dir: databasesDir }] : databasesDir;
+}
+
+/** The name a database file gets: its basename, prefixed when its source has a prefix. */
+export function databaseName(file: string, prefix?: string): string {
+  const base = path.basename(file).replace(/\.(ts|js)$/, '');
+  return prefix ? `${prefix}-${base}` : base;
 }
 
 /**
@@ -21,8 +46,10 @@ export interface DiscoveredFile {
   absolutePath: string;
   /** Path relative to project root */
   relativePath: string;
-  /** Database name (derived from filename without extension) */
+  /** Database name (the filename without extension, prefixed by its source's prefix) */
   name: string;
+  /** The source's name prefix, when it has one */
+  prefix?: string;
 }
 
 /**
@@ -46,71 +73,53 @@ export function __resetDiscoveryWarnings(): void {
  */
 export function discoverDatabaseFiles(options: DiscoveryOptions): DiscoveredFile[] {
   const { projectRoot, databasesDir } = options;
-  const absoluteDir = path.join(projectRoot, databasesDir);
-
-  if (!fs.existsSync(absoluteDir)) {
-    if (!warnedMissingDirs.has(absoluteDir)) {
-      warnedMissingDirs.add(absoluteDir);
-      console.warn(
-        `[durable-db] Databases directory not found: ${absoluteDir}. ` +
-        `No databases will be generated. ` +
-        `Set the 'databasesDir' plugin option if your databases live elsewhere (current: '${databasesDir}').`
-      );
-    }
-    return [];
-  }
-
-  const files = fs.readdirSync(absoluteDir);
   const results: DiscoveredFile[] = [];
 
-  for (const file of files) {
-    // Skip non-TypeScript files
-    if (!file.endsWith('.ts')) continue;
+  for (const source of databaseSources(databasesDir)) {
+    const absoluteDir = path.resolve(projectRoot, source.dir);
 
-    // Skip declaration files
-    if (file.endsWith('.d.ts')) continue;
+    if (!fs.existsSync(absoluteDir)) {
+      // A single configured directory that is missing is worth a warning; a
+      // list is a host framework's sweep over places that may not exist.
+      if (typeof databasesDir === 'string' && !warnedMissingDirs.has(absoluteDir)) {
+        warnedMissingDirs.add(absoluteDir);
+        console.warn(
+          `[durable-db] Databases directory not found: ${absoluteDir}. ` +
+          `No databases will be generated. ` +
+          `Set the 'databasesDir' plugin option if your databases live elsewhere (current: '${databasesDir}').`
+        );
+      }
+      continue;
+    }
 
-    // Skip schema-only files
-    if (file === 'schema.ts') continue;
+    for (const file of fs.readdirSync(absoluteDir)) {
+      // Skip non-TypeScript files
+      if (!file.endsWith('.ts')) continue;
 
-    // Skip private helper files
-    if (file.startsWith('_')) continue;
+      // Skip declaration files
+      if (file.endsWith('.d.ts')) continue;
 
-    const absolutePath = path.join(absoluteDir, file);
-    const relativePath = path.join(databasesDir, file);
-    const name = path.basename(file, '.ts');
+      // Skip schema-only files
+      if (file === 'schema.ts') continue;
 
-    results.push({
-      absolutePath,
-      relativePath,
-      name,
-    });
+      // Skip private helper files
+      if (file.startsWith('_')) continue;
+
+      const absolutePath = path.join(absoluteDir, file);
+      results.push({
+        absolutePath,
+        relativePath: path.relative(projectRoot, absolutePath),
+        name: databaseName(file, source.prefix),
+        prefix: source.prefix,
+      });
+    }
   }
 
   return results;
 }
 
-/**
- * Recursively find action-defining files under the databases directory.
- *
- * The generated Durable Object module side-effect-imports these so every
- * `action()` runs its `registerAction(...)` at DO startup — populating the
- * action registry in the DO's isolate. Without this the registry is only
- * populated by whatever the request path imported, which works in dev (one
- * shared isolate) and via in-app navigation, but a Durable Object is a separate
- * persistent isolate in production: a freshly deep-linked route whose action the
- * DO never loaded throws `Unknown action "X" (was it imported?)`.
- *
- * Returns absolute paths of `.ts`/`.tsx` files that call `action(` (the factory
- * invocation), excluding tests, declarations, and `_`-prefixed helpers. Helper
- * modules without their own actions are pulled in transitively by the action
- * files that import them, so they don't need to be listed here.
- */
 export function discoverActionFiles(options: DiscoveryOptions): string[] {
   const { projectRoot, databasesDir } = options;
-  const absoluteDir = path.join(projectRoot, databasesDir);
-  if (!fs.existsSync(absoluteDir)) return [];
-
   const results: string[] = [];
   const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -129,7 +138,10 @@ export function discoverActionFiles(options: DiscoveryOptions): string[] {
       }
     }
   };
-  walk(absoluteDir);
+  for (const source of databaseSources(databasesDir)) {
+    const absoluteDir = path.resolve(projectRoot, source.dir);
+    if (fs.existsSync(absoluteDir)) walk(absoluteDir);
+  }
   return results;
 }
 

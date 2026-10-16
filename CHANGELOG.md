@@ -1,5 +1,13 @@
 # durable-db
 
+## 0.2.1
+
+### Patch Changes
+
+- 9c16993: Dependency refresh: vitest 5, vite 8, TypeScript 7 (the build runs on tsdown 0.23; `downlevelIteration`
+  is gone from tsconfig), @cloudflare/workers-types 5, kysely 0.29, arktype 2.2, changesets 3,
+  @types/node 26. Babel stays on 7 and drizzle-orm on 0.38 for now.
+
 ## 0.2.0
 
 ### Minor Changes

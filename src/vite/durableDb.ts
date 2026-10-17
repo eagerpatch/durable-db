@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Alias, Plugin, ResolvedConfig, ViteDevServer } from 'vite';
+import type { TransformResult } from 'vite';
 import type { DatabaseInfo, ActionInfo } from '../db';
 import { debugVite } from '../utils/debug';
 
@@ -525,7 +526,8 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
           state.invalidateDOModule();
         }
 
-        return result;
+        // Babel's GeneratorResult carries more than Vite's TransformResult takes.
+        return result ? { code: result.code, map: result.map as TransformResult['map'] } : null;
       }
 
       const parsed = parseDatabaseFile(cleanId, code, { aliases: state.aliases });
@@ -561,7 +563,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         state.invalidateDOModule();
       }
 
-      return result;
+      return result ? { code: result.code, map: result.map as TransformResult['map'] } : null;
     },
 
     buildEnd() {

@@ -217,6 +217,8 @@ args: { name: 'string', age: 'number?' }    // Optional field
 args: { role: "'admin' | 'user'" }           // Literal union
 ```
 
+An optional key accepts `undefined`, as its inferred TypeScript type (`{ photoKey?: string }`) does: `addReview({ productId, photoKey: maybeKey })` validates whether or not there is a key, at any depth. A required key stays required, also when its type admits `undefined` (`note: 'string | undefined'` must be passed). Args compile with the `type` of `durable-db/registry`, an ArkType scope with `exactOptionalPropertyTypes: false`; the `type` exported from `durable-db` keeps ArkType's default.
+
 ### The `handler` function
 
 Receives three arguments:
@@ -330,6 +332,8 @@ db push --databases-dir ./src/db
    - Diffs the two snapshots to produce SQL migration statements
    - If there are changes: replaces any previous dev migration with a **single squashed migration** named after a hash of its content (e.g. `dev_a1b2c3d4.sql`). `CREATE TABLE`/`CREATE INDEX` statements get `IF NOT EXISTS` added so the squashed migration can overlay tables a previous dev migration already created
    - If the same content hash already exists, nothing is rewritten — the DO recognizes the migration name and skips it
+
+Every push diffs from the production snapshot, so a second push (add a column, restart, add another) repeats the first one's statements. The dev Durable Object journals what each dev migration ran and skips the statements of an earlier dev migration that the new one contains whole; one that redoes an earlier change in another form (the same column with another type) fails with `MigrationSchemaConflictError` and the `db reset --database <name>` to run. After `db generate`, the production migration that squashes those dev migrations is recorded as applied in the dev storage instead of running again.
 
 **Output example:**
 
@@ -693,7 +697,7 @@ durableDb({
 | `migrationsDir` | `string` | `'migrations'` | Directory for production migrations, relative to project root. Each database gets a subdirectory (e.g. `migrations/main/`) |
 | `contextImport` | `string` | `'durable-db/context'` | Import path for the context module (for framework integrations) |
 | `registryImport` | `string` | `'durable-db/registry'` | Import path for the action registry module (for framework integrations) |
-| `patchWranglerConfig` | `boolean` | `false` | Write missing DO bindings and sqlite migration entries to `wrangler.jsonc` automatically. Off by default — the plugin only verifies the config and logs the exact JSON to add. Only `wrangler.jsonc`/`wrangler.json` are supported (not `wrangler.toml`) |
+| `patchWranglerConfig` | `boolean` | `false` | Reconcile `wrangler.jsonc` with the discovered databases automatically: add bindings and `new_sqlite_classes` migrations, remove durable-db's own stale bindings, write `renamed_classes` for a mount change. Off by default — the plugin only verifies the config and logs the exact JSON to add. Only `wrangler.jsonc`/`wrangler.json` are supported (not `wrangler.toml`) |
 
 ### What the plugin does
 
@@ -702,7 +706,7 @@ durableDb({
 3. **Migration Loading**: Loads production migrations from disk; in dev mode also loads dev migrations from cache
 4. **Code Generation**: Produces a virtual module (`virtual:durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods, plus a `virtual:durable-db/__devEpoch` module that suffixes DO instance keys with the dev epoch (identity in production builds)
 5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker. This applies to actions in separate files *and* actions defined in the database file itself
-6. **Wrangler Verification**: Checks that `wrangler.jsonc` contains the required Durable Object bindings and SQLite migration entries, and logs the exact JSON to add when something is missing. With `patchWranglerConfig: true`, writes them for you instead
+6. **Wrangler Verification**: Checks that `wrangler.jsonc` contains the required Durable Object bindings and SQLite migration entries and no binding or class of a database that is gone, and logs the exact JSON to add (or remove) when something is off. With `patchWranglerConfig: true`, reconciles it for you instead
 7. **HMR**: Watches database files and invalidates the virtual module on change
 
 ### Wrangler config: verify vs. patch
@@ -720,7 +724,14 @@ The plugin needs each database's Durable Object binding and a `new_sqlite_classe
 Or let the plugin write it for you: durableDb({ patchWranglerConfig: true })
 ```
 
-**Opt-in (auto-patch)**: pass `durableDb({ patchWranglerConfig: true })` and the plugin writes the missing entries for you. If your `wrangler.jsonc` contains comments, the original is backed up to `wrangler.jsonc.backup` first (re-serializing strips comments).
+A production build fails when the config does not match, with an error naming what is missing and what is stale.
+
+**Opt-in (auto-patch)**: pass `durableDb({ patchWranglerConfig: true })` and the plugin reconciles the config with the discovered databases, editing the file in place: comments, formatting and line endings stay as you wrote them, only the entries it adds or removes change.
+
+- A new database gets its binding and a `new_sqlite_classes` migration.
+- durable-db's own bindings (`<X>_DATABASE_DO` → `<X>DatabaseDO`) whose class is no longer a discovered database are removed: workerd refuses to start with a binding to a class the worker does not export. Other bindings, and bindings with a `script_name`, are never touched.
+- A database of a mounted source (a `databasesDir` entry with a `prefix`) whose class name changed — its mount changed, or it moved into a mounted source, its file name unchanged — gets a `renamed_classes` migration, so Cloudflare moves its deployed data to the new class on deploy. That data carries its `__migrations` journal, so the old migrations directory moves with it (`migrations/reviews-feedback/` → `migrations/feedback-feedback/`). If the new directory already has migrations (say `db generate` ran under the new mount first), or several directories belong to the old class, nothing is written for that database and the plugin stops with the two ways out: `rm -r` the new directory and `mv` the old one to keep the data, or add the `deleted_classes` migration to drop it. A database moved out of a mount, or two databases of the app (`product-catalog.ts` replacing `catalog.ts`), are never paired. Local dev storage is kept per class name, so in dev a renamed database starts empty.
+- A removed database's class is never deleted for you (that deletes its data): a warning gives the exact `deleted_classes` migration to add, or says to drop the class from its `new_sqlite_classes` entry if it was never deployed.
 
 > ⚠️ Only `wrangler.jsonc` / `wrangler.json` are supported. If your project uses `wrangler.toml`, the plugin can't verify or patch it — it will print the required config and you add the TOML equivalent yourself.
 

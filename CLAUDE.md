@@ -52,7 +52,7 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 3. **Code generation** produces a virtual module (`virtual:durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and action methods
 4. **Action call transformation**: internal calls → direct handler call (no RPC), cross-DB calls → RPC via `ctx.env`
 5. **RPC stubs** are generated so workers can call actions like regular async functions
-6. **wrangler.jsonc** is verified to contain the Durable Object bindings. In dev, missing entries are logged with the JSON to add; production builds fail hard on missing entries (wrangler.toml projects only warn since the check can't parse toml). Auto-patching is opt-in via `patchWranglerConfig: true`
+6. **wrangler.jsonc** is verified to contain the Durable Object bindings and no stale ones. In dev, missing or stale entries are logged with the JSON to add or remove; production builds fail hard on them (wrangler.toml projects only warn since the check can't parse toml). Reconciliation is opt-in via `patchWranglerConfig: true` (`src/vite/modules/wrangler.ts`, in-place JSONC edits): it adds and removes durable-db's own bindings, writes `renamed_classes` for a mounted database whose class changed (exact file stem, unique pairing, never for unprefixed databases) and moves its migrations directory with it, refuses (and the plugin throws) when the migrations cannot follow, and never writes `deleted_classes`
 
 ### defineDatabase() Options
 
@@ -66,7 +66,7 @@ pnpm workspace with `examples/*` as separate packages. The root package is the l
 - `databasesDir`: directory containing database files (default: `'src/databases'`)
 - `migrationsDir`: directory for production migrations, relative to project root (default: `'migrations'`). Each database gets a subdirectory (e.g. `migrations/main/`)
 - `contextImport` / `registryImport`: override import paths for framework integrations
-- `patchWranglerConfig`: write missing DO bindings/sqlite migration entries to wrangler.jsonc (default: `false` — verify only: warn in dev, fail production builds). Only wrangler.jsonc/json supported, not wrangler.toml (toml never fails the build)
+- `patchWranglerConfig`: reconcile wrangler.jsonc with the discovered databases (default: `false` — verify only: warn in dev, fail production builds). Only wrangler.jsonc/json supported, not wrangler.toml (toml never fails the build)
 
 ### destroyDatabase
 
@@ -89,7 +89,7 @@ await destroyDatabase(); // clears current tenant's database
 
 ### Action System
 
-Actions are defined with `action({ args, handler })`. The `args` object uses ArkType syntax for runtime validation. The `handler` receives `(db: Kysely, args, ctx)`. Actions can call other actions — the Vite plugin detects these at build time via Babel AST traversal and transforms them appropriately.
+Actions are defined with `action({ args, handler })`. The `args` object uses ArkType syntax for runtime validation, compiled with `actionArgsType` (`src/db/actionArgs.ts`, exported as `durable-db/registry`'s `type`): a jitless scope with `exactOptionalPropertyTypes: false`, so an optional key accepts `undefined` as its inferred type does. The `handler` receives `(db: Kysely, args, ctx)`. Actions can call other actions — the Vite plugin detects these at build time via Babel AST traversal and transforms them appropriately.
 
 ### Migration System
 
@@ -97,7 +97,8 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 - Dev migrations: ephemeral, stored in `node_modules/.cache/durable-db/`
 - Production migrations: `.sql` files in the Vite plugin's `migrationsDir` (default: `migrations/<dbName>/`), created via `db generate`
 - Dev epoch suffixing allows resetting local databases without conflicts
-- Runtime failure modes (`SqliteDurableObject`): a pending migration failing with "already exists" raises `MigrationSchemaConflictError` (storage/journal drift from renamed or regenerated migration files) with recovery guidance. A PITR restore rejected as unsupported (local workerd implements `getCurrentBookmark` but not the restore call) disables PITR for the instance at debug level instead of logging an error.
+- Dev statement journal (`__dev_migration_statements`, dev storage only): a pending dev migration skips the statements of an earlier dev migration it contains whole (`db push` re-squashes from the production snapshot), and a pending production migration whose statements dev migrations already ran is recorded, not executed (`db push` then `db generate`).
+- Runtime failure modes (`SqliteDurableObject`): a pending migration failing with "already exists" or "duplicate column name" raises `MigrationSchemaConflictError` (storage/journal drift from renamed or regenerated migration files) with recovery guidance naming `db reset --database <databaseName>` (the generated DO sets `databaseName`). A PITR restore rejected as unsupported (local workerd implements `getCurrentBookmark` but not the restore call) disables PITR for the instance at debug level instead of logging an error.
 - Schema loading (`loadSchema` in `src/cli/shared.ts`) is strict: declared-but-unloadable tables (inline definitions, unresolvable imports, missing exports, build failures) throw instead of silently producing "no changes". Only databases with zero declared tables are skipped.
 - Dev epoch wiring: generated stubs route every instance key through `applyDevEpoch()` from the virtual module `virtual:durable-db/__devEpoch`. In dev the Vite plugin embeds the current epoch from `state.json`; in production builds the epoch is null and the function is the identity. The dev server watches the whole dev cache dir and fully re-initializes plugin state on change, so `db reset` (epoch bump → fresh DO instances) and `db push` (new squashed dev migration → re-embedded) both work live. `--purge-local-storage` optionally deletes the orphaned instances under `.wrangler/state/v3/do` (dev server must be stopped for that).
 

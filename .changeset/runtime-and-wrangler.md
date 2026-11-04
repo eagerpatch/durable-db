@@ -14,7 +14,13 @@ Runtime and wrangler config fixes found by building an app on durable-db through
   and failed with "duplicate column name" on every request until `db reset` wiped every dev database.
   Production storage never holds the journal, so production behaviour is unchanged. A "duplicate column
   name" failure now raises `MigrationSchemaConflictError` as "already exists" does. Its message names
-  the dev migrations involved and the `db reset --database <name>` to run.
+  the dev migrations involved and the `db reset --database <name>` to run; the generated Durable Object
+  sets `databaseName`, so the name is the one `db` commands know (`orderItems`, not `order-items`).
+- **A second `db push` no longer breaks the dev database either.** `db push` diffs from the production
+  snapshot, so after add a column → restart → add another, the new dev migration repeats the first
+  one's `ALTER`s. A pending dev migration now skips the statements of an earlier dev migration it
+  contains whole. One that redoes an earlier change in another form (a column whose type changed again)
+  still runs and raises `MigrationSchemaConflictError`, now saying so.
 - **Queries quote identifiers with backticks.** SQLite, workerd's build included, reads a double-quoted
   identifier that names no column as a string literal. A column missing from the database (a schema
   change not yet migrated) used to select its own name, and a `WHERE` on it compared two constants. It
@@ -23,26 +29,40 @@ Runtime and wrangler config fixes found by building an app on durable-db through
   - durable-db's own bindings (`<X>_DATABASE_DO` → `<X>DatabaseDO`) whose class is no longer a
     discovered database are removed. workerd refuses to start with a binding to a class the worker does
     not export.
-  - A database whose class name changed unambiguously (an extension's mount changed, or a database moved
-    into or out of a mounted source) gets a `renamed_classes` migration, so its data moves with it.
-    Before, it got a new class and the data was orphaned.
+  - A database of a mounted source whose class name changed unambiguously (the source's mount changed,
+    or the database moved into a mounted source; its file name unchanged) gets a `renamed_classes`
+    migration, so its deployed data moves with it. Before, it got a new class and the data was orphaned.
+    The renamed Durable Object keeps the old storage and its `__migrations` journal, so the old
+    database's migrations directory moves with it (`migrations/reviews-feedback/` →
+    `migrations/feedback-feedback/`). When it cannot — the new directory already has migrations, or more
+    than one directory belongs to the old class — nothing is written for that database: a warning gives
+    the commands to keep the data or the `deleted_classes` migration to drop it, and the plugin stops
+    until one is done. A database moved out of a mount, or two databases of the app, are never paired:
+    `ProductCatalogDatabaseDO` → `CatalogDatabaseDO` reads the same as replacing product-catalog.ts with
+    catalog.ts. Local dev storage is kept per class name, so in dev a renamed database starts empty.
   - A removed database's class is never deleted for you, because that deletes its data. A warning gives
     the exact `deleted_classes` migration to add, or says to drop the class from its
     `new_sqlite_classes` entry if it was never deployed.
   - Bindings of other names, and bindings to other workers' classes (`script_name`), are never touched.
 
-  `checkWranglerConfig()` reports such stale bindings and classes (`staleBindings`, `staleClasses`), so a
-  production build fails on them when patching is off. `PatchResult` gains `addedBindings`,
-  `removedBindings`, `newClasses`, `renamedClasses` and `deletedClasses`.
+  `checkWranglerConfig()` reports such stale bindings and classes (`staleBindings`, `staleClasses`,
+  `renamedClasses` with the `mv` for their `migrationsMoves`, `conflicts`), so a production build fails on
+  them when patching is off, with an error that names what is missing and what is stale
+  (`describeWranglerCheck()`). A rename target is no longer reported as a missing class too, and the
+  suggested migration takes the next free tag. `PatchResult` gains `addedBindings`, `removedBindings`,
+  `newClasses`, `renamedClasses`, `movedMigrations`, `conflicts` and `deletedClasses`.
 - **wrangler.jsonc edits keep the file as you wrote it.** Comments, formatting, the indentation style,
   line endings and the trailing newline all survive. Only the entries added or removed change, and one-line
   arrays stay on one line. No `wrangler.jsonc.backup` is written any more. The config is parsed as
   JSONC, so trailing commas are fine. This adds `jsonc-parser` as a dependency.
 - **Optional action args accept `undefined`.** `'photoKey?': 'string'` infers `{ photoKey?: string }`,
   which accepts `photoKey: undefined`, but validation used to reject it ("photoKey must be a string (was
-  undefined)"). Undefined-valued keys of a plain-object args value are now dropped before validation, in
-  the RPC stub and the Durable Object alike, whether `args` is an object or a `type(…)`. A required key
-  passed as `undefined` still fails.
+  undefined)"). Action args now compile in an ArkType scope with `exactOptionalPropertyTypes: false`, in
+  the RPC stub and the Durable Object alike: an optional key at any depth admits `undefined`, a required
+  key stays required (also `'note': 'string | undefined'`, as in TypeScript), and the args Type stays a
+  plain object Type (`.props`, `.toJsonSchema()`). `durable-db/registry`'s `type` is that scope's; the
+  `type` exported from `durable-db` is unchanged. An `args` given as a ready `type(…)` keeps the rules of
+  the scope that made it.
 - **Code that calls actions can be tested in Node.** An action called directly outside the build (a page,
   procedure or job under test) now runs against the test database `createTestDatabase()` created for
   its database's tables (the newest live one). `destroyDatabase()` empties that database. Without a test

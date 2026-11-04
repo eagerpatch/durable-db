@@ -33,13 +33,17 @@ export {
   type DevState,
   type DatabaseDevState,
   type DevPaths,
+  type DevServerLock,
   loadDevState,
   saveDevState,
   getDevPaths,
   getDevEpoch,
+  getDatabaseEpoch,
+  getDatabaseEpochs,
   getInstanceKey,
   loadDevMigrations,
   generateEpoch,
+  runningDevServer,
 } from './state';
 
 // Push command
@@ -57,6 +61,7 @@ export {
   type GenerateResult,
   generate,
   generateOne,
+  UnsafeMigrationError,
 } from './generate';
 
 // Reset command
@@ -66,6 +71,7 @@ export {
   type ResetResult,
   reset,
   resetAndPush,
+  DevServerRunningError,
 } from './reset';
 
 // Status command
@@ -89,8 +95,22 @@ export {
 export {
   type DiscoverOptions,
   type DiffResult,
+  type DatabaseDiff,
+  type RenameResolutionOptions,
   discoverDatabases,
+  selectDatabases,
   loadSchema,
   diffSchema,
+  diffDatabases,
   reportCliError,
+  UnknownDatabaseError,
 } from './shared';
+
+// Rename questions and migration risks
+export {
+  type MigrationRisk,
+  type RenameAnswer,
+  type SchemaAmbiguity,
+  parseRenameSpec,
+  SchemaRenameRequiredError,
+} from '../migrations/snapshot';

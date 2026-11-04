@@ -1,7 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { build, type Plugin as VitePlugin } from 'vite';
+import { durableDb } from '../../src/vite/durableDb';
 import { discoverDatabaseFiles, readFile } from '../../src/vite/modules/discovery';
 import { parseDatabaseFile } from '../../src/vite/modules/parser';
 import { generateDurableObjectsModule, transformActionFile } from '../../src/vite/modules/generator';
@@ -253,7 +255,7 @@ export const logEvent = action({
       });
 
       // Should use "global" as instance key
-      expect(transformed!.code).toMatch(/instanceKey\s*=\s*applyDevEpoch\(["']global["']\)/);
+      expect(transformed!.code).toMatch(/instanceKey\s*=\s*applyDevEpoch\(["']global["'], ["']analytics["']\)/);
     });
 
     it('generates correct imports for websocket transport database', () => {
@@ -337,4 +339,98 @@ export const createUser = action({
       expect(transformed!.code).toMatch(/__do/);
     });
   });
+});
+
+// ============================================================================
+// One build emits the wrangler config it patched
+// ============================================================================
+
+describe('build output wrangler config', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-build-'));
+    fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
+    fs.mkdirSync(path.join(tempDir, 'node_modules'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  /**
+   * What @cloudflare/vite-plugin does with the worker config: read it in its
+   * `config` hook (a normal-order plugin) and emit the build's wrangler.json
+   * from that copy in generateBundle.
+   */
+  function workerConfigSnapshotPlugin(): VitePlugin {
+    let snapshot = '';
+    return {
+      name: 'test:worker-config-snapshot',
+      config(userConfig) {
+        snapshot = fs.readFileSync(path.join(userConfig.root!, 'wrangler.jsonc'), 'utf-8');
+      },
+      generateBundle() {
+        this.emitFile({ type: 'asset', fileName: 'wrangler.json', source: snapshot });
+      },
+    };
+  }
+
+  it('a database added since the last build is bound in that same build', async () => {
+    fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+      name: 'store',
+      main: 'src/index.ts',
+      durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO'] }],
+    }, null, 2));
+    fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'schema.ts'), `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
+export const items = sqliteTable('items', { id: text().primaryKey() });
+`);
+    for (const name of ['main', 'wishlist']) {
+      // `wishlist` is the database added since the config was last patched
+      fs.writeFileSync(path.join(tempDir, 'src', 'databases', `${name}.ts`), `
+import { defineDatabase } from 'durable-db/db';
+import { items } from './schema';
+export const { action } = defineDatabase({ schema: { items } });
+`);
+    }
+    fs.writeFileSync(path.join(tempDir, 'src', 'index.ts'), `
+export * from 'virtual:durable-db/__durableObjects';
+export default { fetch: () => new Response('ok') };
+`);
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const output = await build({
+      root: tempDir,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [durableDb({ patchWranglerConfig: true }), workerConfigSnapshotPlugin()],
+      build: {
+        write: false,
+        minify: false,
+        lib: { entry: path.join(tempDir, 'src', 'index.ts'), formats: ['es'], fileName: 'index' },
+        rollupOptions: { external: [/^durable-db/, /^drizzle-orm/, /^cloudflare:/] },
+      },
+    });
+    logSpy.mockRestore();
+
+    const bundle = (Array.isArray(output) ? output[0] : output) as { output: Array<{ fileName: string; type: string; source?: string | Uint8Array; code?: string }> };
+    const emitted = bundle.output.find((file) => file.fileName === 'wrangler.json')!;
+    const config = JSON.parse(String(emitted.source));
+    const worker = bundle.output.find((file) => file.type === 'chunk')!;
+
+    // The worker exports the new Durable Object class…
+    expect(worker.code).toMatch(/\bWishlistDatabaseDO = class extends SqliteDurableObject\b/);
+    expect(worker.code).toMatch(/export \{[^}]*\bWishlistDatabaseDO\b/);
+    // …and the config this build emits binds it, with its migration.
+    expect(config.durable_objects.bindings).toEqual([
+      { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
+      { name: 'WISHLIST_DATABASE_DO', class_name: 'WishlistDatabaseDO' },
+    ]);
+    expect(config.migrations).toEqual([
+      { tag: 'v1', new_sqlite_classes: ['MainDatabaseDO'] },
+      { tag: 'v2', new_sqlite_classes: ['WishlistDatabaseDO'] },
+    ]);
+  }, 30_000);
 });

@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { durableDb, databasePlugin } from '../../src/vite/durableDb';
+import { pathToFileURL } from 'node:url';
+import { durableDb, databasePlugin, syncWranglerConfig } from '../../src/vite/durableDb';
 import type { Plugin, ResolvedConfig } from 'vite';
 
 // ============================================================================
@@ -236,6 +237,99 @@ export const { action } = defineDatabase({ schema: { users } });
     ]);
     expect(config.migrations[0].new_sqlite_classes).toEqual(['MainDatabaseDO']);
   });
+
+  // @cloudflare/vite-plugin reads wrangler.jsonc in its `config` hook and
+  // builds dist/worker/wrangler.json from that copy (and restarts a dev
+  // server when the file changes later): the patch must land before it.
+  it('patches in the config hook, before any other plugin resolves the config', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker", "migrations": [{"tag": "v1", "new_sqlite_classes": ["OtherDO"]}]}');
+
+    const plugin = durableDb({ patchWranglerConfig: true });
+    expect(typeof plugin.config).toBe('function');
+    await (plugin.config as Function)({ root: tempDir }, { command: 'build', mode: 'production' });
+
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.durable_objects.bindings).toEqual([
+      { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
+    ]);
+    expect(config.migrations).toEqual([
+      { tag: 'v1', new_sqlite_classes: ['OtherDO'] },
+      { tag: 'v2', new_sqlite_classes: ['MainDatabaseDO'] },
+    ]);
+    // visible, not only under DEBUG
+    expect(logSpy).toHaveBeenCalledWith(
+      'durable-db updated wrangler.jsonc (Durable Objects: +MAIN_DATABASE_DO → MainDatabaseDO; migration v2: MainDatabaseDO)'
+    );
+    logSpy.mockRestore();
+  });
+
+  it('resolves a relative root against the working directory', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+    const cwd = process.cwd();
+    process.chdir(path.dirname(tempDir));
+    try {
+      await (durableDb({ patchWranglerConfig: true }).config as Function)(
+        { root: path.basename(tempDir) }, { command: 'serve', mode: 'development' }
+      );
+    } finally {
+      process.chdir(cwd);
+    }
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).durable_objects.bindings).toHaveLength(1);
+    logSpy.mockRestore();
+  });
+
+  it('leaves the config alone in the config hook unless patching is on', async () => {
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+
+    await (durableDb().config as Function)({ root: tempDir }, { command: 'build', mode: 'production' });
+
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
+  });
+
+  it('syncWranglerConfig patches once and is silent when nothing changes', () => {
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+    const log = vi.fn();
+
+    const first = syncWranglerConfig({ projectRoot: tempDir, log });
+    const second = syncWranglerConfig({ projectRoot: tempDir, log });
+
+    expect(first).toMatchObject({ configPath, modified: true, databases: ['main'], error: null });
+    expect(first.changes).toEqual([
+      'Durable Objects: +MAIN_DATABASE_DO → MainDatabaseDO',
+      'migration v1: MainDatabaseDO',
+    ]);
+    expect(second.modified).toBe(false);
+    expect(log).toHaveBeenCalledTimes(1);
+  });
+
+  it('syncWranglerConfig writes nothing while a database file does not parse', () => {
+    // A partial set of databases would read as databases removed.
+    fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'broken.ts'), 'export const = ;');
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+
+    const result = syncWranglerConfig({ projectRoot: tempDir, log: false });
+
+    expect(result.modified).toBe(false);
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
+  });
+
+  it('syncWranglerConfig leaves an app without databases alone', () => {
+    fs.rmSync(path.join(tempDir, 'src', 'databases', 'main.ts'));
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+
+    const result = syncWranglerConfig({ projectRoot: tempDir, log: false });
+
+    expect(result).toMatchObject({ modified: false, databases: [] });
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
+  });
 });
 
 // ============================================================================
@@ -289,6 +383,35 @@ describe('__devEpoch virtual module', () => {
   it('emits a null epoch (identity applyDevEpoch) for production builds', async () => {
     const code = await loadDevEpochModule('build');
     expect(code).toContain('export const devEpoch = null');
+    const mod = await importModule(code);
+    expect(mod.applyDevEpoch('tenant', 'main')).toBe('tenant');
+  });
+
+  async function importModule(code: string) {
+    const file = path.join(tempDir, `epoch-${Math.random().toString(36).slice(2)}.mjs`);
+    fs.writeFileSync(file, code);
+    return import(pathToFileURL(file).href);
+  }
+
+  it('applies a database\'s own epoch after `db reset --database`, the project epoch to the rest', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'src', 'databases', 'main.ts'),
+      `import { defineDatabase } from 'durable-db';\nexport const { action } = defineDatabase({});\n`
+    );
+    const { loadDevState, saveDevState } = await import('../../src/cli/state');
+    const state = loadDevState(tempDir);
+    state.epoch = 'project';
+    saveDevState(tempDir, state);
+
+    const { reset } = await import('../../src/cli/reset');
+    const { newEpoch } = await reset({ projectRoot: tempDir, databasesDir: 'src/databases' }, { database: 'main' });
+
+    const mod = await importModule(await loadDevEpochModule('serve'));
+    expect(mod.devEpoch).toBe('project');
+    expect(mod.applyDevEpoch('tenant', 'main')).toBe(`tenant__dev_${newEpoch}`);
+    expect(mod.applyDevEpoch('tenant', 'reviews')).toBe('tenant__dev_project');
+    // stubs generated before per-database epochs pass no name
+    expect(mod.applyDevEpoch('tenant')).toBe('tenant__dev_project');
   });
 
   it('reflects an epoch bump (db reset) on the next load', async () => {
@@ -375,6 +498,45 @@ describe('dev cache watcher', () => {
 
     expect(clientSend).not.toHaveBeenCalled();
     expect(workerSend).not.toHaveBeenCalled();
+  });
+
+  it('records the running dev server and removes the lock when it closes', async () => {
+    const { readDevServerLock, runningDevServer } = await import('../../src/cli/state');
+    const plugin = durableDb();
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
+    const { server, clientSend } = createMockServer();
+    (plugin.configureServer as Function)(server);
+
+    expect(runningDevServer(tempDir)?.pid).toBe(process.pid);
+
+    // writing the lock is not a dev-state change
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(clientSend).not.toHaveBeenCalled();
+
+    closeServer?.();
+    closeServer = null;
+    expect(readDevServerLock(tempDir)).toBeNull();
+  });
+
+  it('a restarted server keeps its lock when the old one closes', async () => {
+    const { readDevServerLock } = await import('../../src/cli/state');
+    const plugin = durableDb();
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
+
+    const first = createMockServer();
+    const closeFirst = closeServer!;
+    try {
+      (plugin.configureServer as Function)(first.server);
+      const second = createMockServer();
+      (plugin.configureServer as Function)(second.server);
+      const secondToken = readDevServerLock(tempDir)?.token;
+      expect(secondToken).toBeDefined();
+
+      closeFirst();
+      expect(readDevServerLock(tempDir)?.token).toBe(secondToken);
+    } finally {
+      closeFirst();
+    }
   });
 
   it('survives a hot channel that throws on send and still reloads the rest', async () => {
@@ -464,6 +626,28 @@ describe('transform', () => {
       path.join(tempDir, 'src', 'other.ts')
     );
     expect(result).toBeNull();
+  });
+
+  it('passes a file with a syntax error and no durable-db usage through untouched', async () => {
+    // A page being edited: the compiler that owns it reports the error, not
+    // durable-db's Babel parse ([plugin:durable-db] for every syntax error).
+    const transform = plugin.transform as Function;
+    const page = `import { Suspense } from 'react';\nexport default function Page() {\n  return ((\n    <form action={save}><Suspense /></form>\n  );\n}\n`;
+    const result = await transform.call(
+      { resolve: async () => null },
+      page,
+      path.join(tempDir, 'src', 'pages', 'products', 'index.tsx')
+    );
+    expect(result).toBeNull();
+  });
+
+  it('still parses a file that imports an action factory', async () => {
+    const transform = plugin.transform as Function;
+    await expect(transform.call(
+      { resolve: async () => null },
+      `import { action } from '../databases/main';\nexport const x = (;`,
+      path.join(tempDir, 'src', 'actions.ts')
+    )).rejects.toThrow();
   });
 
   it('handles query parameters in id', async () => {

@@ -389,7 +389,7 @@ export const createUser = action({
       actionsInFile: [logEventAction],
     });
 
-    expect(result!.code).toContain('instanceKey = applyDevEpoch("global")');
+    expect(result!.code).toContain('instanceKey = applyDevEpoch("global", "analytics")');
   });
 
   it('uses getTenantId() for per-tenant databases', () => {
@@ -411,7 +411,8 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toContain('instanceKey = applyDevEpoch(getTenantId())');
+    // The database name picks its own epoch after `db reset --database main`
+    expect(result!.code).toContain('instanceKey = applyDevEpoch(getTenantId(), "main")');
     expect(result!.code).toMatch(
       /import\s*\{[^}]*applyDevEpoch[^}]*\}\s*from\s*["']virtual:durable-db\/__devEpoch["']/
     );
@@ -594,7 +595,7 @@ export const { action, destroyDatabase } = defineDatabase({
 
     expect(result).not.toBeNull();
     expect(result!.code).toContain('export async function destroyDatabase');
-    expect(result!.code).toContain('instanceKey = applyDevEpoch("global")');
+    expect(result!.code).toContain('instanceKey = applyDevEpoch("global", "analytics")');
     expect(result!.code).not.toContain('getTenantId');
   });
 

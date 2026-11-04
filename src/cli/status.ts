@@ -2,10 +2,17 @@ import type { DatabaseSource } from '../vite/modules/discovery';
 import {
   loadDevState,
   loadDevMigrations,
+  getDatabaseEpoch,
 } from './state';
-import { hashSnapshot } from '../migrations/snapshot';
+import {
+  describeAmbiguity,
+  exampleRenames,
+  hashSnapshot,
+  SchemaRenameRequiredError,
+  type SchemaAmbiguity,
+} from '../migrations/snapshot';
 import { loadSnapshot, loadMigrationFiles } from '../migrations/generator';
-import { discoverDatabases, loadSchema, diffSchema } from './shared';
+import { selectDatabases, loadSchema, diffSchema } from './shared';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
@@ -18,6 +25,8 @@ export interface StatusContext {
   databasesDir?: string | DatabaseSource[];
   migrationsDir?: string;
   verbose?: boolean;
+  /** Only report this database (an unknown name throws UnknownDatabaseError). */
+  database?: string;
 }
 
 export interface DatabaseStatus {
@@ -32,7 +41,17 @@ export interface DatabaseStatus {
   pendingStatements: string[];
   /** Whether prod snapshot changed (needs reset) */
   prodSnapshotChanged: boolean;
-  /** Current dev epoch */
+  /**
+   * The schema changed in a way drizzle-kit cannot diff without asking
+   * whether a new name is a rename (status never prompts): the questions.
+   * `hasUncommittedChanges` is true and `pendingStatements` empty.
+   */
+  needsRenameResolution: SchemaAmbiguity[];
+  /** The schema changed but the pending SQL could not be computed: why. */
+  pendingError: string | null;
+  /** What the pending change risks on a database with rows (see `db generate`). */
+  warnings: string[];
+  /** This database's dev epoch (its own after `db reset --database`, else the project's) */
   epoch: string;
   /** Last push timestamp */
   lastPush: string | null;
@@ -67,7 +86,7 @@ export async function status(ctx: StatusContext = {}): Promise<StatusResult> {
     databases: [],
   };
 
-  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir });
+  const databases = selectDatabases({ projectRoot, databasesDir, migrationsDir, database: ctx.database });
 
   if (databases.length === 0) {
     debugCli('No databases found');
@@ -97,7 +116,10 @@ async function getDatabaseStatus(
     hasUncommittedChanges: false,
     pendingStatements: [],
     prodSnapshotChanged: false,
-    epoch: devState.epoch,
+    needsRenameResolution: [],
+    pendingError: null,
+    warnings: [],
+    epoch: getDatabaseEpoch(devState, db.name),
     lastPush: devState.databases[db.name]?.lastPush ?? null,
   };
 
@@ -119,20 +141,29 @@ async function getDatabaseStatus(
   const prodSnapshot = loadSnapshot(db.migrationsDir);
   const prodSnapshotHash = hashSnapshot(prodSnapshot);
   const dbDevState = devState.databases[db.name];
-  if (dbDevState && dbDevState.prodSnapshotHash !== prodSnapshotHash) {
+  if (dbDevState?.prodSnapshotHash !== undefined && dbDevState.prodSnapshotHash !== prodSnapshotHash) {
     dbStatus.prodSnapshotChanged = true;
   }
 
-  // Diff schema against prod snapshot
+  // Diff schema against prod snapshot. Never prompts: a change drizzle-kit
+  // would ask about is reported as such. A failure never reads as "up to
+  // date" — the snapshots differ, so something is pending.
   try {
-    const diff = await diffSchema(schema, db.migrationsDir);
+    const diff = await diffSchema(schema, db.migrationsDir, { interactive: false });
 
     if (diff.hasChanges) {
       dbStatus.hasUncommittedChanges = true;
       dbStatus.pendingStatements = diff.statements;
+      dbStatus.warnings = diff.risks.map((risk) => risk.message);
     }
   } catch (error) {
-    debugCli('Failed to generate pending statements for %s: %O', db.name, error);
+    dbStatus.hasUncommittedChanges = true;
+    if (error instanceof SchemaRenameRequiredError) {
+      dbStatus.needsRenameResolution = error.ambiguities;
+    } else {
+      dbStatus.pendingError = error instanceof Error ? error.message : String(error);
+      debugCli('Failed to generate pending statements for %s: %O', db.name, error);
+    }
   }
 
   return dbStatus;
@@ -153,15 +184,31 @@ export function formatStatus(result: StatusResult): string {
   }
 
   for (const db of result.databases) {
+    const ambiguities = db.needsRenameResolution ?? [];
     lines.push(`\u{1F4E6} ${db.name}`);
     lines.push(`   Production migrations: ${db.prodMigrationCount}`);
     lines.push(`   Dev migrations: ${db.devMigrationCount}`);
+    if (db.epoch && db.epoch !== result.epoch) {
+      lines.push(`   Dev epoch: ${db.epoch} (own, since 'db reset --database ${db.name}')`);
+    }
 
     if (db.prodSnapshotChanged) {
       lines.push(`   \u26A0\uFE0F  Production snapshot changed - run 'db:reset' to sync`);
     }
 
-    if (db.hasUncommittedChanges) {
+    if (ambiguities.length > 0) {
+      lines.push(`   \u{1F4DD} Changes pending — needs rename resolution:`);
+      for (const ambiguity of ambiguities) {
+        lines.push(`     - ${describeAmbiguity(ambiguity)}`);
+      }
+      const example = ambiguities.flatMap(exampleRenames)[0];
+      lines.push(
+        `   Answer when you push/generate: in a terminal (it asks), or with ` +
+        `${example ? `--rename ${example} (a rename) or ` : ''}--no-renames (create + drop)`
+      );
+    } else if (db.pendingError) {
+      lines.push(`   \u{1F4DD} Changes pending — the SQL could not be computed: ${db.pendingError}`);
+    } else if (db.hasUncommittedChanges) {
       lines.push(`   \u{1F4DD} Uncommitted changes: ${db.pendingStatements.length} statement(s)`);
       if (db.pendingStatements.length > 0) {
         lines.push(`   Pending SQL:`);
@@ -172,6 +219,9 @@ export function formatStatus(result: StatusResult): string {
         if (db.pendingStatements.length > 5) {
           lines.push(`     ... and ${db.pendingStatements.length - 5} more`);
         }
+      }
+      for (const warning of db.warnings ?? []) {
+        lines.push(`   \u26A0\uFE0F  ${warning}`);
       }
     } else {
       lines.push(`   \u2713 Schema is up to date`);

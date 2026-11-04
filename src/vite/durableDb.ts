@@ -10,8 +10,17 @@ import { parseDatabaseFile } from './modules/parser';
 import { patchWranglerConfig, checkWranglerConfig } from './modules/wrangler';
 import { databaseSources, type DatabaseSource } from './modules/discovery';
 import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
+import { syncWranglerConfig } from './modules/syncWrangler';
 import { loadMigrationFiles } from '../migrations/generator';
-import { loadDevState, saveDevState, getDevPaths } from '../cli/state';
+import {
+  loadDevState,
+  saveDevState,
+  getDevPaths,
+  getDatabaseEpochs,
+  writeDevServerLock,
+  removeDevServerLock,
+  DEV_SERVER_LOCK_FILE,
+} from '../cli/state';
 
 // ============================================================================
 // Types
@@ -31,6 +40,11 @@ export interface DurableDbOptions {
    * wrangler.jsonc/json automatically. When false (the default), the plugin
    * only verifies the config and logs the exact JSON to add when something
    * is missing — your config file is never modified.
+   *
+   * The write happens in the plugin's `config` hook, before
+   * @cloudflare/vite-plugin reads the file, so a build emits a wrangler.json
+   * with the new bindings and a dev server does not restart on its first
+   * start. A change is logged (`durable-db updated wrangler.jsonc (…)`).
    */
   patchWranglerConfig?: boolean;
 }
@@ -68,18 +82,39 @@ function matchesVirtualId(id: string, canonicalId: string): boolean {
 
 /**
  * Generate the __devEpoch virtual module. Action stubs route every DO
- * instance key through `applyDevEpoch()`:
- * - dev: suffixes keys with the current epoch (`<key>__dev_<epoch>`), so a
- *   `db reset` epoch bump rotates every database to a fresh DO instance
+ * instance key through `applyDevEpoch(key, dbName)`:
+ * - dev: suffixes keys with the database's epoch (`<key>__dev_<epoch>`) — its
+ *   own after `db reset --database <name>`, else the project epoch — so a
+ *   `db reset` rotates the reset database(s) to fresh DO instances
  * - production builds: identity function, zero overhead beyond the call
  */
-function generateDevEpochModule(epoch: string | null): string {
+function generateDevEpochModule(
+  epoch: string | null,
+  databaseEpochs: Record<string, string> = {}
+): string {
   return [
     `export const devEpoch = ${JSON.stringify(epoch)};`,
-    `export function applyDevEpoch(key) {`,
-    `  return devEpoch ? \`\${key}__dev_\${devEpoch}\` : key;`,
+    `export const devEpochs = ${JSON.stringify(epoch ? databaseEpochs : {})};`,
+    `export function applyDevEpoch(key, dbName) {`,
+    `  const epoch = (dbName != null && Object.prototype.hasOwnProperty.call(devEpochs, dbName) ? devEpochs[dbName] : null) ?? devEpoch;`,
+    `  return epoch ? \`\${key}__dev_\${epoch}\` : key;`,
     `}`,
   ].join('\n');
+}
+
+/**
+ * Cheap pre-check for `transform`: only code that defines a database
+ * (`defineDatabase`, which `destroyDatabase` comes from) or imports an
+ * `action` factory can be rewritten — every other module skips the Babel
+ * parse, so a syntax error in an unrelated file is reported by the compiler
+ * that owns it, not as a durable-db error. A superset, not analysis: the
+ * parser still decides.
+ */
+const DATABASE_DEFINITION = /\b(?:defineDatabase|destroyDatabase)\b/;
+const ACTION_IMPORT = /\bimport\s*(?:type\s+)?\{[^}]*\baction\b[^}]*\}/;
+
+function mayDefineDatabaseCode(code: string): boolean {
+  return DATABASE_DEFINITION.test(code) || ACTION_IMPORT.test(code);
 }
 
 // ============================================================================
@@ -354,6 +389,18 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
     name: 'durable-db',
     enforce: 'pre',
 
+    // Patch wrangler.jsonc here, not lazily in load/transform: the plugin is
+    // enforce 'pre', so this runs before @cloudflare/vite-plugin's `config`
+    // hook reads the worker config — the copy it builds dist/worker/wrangler.json
+    // from, and watches in dev (a later write restarts the server mid-start).
+    config(userConfig) {
+      if (!state.options.patchWranglerConfig) return;
+      syncWranglerConfig({
+        projectRoot: path.resolve(userConfig.root ?? process.cwd()),
+        databasesDir: state.options.databasesDir,
+      });
+    },
+
     configResolved(config) {
       state.config = config;
       state.projectRoot = config.root;
@@ -362,6 +409,17 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
     configureServer(server) {
       state.devServer = server;
       state.reset();
+
+      // Tell CLI commands that a dev server runs here (`db reset
+      // --purge-local-storage` refuses to delete workerd's storage under it).
+      // A restart writes a new lock before the old server closes; each
+      // server removes only its own.
+      try {
+        const lockToken = writeDevServerLock(state.projectRoot);
+        server.httpServer?.once('close', () => removeDevServerLock(state.projectRoot, lockToken));
+      } catch (error) {
+        debugVite('Could not write the dev-server lock: %O', error);
+      }
 
       const absoluteDbDirs = databaseSources(state.options.databasesDir).map((source) => path.resolve(state.projectRoot, source.dir));
       server.watcher.on('change', (file) => {
@@ -382,7 +440,14 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
       fs.mkdirSync(devPaths.cacheDir, { recursive: true });
 
       let reloadTimer: ReturnType<typeof setTimeout> | null = null;
-      const onDevStateChange = () => {
+      const cacheDirName = path.basename(devPaths.cacheDir);
+      const onDevStateChange = (_event?: unknown, filename?: unknown) => {
+        // Not dev state: the dev-server lock, and an event naming the cache
+        // dir itself — its creation, which macOS reports after the watcher
+        // starts on a fresh project (a state change names the file).
+        if (typeof filename === 'string' && (path.basename(filename) === DEV_SERVER_LOCK_FILE || filename === cacheDirName)) {
+          return;
+        }
         if (state.isWithinSelfDevStateWriteWindow()) {
           debugVite('Ignoring dev cache event caused by the plugin itself');
           return;
@@ -429,6 +494,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         // state file changes, so this always reflects the current epoch.
         const isDev = state.config.command === 'serve';
         let epoch: string | null = null;
+        let databaseEpochs: Record<string, string> = {};
         if (isDev) {
           // Persist a newly minted epoch immediately: loadDevState mints
           // one when no state file exists, and an unsaved epoch would
@@ -441,8 +507,9 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
             saveDevState(state.projectRoot, devState);
           }
           epoch = devState.epoch;
+          databaseEpochs = getDatabaseEpochs(devState);
         }
-        return { code: generateDevEpochModule(epoch) };
+        return { code: generateDevEpochModule(epoch, databaseEpochs) };
       }
 
       if (id !== VIRTUAL_DO_MODULE_ID) return null;
@@ -495,6 +562,9 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
 
       // Only process TypeScript files
       if (!/\.tsx?$/.test(id)) return null;
+
+      // Only files that can define a database or actions are parsed.
+      if (!mayDefineDatabaseCode(code)) return null;
 
       await state.initialize();
 
@@ -576,6 +646,9 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
 
 /** @deprecated Renamed to {@link durableDb}. */
 export const databasePlugin = durableDb;
+
+export { syncWranglerConfig };
+export type { SyncWranglerConfigOptions, SyncWranglerConfigResult } from './modules/syncWrangler';
 
 /** @deprecated Renamed to {@link DurableDbOptions}. */
 export type DatabasePluginOptions = DurableDbOptions;

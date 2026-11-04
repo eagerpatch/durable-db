@@ -1,4 +1,5 @@
 import { SqliteDurableObject, type Migrations } from '../../src/db/SqliteDurableObject';
+import { type as actionArgsType, registerAction, callAction } from '../../src/registry';
 import { createKyselyFromSql } from '../../src/db/kysely';
 import { integer, table, text } from '../../src/schema';
 
@@ -96,6 +97,36 @@ export class TestDevHandoffDO extends SqliteDurableObject {
         .toArray()
         .map((r) => (r as { name: string }).name),
     };
+  }
+}
+
+/**
+ * Action args validation as the generated code does it, at request time in
+ * workerd (where generating code from strings is disallowed): the RPC stub's
+ * `__ddType(args).assert(…)` and the Durable Object's registered validator.
+ */
+export class TestArgsDO extends SqliteDurableObject {
+  migrations: Migrations = {};
+
+  async optionalKeyUndefined(): Promise<{ stub: unknown; durableObject: unknown; rejected: string }> {
+    const schema = { productId: 'string', 'photoKey?': 'string' } as const;
+    const stub = actionArgsType(schema).assert({ productId: 'p1', photoKey: undefined });
+
+    const validator = actionArgsType(schema);
+    registerAction('args-test', 'addReview', {
+      validator: (args) => validator(args),
+      handler: async (_db, args) => args,
+    });
+    const ctx = { env: {}, dbName: 'args-test', dbBindingNames: {}, instanceKey: 'global' };
+    const durableObject = await callAction(null, 'args-test', 'addReview', { productId: 'p1', photoKey: undefined }, ctx);
+
+    let rejected = '';
+    try {
+      actionArgsType(schema).assert({ productId: 'p1', photoKey: 7 });
+    } catch (error) {
+      rejected = (error as Error).message;
+    }
+    return { stub, durableObject, rejected };
   }
 }
 

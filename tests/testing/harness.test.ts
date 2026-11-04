@@ -20,7 +20,7 @@ const shipments = table('shipments', {
 });
 
 const schema = { settings, shipments };
-const { action } = defineDatabase({ schema });
+const { action, destroyDatabase } = defineDatabase({ schema });
 
 const upsertSettings = action({
   args: { autoBook: 'boolean' },
@@ -133,5 +133,102 @@ describe('createTestDatabase', () => {
     expect(await b.run(listShipments, {})).toHaveLength(0);
     a.destroy();
     b.destroy();
+  });
+});
+
+// Code under test (a page, a procedure, a job) calls actions directly; there
+// is no build transform in Node, so the action must run against the test
+// database the test created for its tables.
+const notes = table('notes', { id: text().primaryKey(), body: text().notNull() });
+const notesDb = defineDatabase({ schema: { notes } });
+
+const addNote = notesDb.action({
+  args: { id: 'string', body: 'string', 'tag?': 'string' },
+  handler: async (db, args) =>
+    db.insertInto('notes').values({ id: args.id, body: args.tag ? `${args.tag}: ${args.body}` : args.body })
+      .returningAll().executeTakeFirstOrThrow(),
+});
+
+const countNotes = notesDb.action({
+  args: {},
+  handler: async (db) => (await db.selectFrom('notes').select('id').execute()).length,
+});
+
+// An action calling another action of its database, as handlers do.
+const addTwoNotes = notesDb.action({
+  args: { prefix: 'string' },
+  handler: async (_db, args) => {
+    await addNote({ id: `${args.prefix}-1`, body: 'one' });
+    await addNote({ id: `${args.prefix}-2`, body: 'two' });
+    return countNotes({});
+  },
+});
+
+/** Stand-in for app code (a loader, an RPC procedure) that calls actions. */
+async function createNoteFromForm(form: { id: string; body: string; tag?: string }) {
+  const note = await addNote({ id: form.id, body: form.body, tag: form.tag });
+  return { note, total: await countNotes({}) };
+}
+
+describe('direct action calls under test', () => {
+  it('runs an action called by code under test against the test database for its tables', async () => {
+    const t = await createTestDatabase({ schema: { notes } });
+    cleanup = t.destroy;
+
+    // The optional `tag` is passed as undefined, as app code naturally does.
+    const result = await createNoteFromForm({ id: 'n1', body: 'hello', tag: undefined });
+    expect(result.note).toEqual({ id: 'n1', body: 'hello' });
+    expect(result.total).toBe(1);
+    expect(await t.db.selectFrom('notes').selectAll().execute()).toEqual([{ id: 'n1', body: 'hello' }]);
+  });
+
+  it('validates args like production on a direct call', async () => {
+    const t = await createTestDatabase({ schema: { notes } });
+    cleanup = t.destroy;
+    await expect(addNote({ id: 'n1', body: 3 as never })).rejects.toThrow(/Invalid args/);
+  });
+
+  it('runs actions that call other actions of the same database', async () => {
+    const t = await createTestDatabase({ schema: { notes } });
+    cleanup = t.destroy;
+    expect(await addTwoNotes({ prefix: 'x' })).toBe(2);
+  });
+
+  it('matches by tables: a test database with more tables also serves the action', async () => {
+    const t = await createTestDatabase({ schema: { ...schema, notes } });
+    cleanup = t.destroy;
+    await addNote({ id: 'n1', body: 'a' });
+    expect(await t.run(countNotes, {})).toBe(1);
+  });
+
+  it('uses the newest live test database and stops routing to a destroyed one', async () => {
+    const older = await createTestDatabase({ schema: { notes } });
+    const newer = await createTestDatabase({ schema: { notes } });
+    await addNote({ id: 'n1', body: 'a' });
+    expect(await newer.run(countNotes, {})).toBe(1);
+    expect(await older.run(countNotes, {})).toBe(0);
+
+    newer.destroy();
+    await addNote({ id: 'n2', body: 'b' });
+    expect(await older.run(countNotes, {})).toBe(1);
+
+    older.destroy();
+    await expect(addNote({ id: 'n3', body: 'c' })).rejects.toThrow(
+      /action\(\) call sites are transformed by the build; in tests, create the database with createTestDatabase\(\{ schema: \{ notes \} \}\)/
+    );
+  });
+
+  it('does not route to a test database created for other tables', async () => {
+    const t = await createTestDatabase({ schema });
+    cleanup = t.destroy;
+    await expect(countNotes({})).rejects.toThrow(/called without transformation/);
+  });
+
+  it('destroyDatabase() empties the test database', async () => {
+    const t = await createTestDatabase({ schema });
+    cleanup = t.destroy;
+    await t.run(upsertShipment, { orderId: 'o1', status: 'pending' });
+    await destroyDatabase();
+    expect(await t.run(listShipments, {})).toHaveLength(0);
   });
 });

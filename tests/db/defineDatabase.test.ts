@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { defineDatabase } from '../../src/db/defineDatabase';
+import { type } from '../../src/arktypeConfig';
+import { table, text } from '../../src/schema';
 
 describe('db', () => {
   describe('defineDatabase', () => {
@@ -52,6 +54,64 @@ describe('db', () => {
       // and the error should include the args schema keys for identifiability
       await expect(myAction({ name: 'test' })).rejects.toThrow(
         /Action \(args: \{ name \}\) called without transformation/
+      );
+    });
+
+    it('says how to run an untransformed action in a test, naming no Vite config', async () => {
+      const notes = table('notes', { id: text().primaryKey() });
+      const tags = table('tags', { id: text().primaryKey() });
+      const { action } = defineDatabase({ schema: { notes, tags } });
+      const myAction = action({ args: { id: 'string' }, handler: async () => null });
+
+      const error = await myAction({ id: 'n1' }).then(() => null, (e: Error) => e);
+      expect(error?.message).toContain('action() call sites are transformed by the build');
+      expect(error?.message).toContain('createTestDatabase({ schema: { notes, tags } })');
+      expect(error?.message).toContain('db.run(action, args)');
+      expect(error?.message).not.toMatch(/Vite config/);
+    });
+
+    it('does not dump ArkType internals when args is a type(...)', async () => {
+      const { action } = defineDatabase({ schema: {} });
+      const myAction = action({
+        args: type({ id: 'string' }) as never,
+        handler: async () => null,
+      });
+
+      const untransformed = await myAction({ id: 'x' } as never).then(() => null, (e: Error) => e);
+      expect(untransformed?.message).toMatch(/^Action called without transformation/);
+      expect(untransformed?.message).not.toMatch(/\bkind\b|\bimpl\b/);
+
+      const invalid = await myAction({ id: 1 } as never).then(() => null, (e: Error) => e);
+      expect(invalid?.message).toMatch(/^Invalid args for action: id must be a string/);
+    });
+
+    it('accepts an optional key passed as undefined (the inferred type allows it)', async () => {
+      const { action } = defineDatabase({ schema: {} });
+      const myAction = action({
+        args: { name: 'string', 'photoKey?': 'string' },
+        handler: async (db, args) => args,
+      });
+
+      // Type-checks: `{ photoKey?: string }` accepts undefined. Validation
+      // must agree, so this reaches the untransformed-call error, not
+      // "photoKey must be a string (was undefined)".
+      await expect(myAction({ name: 'a', photoKey: undefined })).rejects.toThrow(
+        /called without transformation/
+      );
+      // Still validated when present, and a required key is still required.
+      await expect(myAction({ name: 'a', photoKey: 1 as never })).rejects.toThrow(/Invalid args/);
+      await expect(myAction({ name: undefined as never })).rejects.toThrow(/Invalid args/);
+    });
+
+    it('accepts an undefined optional key in a type(...) args schema too', async () => {
+      const { action } = defineDatabase({ schema: {} });
+      const myAction = action({
+        args: type({ name: 'string', 'photoKey?': 'string' }) as never,
+        handler: async () => null,
+      });
+
+      await expect(myAction({ name: 'a', photoKey: undefined } as never)).rejects.toThrow(
+        /called without transformation/
       );
     });
 

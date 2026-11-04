@@ -1,14 +1,20 @@
 import { type } from './arktypeConfig'; // jitless `type` — eval-free for Workers
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { WebSocketTransport } from './transport/websocket';
+import { actionArgsType } from './db/actionArgs';
 
-// Re-export arktype's `type` so the action-file transform can inject it from
-// HERE (a durable-db subpath that always resolves in the consumer's worker)
-// instead of bare `arktype` — which a pnpm app never hoists to its root, and
-// which the cloudflare vite plugin's getWorkerEntryExportTypes then fails to
-// resolve. With arktype inlined into this dist (tsdown noExternal), this is the
-// SAME single instance durable-db validates with — no second scope registry.
-export { type };
+// The `type` the action-file transform injects (as `__ddType`) to compile each
+// action's `args`, for the RPC stub and the Durable Object's validator alike.
+// It is exported from HERE (a durable-db subpath that always resolves in the
+// consumer's worker) instead of bare `arktype` — which a pnpm app never hoists
+// to its root, and which the cloudflare vite plugin's
+// getWorkerEntryExportTypes then fails to resolve. With arktype inlined into
+// this dist (tsdown noExternal), this is the SAME single instance durable-db
+// validates with — no second scope registry. It is arktype's `type` whose
+// validators first drop `undefined`-valued keys from plain-object args (see
+// ./db/actionArgs): an optional key passed as `undefined` validates, as the
+// inferred TypeScript type says it does.
+export { actionArgsType as type };
 
 // ============================================================================
 // Types

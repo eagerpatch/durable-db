@@ -16,13 +16,16 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
   - [status](#db-status)
   - [reset](#db-reset)
   - [validate](#db-validate)
+  - [Renames](#renames)
 - [Migration System](#migration-system)
   - [Dev Migrations](#dev-migrations)
   - [Production Migrations](#production-migrations)
   - [Breakpoints](#breakpoints)
+  - [Adding a required column](#adding-a-required-column)
   - [Epoch System](#epoch-system)
   - [Typical Workflow](#typical-workflow)
 - [Vite Plugin](#vite-plugin)
+- [Testing Actions](#testing-actions)
 - [Outerbase Studio Integration](#outerbase-studio-integration)
 - [Instance Strategies](#instance-strategies)
 - [Action-to-Action Calls](#action-to-action-calls)
@@ -114,6 +117,8 @@ export default defineConfig({
   ],
 });
 ```
+
+The plugin supports Vite 5 through 8 (`vite` is a peer dependency).
 
 ### 6. Use in your worker
 
@@ -213,9 +218,11 @@ args: { email: 'string.email' }             // Email validation
 args: { limit: 'number > 0' }               // Positive number
 args: { offset: 'number >= 0' }             // Non-negative number
 args: { tags: 'string[]' }                  // Array of strings
-args: { name: 'string', age: 'number?' }    // Optional field
+args: { name: 'string', 'age?': 'number' }  // Optional key
 args: { role: "'admin' | 'user'" }           // Literal union
 ```
+
+An optional key may be passed as `undefined` — `addReview({ text, photoKey: maybeKey })` validates, as its inferred TypeScript type says. A key whose value is `undefined` counts as not given (a required one still fails, as missing).
 
 ### The `handler` function
 
@@ -299,6 +306,7 @@ The `db` CLI manages your migration lifecycle. All commands share these options:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-d, --databases-dir <dir>` | `src/databases` | Directory containing database definitions |
+| `--database <db>` | (all) | Only this database. An unknown name exits with code 1 and lists the valid ones |
 | `-v, --verbose` | `false` | Show detailed output |
 
 **Schema loading is strict.** When a database declares tables in `defineDatabase({ schema })`, every command that loads the schema (`push`, `generate`, `status`, `validate`) fails with exit code 1 — instead of reporting "no changes" — if:
@@ -318,7 +326,16 @@ Push schema changes to dev migrations. This is the command you run most often du
 db push
 db push --verbose
 db push --databases-dir ./src/db
+db push --database main
+db push --rename users.bio=about       # answer a rename question (see Renames)
 ```
+
+**Extra flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--rename <table.old=new>` | Answer a rename question without a prompt: `<table>.<old>=<new>` renames a column, `<old>=<new>` a table. Repeatable. See [Renames](#renames) |
+| `--no-renames` | Answer every remaining rename question with "create" (the old column/table is dropped) |
 
 **What it does:**
 
@@ -349,6 +366,8 @@ All databases are up to date.
 
 Dev migrations are stored in `node_modules/.cache/durable-db/` and are never committed to git. They are loaded automatically by the Vite plugin in dev mode.
 
+`push` warns (`⚠`) about what a change risks on a database that has rows — a `NOT NULL` column without a default fails on every table with rows, your dev database's included (see [Adding a required column](#adding-a-required-column)), and a dropped column or table loses its data.
+
 ### `db generate`
 
 Generate a production migration from your current schema changes. Run this when you're ready to commit.
@@ -371,14 +390,23 @@ db generate --database main add_posts_table
 | Flag | Description |
 |------|-------------|
 | `--database <db>` | Only generate for this specific database |
+| `--rename <table.old=new>` | Answer a rename question without a prompt (repeatable). See [Renames](#renames) |
+| `--no-renames` | Answer every remaining rename question with "create" (the old column/table is dropped) |
+| `--force` | Write the migration even when a statement fails on every table that has rows |
 
 **What it does:**
 
 1. Compares your current Drizzle schema against the production snapshot (`_snapshot.json`)
-2. Generates SQL statements for the diff
-3. Writes a timestamped `.sql` file to the configured `migrationsDir`
-4. Updates the production snapshot with a new ID and `prevId` chain
-5. Clears dev state for this database (the dev migrations are now superseded by the production migration)
+2. Generates SQL statements for the diff (asking about renames — see [Renames](#renames))
+3. Checks what they do to a database that has rows (below) — before any file is written
+4. Writes a timestamped `.sql` file to the configured `migrationsDir`
+5. Updates the production snapshot with a new ID and `prevId` chain
+6. Clears dev state for this database (the dev migrations are now superseded by the production migration)
+
+**Unsafe statements.** Per-tenant databases migrate lazily, on each tenant's first request after a deploy — so a statement that only fails on a table with rows surfaces in production, once per tenant with data, and that tenant's database stays broken until a fixed migration ships. `db validate` cannot catch it: it replays the migrations on an empty database. So `generate`:
+
+- **refuses** (exit code 1, nothing written) a column added `NOT NULL` without a default: `products.currency is added NOT NULL without a default — the migration fails on every table that has rows: add .default(...) or add it nullable and backfill`. `--force` writes it anyway (a table known to be empty everywhere). See [Adding a required column](#adding-a-required-column);
+- **warns** (`⚠`) when a column or table is dropped (its data is lost) or a column becomes `NOT NULL` (fails where a row holds `NULL`).
 
 **Output example:**
 
@@ -399,6 +427,7 @@ Show the current migration status for all databases without making any changes.
 
 ```bash
 db status
+db status --database main
 db status --verbose
 ```
 
@@ -421,7 +450,18 @@ Dev Epoch: m1a2b3c
    ✓ Schema is up to date
 ```
 
-Shows per-database: production migration count, dev migration count, whether there are uncommitted schema changes (pending SQL statements that haven't been pushed yet), and the last push timestamp. If a teammate committed new production migrations since your last push, a `⚠️ Production snapshot changed - run 'db:reset' to sync` warning appears.
+Shows per-database: production migration count, dev migration count, whether there are uncommitted schema changes (pending SQL statements that haven't been pushed yet), and the last push timestamp. If a teammate committed new production migrations since your last push, a `⚠️ Production snapshot changed - run 'db:reset' to sync` warning appears. A database with its own epoch (after `db reset --database`) shows it.
+
+`status` never prompts. A change drizzle-kit can only diff by asking whether a name is a rename is reported as such, never as up to date:
+
+```
+📦 main
+   📝 Changes pending — needs rename resolution:
+     - users: about added, bio removed
+   Answer when you push/generate: in a terminal (it asks), or with --rename users.bio=about (a rename) or --no-renames (create + drop)
+```
+
+Pending SQL that would fail on a table with rows, or drop data, is listed with a `⚠️` line.
 
 ### `db reset`
 
@@ -440,19 +480,21 @@ db reset --purge-local-storage
 | Flag | Description |
 |------|-------------|
 | `--keep-epoch` | Only clear dev migrations; keep the same DO instances |
-| `--database <db>` | Only reset this specific database |
-| `--purge-local-storage` | Also delete workerd's persisted DO storage under `.wrangler/` (requires the dev server to be stopped) |
+| `--database <db>` | Only reset this database: it alone starts fresh, every other keeps its data |
+| `--purge-local-storage` | Also delete workerd's persisted DO storage under `.wrangler/`. Refused while the dev server runs |
+| `--force` | With `--purge-local-storage`: purge even when a dev server appears to be running |
 
-**Two modes:**
+**Three modes:**
 
 | Mode | What happens |
 |------|-------------|
-| **Full reset** (default) | Bumps the epoch. All databases rotate to brand-new DO instances on the next request — fresh, empty SQLite with migrations re-applied. Clears all dev migrations and snapshots. Works while the dev server is running. |
+| **Full reset** (default) | Bumps the project epoch. All databases rotate to brand-new DO instances on the next request — fresh, empty SQLite with migrations re-applied. Clears all dev migrations and snapshots. Works while the dev server is running. |
+| **One database** (`--database <db>`) | Gives that database its own new epoch: only its instances rotate (every tenant's), the other databases — a tenant directory, say — keep their data. Clears its dev migrations and snapshot. |
 | **Keep epoch** (`--keep-epoch`) | Only clears dev migrations and snapshots. Existing DO instances keep running with their current data. |
 
-**How fresh instances work**: in dev, every DO instance key is suffixed with the current epoch (`<key>__dev_<epoch>`) by the generated stubs. Bumping the epoch makes `idFromName()` resolve to entirely new DO instances, so the old tables can never collide with the new schema. The Vite dev server watches the dev-state file and reloads automatically when the epoch changes — no restart needed.
+**How fresh instances work**: in dev, every DO instance key is suffixed with its database's epoch (`<key>__dev_<epoch>`) by the generated stubs. Bumping an epoch makes `idFromName()` resolve to entirely new DO instances, so the old tables can never collide with the new schema. The Vite dev server watches the dev-state file and reloads automatically when an epoch changes — no restart needed.
 
-**Disk space**: the previous instances' SQLite files stay orphaned under `.wrangler/state/v3/do` until you purge them. Run `db reset --purge-local-storage` (with the dev server **stopped** — workerd keeps deleted storage open and breaks with `internal error; reference = …` until restart) or simply `rm -rf .wrangler` whenever you want the disk back. With `--database <db>`, only the storage directories matching that database's DO class are purged.
+**Disk space**: the previous instances' SQLite files stay orphaned under `.wrangler/state/v3/do` until you purge them. Run `db reset --purge-local-storage` with the dev server **stopped** — workerd keeps deleted storage open and every database request fails with `internal error; reference = …` until it restarts, so the command refuses while the dev server runs (the Vite plugin records the running server in `node_modules/.cache/durable-db/dev-server.json`; a server that was killed leaves a stale record, which is ignored once its process is gone). Or simply `rm -rf .wrangler` whenever you want the disk back. With `--database <db>`, only the storage directories matching that database's DO class are purged.
 
 **Output example:**
 
@@ -486,6 +528,9 @@ db validate --verbose
 3. Builds the expected schema separately from the Drizzle definition
 4. Compares the migrated schema against the expected schema to detect drift
 5. Reports SQL errors, foreign key violations, or schema mismatches
+6. Warns (`⚠ not yet generated: …`) about what the schema change `db generate` has not written yet would do to a database that has rows — the checks `generate` applies (a `NOT NULL` column without a default, dropped columns and tables, names that may be renames)
+
+The replay runs on an **empty** database, so it proves a migration is valid SQL, not that it succeeds on a table with rows. Committed migrations are not re-checked for that: validate cannot know which of them already ran where.
 
 **Output example (success):**
 
@@ -515,6 +560,26 @@ Schema drift (migrations ran cleanly but produce a different schema than your Dr
 | `0` | All validations passed |
 | `1` | Validation errors found |
 
+### Renames
+
+drizzle-kit cannot tell a renamed column (or table) from a dropped one plus a new one. When a table has both a new and a vanished column — or the schema both a new and a vanished table — its diff asks:
+
+```
+Is about column in users table created or renamed from another column?
+❯ + about            create column
+  ~ bio › about      rename column
+```
+
+`push` and `generate` show that prompt in a terminal. Without one (CI, a piped shell, a host CLI that runs `push` in the background) they answer from the command line instead, or fail with a message naming the command and both answers:
+
+```bash
+db generate rename_bio --rename users.bio=about   # a rename: the data is kept
+db generate --rename items=products                # a table rename
+db generate --no-renames                           # create + drop: bio's data is lost
+```
+
+Names are the SQL names (snake_case, as in the migration files); a camelCase property name works too. An answer applies to the database(s) where it matches; one that matches no pending change is an error. The rename is written as drizzle-kit writes it (`` ALTER TABLE `users` RENAME COLUMN "bio" TO "about"; ``), so `push` and `generate` produce the same statement. Programmatically: `push({ renames, noRenames, interactive })`, `generate(ctx, { renames, noRenames, interactive, force })` — `interactive: false` never prompts (a host CLI starting a dev server wants that), and an unanswered question throws `SchemaRenameRequiredError` (its `describe(command)` is the message with your command's name).
+
 ### Embedding in your own CLI
 
 The commands are composable Commander commands, so a host CLI can re-use them:
@@ -530,6 +595,8 @@ program.addCommand(createDbCommand());
 // (this is exactly what the standalone `db` binary does)
 registerDbCommands(program);
 ```
+
+Messages that suggest a command (a rename answer, for one) name it as the user typed it: `mycli db generate --rename …`.
 
 ### Programmatic API
 
@@ -589,6 +656,17 @@ CREATE TABLE posts (id TEXT PRIMARY KEY, author_id TEXT REFERENCES users(id));
 
 Each chunk is tracked independently in the `__migrations` table. If a Durable Object restarts mid-migration, it resumes from the last completed chunk rather than re-running from the start.
 
+Concurrent first calls to a Durable Object share one migration run: requests that arrive while it migrates wait for it instead of applying the same statements again.
+
+### Adding a required column
+
+SQLite rejects `ALTER TABLE … ADD … NOT NULL` without a default on a table that has rows (`Cannot add a NOT NULL column with default value NULL`), and every tenant's database migrates on its own, after the deploy. So `db generate` refuses such a column (see [Unsafe statements](#db-generate)). Either:
+
+- give it a default: `currency: text().notNull().default('SEK')` — the existing rows get it; or
+- add it nullable (`currency: text()`), deploy, backfill every tenant (a job over your tenants, say), then make it `.notNull()` in a later migration.
+
+The same holds for renames: answering a rename question with "create" (or `--no-renames`) adds the new column — `NOT NULL` without a default fails the same way — and drops the old one with its data.
+
 ### Epoch System
 
 In development, each database instance key gets an epoch suffix to enable clean resets:
@@ -598,17 +676,18 @@ In development, each database instance key gets an epoch suffix to enable clean 
 | Production | `example-tenant` |
 | Development | `example-tenant__dev_m1a2b3c` |
 
-When you run `db reset` (without `--keep-epoch`), a new epoch is generated. This causes all subsequent DO accesses to create fresh instances, effectively giving you a clean database without data from previous iterations.
+When you run `db reset` (without `--keep-epoch`), a new project epoch is generated. This causes all subsequent DO accesses to create fresh instances, effectively giving you a clean database without data from previous iterations. `db reset --database <db>` gives that database an epoch of its own instead, so only its instances rotate; the next full reset moves every database back to the (new) project epoch.
 
-The epoch is a base36-encoded timestamp stored in `node_modules/.cache/durable-db/state.json`.
+Epochs are base36-encoded timestamps stored in `node_modules/.cache/durable-db/state.json` — the project's as `epoch`, a database's own as `databases.<name>.epoch`.
 
-**How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:durable-db/__devEpoch`) exporting `applyDevEpoch(key)`, and every generated stub routes its instance key through it. In dev the plugin embeds the current epoch from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches durable-db's dev cache directory and reloads on change, so both `db reset` (new epoch → fresh instances) and `db push` (new dev migration → re-embedded into the DO module) take effect on the next request without restarting.
+**How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:durable-db/__devEpoch`) exporting `applyDevEpoch(key, dbName)`, and every generated stub routes its instance key through it with its database's name. In dev the plugin embeds the epochs from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches durable-db's dev cache directory and reloads on change, so both `db reset` (new epoch → fresh instances) and `db push` (new dev migration → re-embedded into the DO module) take effect on the next request without restarting.
 
 ### Dev State Structure
 
 ```
 node_modules/.cache/durable-db/
-  state.json                          # Global state (epoch, per-db push info)
+  state.json                          # Global state (epoch, per-db epochs and push info)
+  dev-server.json                     # The running dev server (pid), while one runs
   databases/
     main/
       _snapshot.json                  # Dev snapshot (schema state)
@@ -628,12 +707,16 @@ The `state.json` file tracks:
   "databases": {
     "main": {
       "prodSnapshotHash": "abc123...",
-      "lastPush": "2024-03-15T10:30:00.000Z",
-      "devMigrationCount": 2
+      "lastPush": "2024-03-15T10:30:00.000Z"
+    },
+    "analytics": {
+      "epoch": "m1a9x2k"
     }
   }
 }
 ```
+
+A database's `epoch` is set by `db reset --database <name>`; without it the project `epoch` applies.
 
 ### Typical Workflow
 
@@ -653,6 +736,8 @@ db reset
 ```
 
 **Ready to deploy:**
+
+`db generate` writes the statements your dev database already applied through `db push` as a production migration. A dev database that applied them records that migration as applied instead of running it again (which would fail with `duplicate column name` / `already exists`), so the dev data survives the hand-off — no reset needed.
 
 ```bash
 # 1. Generate a production migration
@@ -693,12 +778,12 @@ durableDb({
 | `migrationsDir` | `string` | `'migrations'` | Directory for production migrations, relative to project root. Each database gets a subdirectory (e.g. `migrations/main/`) |
 | `contextImport` | `string` | `'durable-db/context'` | Import path for the context module (for framework integrations) |
 | `registryImport` | `string` | `'durable-db/registry'` | Import path for the action registry module (for framework integrations) |
-| `patchWranglerConfig` | `boolean` | `false` | Write missing DO bindings and sqlite migration entries to `wrangler.jsonc` automatically. Off by default — the plugin only verifies the config and logs the exact JSON to add. Only `wrangler.jsonc`/`wrangler.json` are supported (not `wrangler.toml`) |
+| `patchWranglerConfig` | `boolean` | `false` | Keep the DO bindings and sqlite migration entries in `wrangler.jsonc` in line with the databases automatically. Off by default — the plugin only verifies the config and logs the exact JSON to add. Only `wrangler.jsonc`/`wrangler.json` are supported (not `wrangler.toml`) |
 
 ### What the plugin does
 
 1. **Discovery**: Finds all `defineDatabase()` files in your databases directory (excludes `schema.ts`, `_*.ts`, `.d.ts`)
-2. **AST Parsing**: Uses Babel to extract database config and action definitions (no regexes)
+2. **AST Parsing**: Uses Babel to extract database config and action definitions (no regexes). Only modules that can define a database or actions (they mention `defineDatabase`, or import an `action` factory) are parsed — a syntax error in any other module is reported by the compiler that owns it, not by durable-db
 3. **Migration Loading**: Loads production migrations from disk; in dev mode also loads dev migrations from cache
 4. **Code Generation**: Produces a virtual module (`virtual:durable-db/__durableObjects`) containing Durable Object classes with embedded migrations and RPC dispatch methods, plus a `virtual:durable-db/__devEpoch` module that suffixes DO instance keys with the dev epoch (identity in production builds)
 5. **Action Transform**: Replaces `action()` call-sites with RPC stubs + `registerAction()` calls so actions can be called like regular functions from your worker. This applies to actions in separate files *and* actions defined in the database file itself
@@ -720,7 +805,29 @@ The plugin needs each database's Durable Object binding and a `new_sqlite_classe
 Or let the plugin write it for you: durableDb({ patchWranglerConfig: true })
 ```
 
-**Opt-in (auto-patch)**: pass `durableDb({ patchWranglerConfig: true })` and the plugin writes the missing entries for you. If your `wrangler.jsonc` contains comments, the original is backed up to `wrangler.jsonc.backup` first (re-serializing strips comments).
+**Opt-in (auto-patch)**: pass `durableDb({ patchWranglerConfig: true })` and the plugin keeps the config in line with your databases:
+
+- a new database gets its binding and a `new_sqlite_classes` migration entry;
+- a database whose class name changed (a renamed source prefix, a database moved between sources) gets a `renamed_classes` migration, so its data moves with it;
+- the binding of a database that is gone is removed (its class is no longer exported, and workerd refuses to start with a binding to it). Its class is **not** deleted: a `deleted_classes` migration deletes the data, so the plugin prints the exact entry to add when you mean it.
+
+Only the entries it adds or removes change — comments and your formatting stay as they were.
+
+It does this in its `config` hook, before `@cloudflare/vite-plugin` reads the file (durable-db is `enforce: 'pre'`): the Cloudflare plugin builds `dist/<worker>/wrangler.json` from the config it read and restarts a dev server when the file changes later, so a later patch would ship a build without the new binding and restart the first dev start. A change is logged:
+
+```
+durable-db updated wrangler.jsonc (Durable Objects: +AUDIT_DATABASE_DO → AuditDatabaseDO; migration v2: AuditDatabaseDO)
+```
+
+A CLI that wants the file settled before it starts Vite (to deploy it, say) can run the same step itself:
+
+```ts
+import { syncWranglerConfig } from 'durable-db/vite';
+
+const { modified, changes } = syncWranglerConfig({ projectRoot: process.cwd(), databasesDir: 'src/databases' });
+```
+
+While a database file does not parse, nothing is written (a partial set of databases would read as databases removed).
 
 > ⚠️ Only `wrangler.jsonc` / `wrangler.json` are supported. If your project uses `wrangler.toml`, the plugin can't verify or patch it — it will print the required config and you add the TOML equivalent yourself.
 
@@ -750,8 +857,31 @@ The plugin transforms each `action()` definition into two things:
 The stub function:
 - Validates args with ArkType
 - Checks if we're already inside the same DO (via AsyncLocalStorage) for a fast direct-call path
-- Computes the instance key (`getTenantId()` or `"global"`) and routes it through `applyDevEpoch()` (dev-epoch suffix in dev, identity in production — see [Epoch System](#epoch-system))
+- Computes the instance key (`getTenantId()` or `"global"`) and routes it through `applyDevEpoch(key, dbName)` (its database's dev-epoch suffix in dev, identity in production — see [Epoch System](#epoch-system))
 - Otherwise, resolves the DO instance via `env.BINDING.idFromName(instanceKey)` and calls `stub.rpc()`
+
+---
+
+## Testing Actions
+
+`durable-db/testing` runs actions against a real in-memory SQLite (Node's `node:sqlite`) in plain vitest — no worker pool, no Vite plugin:
+
+```ts
+import { createTestDatabase } from 'durable-db/testing';
+import { users } from '../src/databases/schema';
+import { createUser } from '../src/databases/actions/createUser';
+import { signUp } from '../src/routes/signUp';
+
+const t = await createTestDatabase({ schema: { users }, tenantId: 'acme' });
+
+await t.run(createUser, { name: 'Ann', email: 'ann@example.com' }); // validates args like production
+await createUser({ name: 'Bo', email: 'bo@example.com' });          // a direct call runs here too
+await signUp(request);                                               // so does code that calls actions
+
+t.destroy();
+```
+
+While a test database is live, an action called directly — from a page, a procedure, a job under test — runs against the newest live test database created with every table of the action's database.
 
 ---
 
@@ -939,8 +1069,17 @@ After 3 consecutive failed migration attempts, PITR restore is skipped and the e
 In development, migrations run against ephemeral state cached under `node_modules/.cache/durable-db/`. Use whichever matches your situation:
 
 - **Reset one tenant's data while keeping schema**: call `destroyDatabase()` from a route. This runs `ctx.storage.deleteAll()` on the current tenant's DO and re-runs migrations on the next call.
-- **Reset _every_ tenant's data for a database**: run `pnpm db reset` (or `pnpm db reset --database main`) — the dev server can keep running. Instance keys get a new `__dev_<epoch>` suffix, so every tenant rotates to a brand-new DO with empty SQLite on the next request. Add `--purge-local-storage` (dev server stopped) when you also want the orphaned instances' files deleted from `.wrangler/`.
+- **Reset _every_ tenant's data for one database**: run `pnpm db reset --database main` — the dev server can keep running. That database's instance keys get a new `__dev_<epoch>` suffix, so every tenant rotates to a brand-new DO with empty SQLite on the next request; the other databases keep their data.
+- **Reset every database**: `pnpm db reset`. Add `--purge-local-storage` (dev server stopped — the command refuses otherwise) when you also want the orphaned instances' files deleted from `.wrangler/`.
 - **Drop everything and re-derive migrations from the schema**: `rm -rf node_modules/.cache/durable-db` and restart `pnpm dev`. The plugin regenerates dev migrations from the current schema.
+
+### "already exists" / "duplicate column name" in dev
+
+A pending migration fails with `MigrationSchemaConflictError` when the storage already holds what it creates and the `__migrations` journal doesn't know it: migration files renamed or regenerated after the storage was created, or storage written by an older version. (The usual dev loop — `db push`, then `db generate` — is handled: see [Typical Workflow](#typical-workflow).) The error names the database; `db reset --database <name>` gives it fresh instances.
+
+### A column reads back as its own name
+
+Queries quote identifiers with backticks. SQLite reads a double-quoted identifier that names no column as a string literal — a column missing from the database (a schema change not yet migrated) would select its own name and filter on a constant — while a backticked one fails with `no such column`.
 
 ### Snapshot corruption (`_snapshot.json`)
 
@@ -1055,7 +1194,9 @@ src/
     plugins.ts               # Kysely plugins (DrizzleDefaults, Schema, DateSerialize)
     types.ts                 # TypeScript type definitions
   migrations/       # Snapshot-based migration generation
-    snapshot.ts     # Drizzle schema -> snapshot diffing
+    snapshot.ts     # Drizzle schema -> snapshot diffing (rename answers applied first)
+    renames.ts      # Rename questions: detection, --rename answers, create + drop
+    risks.ts        # What a change does to a table with rows (NOT NULL adds, drops)
     generator.ts    # Migration file reading/writing
   registry.ts       # Action registration and RPC dispatch
   vite/

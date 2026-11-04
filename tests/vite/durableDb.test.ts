@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { durableDb, databasePlugin, syncWranglerConfig } from '../../src/vite/durableDb';
+import { syncWranglerConfig as moduleSyncWranglerConfig } from '../../src/vite/modules/syncWrangler';
 import type { Plugin, ResolvedConfig } from 'vite';
 
 // ============================================================================
@@ -291,44 +292,8 @@ export const { action } = defineDatabase({ schema: { users } });
     expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
   });
 
-  it('syncWranglerConfig patches once and is silent when nothing changes', () => {
-    const configPath = path.join(tempDir, 'wrangler.jsonc');
-    fs.writeFileSync(configPath, '{"name": "my-worker"}');
-    const log = vi.fn();
-
-    const first = syncWranglerConfig({ projectRoot: tempDir, log });
-    const second = syncWranglerConfig({ projectRoot: tempDir, log });
-
-    expect(first).toMatchObject({ configPath, modified: true, databases: ['main'], error: null });
-    expect(first.changes).toEqual([
-      'Durable Objects: +MAIN_DATABASE_DO → MainDatabaseDO',
-      'migration v1: MainDatabaseDO',
-    ]);
-    expect(second.modified).toBe(false);
-    expect(log).toHaveBeenCalledTimes(1);
-  });
-
-  it('syncWranglerConfig writes nothing while a database file does not parse', () => {
-    // A partial set of databases would read as databases removed.
-    fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'broken.ts'), 'export const = ;');
-    const configPath = path.join(tempDir, 'wrangler.jsonc');
-    fs.writeFileSync(configPath, '{"name": "my-worker"}');
-
-    const result = syncWranglerConfig({ projectRoot: tempDir, log: false });
-
-    expect(result.modified).toBe(false);
-    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
-  });
-
-  it('syncWranglerConfig leaves an app without databases alone', () => {
-    fs.rmSync(path.join(tempDir, 'src', 'databases', 'main.ts'));
-    const configPath = path.join(tempDir, 'wrangler.jsonc');
-    fs.writeFileSync(configPath, '{"name": "my-worker"}');
-
-    const result = syncWranglerConfig({ projectRoot: tempDir, log: false });
-
-    expect(result).toMatchObject({ modified: false, databases: [] });
-    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
+  it('exports syncWranglerConfig from durable-db/vite for CLIs', () => {
+    expect(syncWranglerConfig).toBe(moduleSyncWranglerConfig);
   });
 });
 
@@ -548,15 +513,23 @@ describe('dev cache watcher', () => {
     // External change, like the CLI writing state.json (`db reset`)
     const { loadDevState, saveDevState } = await import('../../src/cli/state');
     const devState = loadDevState(tempDir);
-    devState.epoch = 'bumped';
-    saveDevState(tempDir, devState);
+    let bumps = 0;
 
+    // fs.watch's FSEvents stream (macOS) starts on another thread after
+    // fs.watch() returns, so a write right after configureServer can land
+    // before it listens (a real `db reset` comes long after the server
+    // started). Write again on each poll until a reload is seen; the poll
+    // interval outlasts the plugin's 100 ms reload debounce.
     await vi.waitFor(
       () => {
+        if (clientSend.mock.calls.length === 0) {
+          devState.epoch = `bumped-${++bumps}`;
+          saveDevState(tempDir, devState);
+        }
         expect(workerSend).toHaveBeenCalledWith({ type: 'full-reload' });
         expect(clientSend).toHaveBeenCalledWith({ type: 'full-reload' });
       },
-      { timeout: 3000 }
+      { timeout: 5000, interval: 500 }
     );
   });
 });
@@ -648,6 +621,47 @@ describe('transform', () => {
       `import { action } from '../databases/main';\nexport const x = (;`,
       path.join(tempDir, 'src', 'actions.ts')
     )).rejects.toThrow();
+  });
+
+  // The pre-check must admit every import the parser takes an `action`
+  // factory from — a syntax error after it proves the parse is reached.
+  it.each([
+    ['a default binding before the braces', `import main, { action } from '../databases/main';`],
+    ['a renamed factory, no spaces', `import main,{action as act} from '../databases/main';`],
+    ['a multi-line clause with a type specifier', `import {\n  type Main,\n  action,\n} from '../databases/main';`],
+    ['a comment before the braces', `import /* factory */ { action } from '../databases/main';`],
+    ['a string specifier', `import { "action" as act } from '../databases/main';`],
+  ])('still parses an action file importing the factory with %s', async (_, importLine) => {
+    const transform = plugin.transform as Function;
+    await expect(transform.call(
+      { resolve: async () => null },
+      `${importLine}\nexport const x = (;`,
+      path.join(tempDir, 'src', 'actions.ts')
+    )).rejects.toThrow();
+  });
+
+  it('transforms an action file that also imports the database module\'s default export', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'src', 'databases', 'main.ts'),
+      `import { defineDatabase } from 'durable-db';\nimport { users } from './schema';\n` +
+      `export const { action } = defineDatabase({ schema: { users } });\nexport default 1;\n`
+    );
+    const file = path.join(tempDir, 'src', 'actions', 'users.ts');
+    const code =
+      `import main, { action } from '../databases/main';\n` +
+      `export const getUser = action({ args: {}, handler: async () => main });\n`;
+
+    const transform = plugin.transform as Function;
+    const result = await transform.call(
+      { resolve: async (source: string, importer: string) => ({ id: path.resolve(path.dirname(importer), source) + '.ts' }) },
+      code,
+      file
+    );
+
+    expect(result).not.toBeNull();
+    expect(result.code).toContain('export async function getUser');
+    expect(result.code).toContain('registerAction("main", "getUser"');
+    expect(result.code).not.toContain('getUser = action(');
   });
 
   it('handles query parameters in id', async () => {

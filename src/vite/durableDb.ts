@@ -109,9 +109,17 @@ function generateDevEpochModule(
  * parse, so a syntax error in an unrelated file is reported by the compiler
  * that owns it, not as a durable-db error. A superset, not analysis: the
  * parser still decides.
+ *
+ * The parser takes an action factory from two places: destructuring a
+ * `defineDatabase()` call (DATABASE_DEFINITION), or an import specifier
+ * named `action` in any import declaration (ACTION_IMPORT). The clause
+ * before the braces may hold anything but the module specifier — a default
+ * binding (`import main, { action }`), `type`, comments, line breaks — so
+ * the gap between `import` and `{` excludes only what cannot occur in it: a
+ * quote (the `from` string, or a side-effect import), `;`, `{` and `}`.
  */
 const DATABASE_DEFINITION = /\b(?:defineDatabase|destroyDatabase)\b/;
-const ACTION_IMPORT = /\bimport\s*(?:type\s+)?\{[^}]*\baction\b[^}]*\}/;
+const ACTION_IMPORT = /\bimport\b[^;'"`{}]*\{[^}]*\baction\b[^}]*\}/;
 
 function mayDefineDatabaseCode(code: string): boolean {
   return DATABASE_DEFINITION.test(code) || ACTION_IMPORT.test(code);

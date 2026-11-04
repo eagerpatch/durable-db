@@ -139,7 +139,7 @@ export const userProfiles = table('userProfiles', {
 - Database definition files live in `src/databases/`. Files named `schema.ts`, `_*.ts`, and `.d.ts` are excluded from action discovery.
 - Actions can be defined inline in the database file or in separate files in the same directory. Both are transformed identically: `transformDatabaseFile` handles same-file actions (plus `destroyDatabase`), `transformActionFile` handles separate files.
 - Schema tables must be defined in a schema module and imported into the database file — inline table definitions can't be loaded by the migration CLI and fail loudly.
-- The Vite plugin uses Babel (not regex) for all source code analysis. `transform` first applies a cheap superset check (`mayDefineDatabaseCode`: mentions `defineDatabase`/`destroyDatabase` or imports an `action` factory) so unrelated modules are never Babel-parsed — a syntax error in a page is reported by the compiler that owns it, not as `[plugin:durable-db]`.
+- The Vite plugin uses Babel (not regex) for all source code analysis. `transform` first applies a cheap superset check (`mayDefineDatabaseCode`: mentions `defineDatabase`/`destroyDatabase`, or has an import declaration with an `action` specifier in any clause form — `import main, { action }`, `type`, comments, line breaks; it must admit everything the parser takes an action factory from) so unrelated modules are never Babel-parsed — a syntax error in a page is reported by the compiler that owns it, not as `[plugin:durable-db]`.
 - `vite` is a peer dependency, 5 through 8.
 - Build output is ESM-only via tsdown.
 - Tests mirror source structure under `tests/`.

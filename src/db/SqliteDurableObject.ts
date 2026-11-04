@@ -37,6 +37,59 @@ export type Migrations = Record<string, Migration>;
 const MAX_PITR_ATTEMPTS = 3;
 
 /**
+ * Name prefix of dev migrations. The Vite plugin embeds the squashed dev
+ * migrations (`db push`) next to the production ones in dev only, as
+ * `_dev_<name>` — production builds never contain them, so a `_dev_` row in
+ * the `__migrations` journal marks a storage that has run in dev.
+ */
+export const DEV_MIGRATION_PREFIX = '_dev_';
+
+/**
+ * Journal of the statements applied by dev migrations, written in dev only
+ * (production builds embed no dev migrations). `db generate` squashes the dev
+ * migrations into a production migration with the same statements; a pending
+ * production migration whose statements this journal holds is recorded as
+ * applied instead of executed (it would fail with "duplicate column name" or
+ * "already exists" against the schema the dev migrations already built).
+ */
+const DEV_STATEMENTS_TABLE = '__dev_migration_statements';
+
+/** A pending migration chunk. */
+interface PendingChunk {
+  name: string;
+  chunkIndex: number;
+  statements: string[];
+}
+
+/**
+ * The comparable form of a migration statement: whitespace collapsed,
+ * trailing semicolons dropped, and the `IF NOT EXISTS` that `db push` adds to
+ * a dev migration's `CREATE TABLE`/`CREATE [UNIQUE] INDEX` removed — the
+ * production migration `db generate` writes for the same change has none.
+ */
+function normalizeStatement(statement: string): string {
+  return statement
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/;+$/, '')
+    .trim()
+    .replace(/^CREATE (TABLE|INDEX|UNIQUE INDEX) IF NOT EXISTS /i, 'CREATE $1 ');
+}
+
+/**
+ * A best-effort database name for recovery hints, from the generated class
+ * name (`<PascalCase(name)>DatabaseDO`): `ReviewsFeedbackDatabaseDO` →
+ * `reviews-feedback`.
+ */
+function databaseNameFromClass(className: string): string | null {
+  const match = /^(.+?)DatabaseDO\d*$/.exec(className);
+  if (!match) return null;
+  return match[1]
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .toLowerCase();
+}
+
+/**
  * Migration attempt info returned by getMigrationAttempts()
  */
 export interface MigrationAttemptInfo {
@@ -74,13 +127,14 @@ export interface MigrationStatus {
 }
 
 /**
- * Raised when a pending migration fails with "already exists": the storage
- * holds schema objects the `__migrations` journal doesn't track. Common
- * causes: migration files were renamed or regenerated after the storage was
- * created, the storage was written by an older version of the database, or a
- * previous attempt crashed partway through a chunk without PITR. Re-running
- * can never succeed, so this carries recovery guidance instead of the raw
- * SQLITE_ERROR.
+ * Raised when a pending migration fails with "already exists" or "duplicate
+ * column name": the storage holds schema objects the `__migrations` journal
+ * doesn't track. Common causes: dev migrations (`db push`) that `db generate`
+ * squashed into a production migration the dev storage cannot replay,
+ * migration files renamed or regenerated after the storage was created, the
+ * storage written by an older version of the database, or a previous attempt
+ * that crashed partway through a chunk without PITR. Re-running can never
+ * succeed, so this carries recovery guidance instead of the raw SQLITE_ERROR.
  */
 export class MigrationSchemaConflictError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -167,9 +221,24 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   protected sql: SqlStorage;
 
   /**
+   * The name `db` commands know this database by (its file name, prefixed by
+   * its mount for a mounted source), used in recovery hints. Derived from the
+   * class name (`<PascalCase(name)>DatabaseDO`) when not set.
+   */
+  protected databaseName?: string;
+
+  /**
    * Whether migrations have been run for this instance
    */
   private migrationsApplied = false;
+
+  /**
+   * The migration run in flight, shared by every caller that arrives while it
+   * runs. `runMigrations()` reads the pending list and then awaits (the PITR
+   * probe and bookmark) before it applies anything, so two first calls racing
+   * on a boolean flag would both apply the same `CREATE TABLE`s.
+   */
+  private migrating: Promise<void> | undefined;
 
   /**
    * Cached result of PITR availability check (null = not yet checked)
@@ -214,19 +283,32 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   protected resetMigrationState(): void {
     this.migrationsApplied = false;
+    // A run still in flight belongs to the storage that was just wiped: it
+    // must neither mark the new storage migrated nor be awaited by new callers.
+    this.migrating = undefined;
     debugMigrations('Migration state reset; migrations will re-run on next access');
   }
 
   /**
-   * Ensure migrations are applied before any operation
+   * Ensure migrations are applied before any operation. Concurrent first
+   * calls share one migration run (a failed run is retried by the next call).
    */
   protected async ensureMigrations(): Promise<void> {
     if (this.migrationsApplied) {
       return;
     }
 
-    await this.runMigrations();
-    this.migrationsApplied = true;
+    if (!this.migrating) {
+      const run: Promise<void> = this.runMigrations().then(
+        () => {
+          if (this.migrating === run) this.migrationsApplied = true;
+        }
+      ).finally(() => {
+        if (this.migrating === run) this.migrating = undefined;
+      });
+      this.migrating = run;
+    }
+    await this.migrating;
   }
 
   /**
@@ -273,9 +355,25 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     `);
 
     // Collect pending migrations
-    const pending = this.collectPendingMigrations();
+    let pending = this.collectPendingMigrations();
     if (pending.length === 0) {
       return; // Nothing to do
+    }
+
+    // Dev only: a production migration that `db generate` squashed from dev
+    // migrations this storage already applied is recorded, not re-executed.
+    pending = this.settleMigrationsAppliedInDev(pending);
+    if (pending.length === 0) {
+      return;
+    }
+
+    if (pending.some((p) => p.name.startsWith(DEV_MIGRATION_PREFIX))) {
+      this.sql.exec(`
+        CREATE TABLE IF NOT EXISTS ${DEV_STATEMENTS_TABLE} (
+          statement TEXT PRIMARY KEY,
+          migration TEXT NOT NULL
+        )
+      `);
     }
 
     const hasPitr = await this.checkPitrAvailable();
@@ -396,13 +494,101 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
+   * Record pending production migrations whose every statement was already
+   * applied by this storage's dev migrations, without executing them.
+   *
+   * The dev loop is `db push` (a squashed dev migration `_dev_<hash>`, applied
+   * by the running dev server) and then `db generate`, which writes the same
+   * statements as a production migration and drops the dev one. The dev
+   * storage has the schema but its journal only knows the dev name, so the
+   * production migration would run again and fail ("duplicate column name",
+   * "already exists") on every request. Only a storage that applied dev
+   * migrations has the statements table, so this never runs in production.
+   *
+   * A migration with any chunk already applied, or with a statement no dev
+   * migration ran, is left pending. Returns the chunks still to execute.
+   */
+  private settleMigrationsAppliedInDev(pending: PendingChunk[]): PendingChunk[] {
+    const devStatements = this.readDevStatements();
+    if (!devStatements || devStatements.size === 0) return pending;
+
+    const byName = new Map<string, PendingChunk[]>();
+    for (const chunk of pending) {
+      if (chunk.name.startsWith(DEV_MIGRATION_PREFIX)) continue;
+      const chunks = byName.get(chunk.name) ?? [];
+      chunks.push(chunk);
+      byName.set(chunk.name, chunks);
+    }
+
+    const settled = new Set<string>();
+    for (const [name, chunks] of byName) {
+      if (chunks.length !== this.migrations[name].chunks.length) continue;
+
+      const statements = chunks
+        .flatMap((chunk) => chunk.statements)
+        .map(normalizeStatement)
+        .filter((statement) => statement.length > 0);
+      if (statements.length === 0) continue;
+      if (!statements.every((statement) => devStatements.has(statement))) continue;
+
+      const devMigrations = Array.from(
+        new Set(statements.map((statement) => devStatements.get(statement)!))
+      );
+
+      const record = () => {
+        const appliedAt = new Date().toISOString();
+        for (const chunk of chunks) {
+          this.sql.exec(
+            'INSERT INTO __migrations (name, chunk_index, applied_at) VALUES (?, ?, ?)',
+            name,
+            chunk.chunkIndex,
+            appliedAt
+          );
+        }
+        // Each dev statement stands in for one production statement only.
+        for (const statement of statements) {
+          this.sql.exec(`DELETE FROM ${DEV_STATEMENTS_TABLE} WHERE statement = ?`, statement);
+        }
+      };
+      const storage = this.ctx.storage as { transactionSync?: <T>(cb: () => T) => T };
+      if (typeof storage.transactionSync === 'function') {
+        storage.transactionSync(record);
+      } else {
+        record();
+      }
+
+      for (const statement of statements) devStatements.delete(statement);
+      settled.add(name);
+      console.log(
+        `[database] Recorded migration ${name} as applied without running it: ` +
+        `dev migration(s) ${devMigrations.join(', ')} already applied its statements to this storage.`
+      );
+    }
+
+    return settled.size === 0 ? pending : pending.filter((chunk) => !settled.has(chunk.name));
+  }
+
+  /**
+   * The statements this storage's dev migrations applied (normalized →
+   * the dev migration that ran it), or null when it never ran one.
+   */
+  private readDevStatements(): Map<string, string> | null {
+    const exists = this.sql.exec(
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+      DEV_STATEMENTS_TABLE
+    ).toArray();
+    if (exists.length === 0) return null;
+
+    const rows = this.sql.exec(
+      `SELECT statement, migration FROM ${DEV_STATEMENTS_TABLE}`
+    ).toArray() as Array<{ statement: string; migration: string }>;
+    return new Map(rows.map((row) => [row.statement, row.migration]));
+  }
+
+  /**
    * Collect pending migration chunks that haven't been applied yet.
    */
-  private collectPendingMigrations(): Array<{
-    name: string;
-    chunkIndex: number;
-    statements: string[];
-  }> {
+  private collectPendingMigrations(): PendingChunk[] {
     const applied = this.sql.exec(
       'SELECT name, chunk_index FROM __migrations'
     ).toArray() as Array<{ name: string; chunk_index: number }>;
@@ -415,7 +601,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       appliedMap.get(row.name)!.add(row.chunk_index);
     }
 
-    const pending: Array<{ name: string; chunkIndex: number; statements: string[] }> = [];
+    const pending: PendingChunk[] = [];
     const migrationNames = Object.keys(this.migrations).sort();
 
     for (const name of migrationNames) {
@@ -435,15 +621,14 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   /**
    * Apply a list of pending migration chunks.
    */
-  private applyMigrations(
-    pending: Array<{ name: string; chunkIndex: number; statements: string[] }>
-  ): void {
+  private applyMigrations(pending: PendingChunk[]): void {
     for (const { name, chunkIndex, statements } of pending) {
       // Track which statement is executing so the catch can report it.
       // A chunk may contain many statements and the raised error doesn't
       // carry a statement index of its own.
       let currentIndex = -1;
       let currentStatement: string | null = null;
+      const isDevMigration = name.startsWith(DEV_MIGRATION_PREFIX);
 
       const applyChunk = () => {
         for (let i = 0; i < statements.length; i++) {
@@ -463,6 +648,20 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           chunkIndex,
           new Date().toISOString()
         );
+
+        // Dev migrations journal what they ran, so the production migration
+        // `db generate` later squashes them into is recognised as applied.
+        if (isDevMigration) {
+          for (const statement of statements) {
+            const normalized = normalizeStatement(statement);
+            if (!normalized) continue;
+            this.sql.exec(
+              `INSERT OR IGNORE INTO ${DEV_STATEMENTS_TABLE} (statement, migration) VALUES (?, ?)`,
+              normalized,
+              name
+            );
+          }
+        }
       };
 
       try {
@@ -496,12 +695,12 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Translate an "already exists" failure on a pending migration into a
-   * {@link MigrationSchemaConflictError}. A chunk is only executed when the
-   * journal has no row for it, so "already exists" means storage and journal
-   * disagree about what has been applied — retrying can never succeed, and
-   * the raw SQLITE_ERROR doesn't tell the user how to get unstuck.
-   * Returns null when the error isn't this case.
+   * Translate an "already exists" or "duplicate column name" failure on a
+   * pending migration into a {@link MigrationSchemaConflictError}. A chunk is
+   * only executed when the journal has no row for it, so either error means
+   * storage and journal disagree about what has been applied — retrying can
+   * never succeed, and the raw SQLITE_ERROR doesn't tell the user how to get
+   * unstuck. Returns null when the error isn't this case.
    */
   private toSchemaConflictError(
     error: unknown,
@@ -509,7 +708,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     chunkIndex: number
   ): MigrationSchemaConflictError | null {
     const message = error instanceof Error ? error.message : String(error);
-    if (!/already exists/i.test(message)) return null;
+    if (!/already exists|duplicate column name/i.test(message)) return null;
 
     let journalNames: string[] = [];
     try {
@@ -522,20 +721,27 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
     const known = new Set(Object.keys(this.migrations));
     const untracked = journalNames.filter((n) => !known.has(n));
+    const untrackedDev = untracked.filter((n) => n.startsWith(DEV_MIGRATION_PREFIX));
+    const database = this.databaseName ?? databaseNameFromClass(this.constructor.name);
+    const reset = `db reset --database ${database ?? '<database>'}`;
 
-    const likelyCause = untracked.length > 0
-      ? `The journal records migrations this build doesn't know about (${untracked.join(', ')}), ` +
-        `which usually means the migration files were renamed or regenerated after this ` +
-        `database's storage was created.`
-      : `This usually means the storage was created by migrations under different names ` +
-        `(renamed or regenerated migration files), by an older version of this database, ` +
-        `or that a previous attempt crashed partway through a chunk.`;
+    const likelyCause = untrackedDev.length > 0
+      ? `This storage applied dev migrations (${untrackedDev.join(', ')}) that \`db generate\` ` +
+        `has since turned into production migrations, and their statements differ from ` +
+        `"${name}" (or were applied before durable-db journaled dev migration statements).`
+      : untracked.length > 0
+        ? `The journal records migrations this build doesn't know about (${untracked.join(', ')}), ` +
+          `which usually means the migration files were renamed or regenerated after this ` +
+          `database's storage was created.`
+        : `This usually means the storage was created by migrations under different names ` +
+          `(renamed or regenerated migration files), by an older version of this database, ` +
+          `or that a previous attempt crashed partway through a chunk.`;
 
     return new MigrationSchemaConflictError(
-      `Migration "${name}" (chunk ${chunkIndex}) tried to create a schema object that ` +
-      `already exists in storage, but the __migrations journal has no record of this ` +
+      `Migration "${name}" (chunk ${chunkIndex}) tried to create a table, index or column ` +
+      `that already exists in storage, but the __migrations journal has no record of this ` +
       `migration being applied. ${likelyCause} ` +
-      `To recover in local dev, run \`db reset\` to rotate to a fresh database ` +
+      `To recover in local dev, run \`${reset}\` to rotate to a fresh database ` +
       `(add --purge-local-storage to also delete the orphaned instance data, or wipe ` +
       `.wrangler/state yourself). In production, restore the original migration names, or ` +
       `baseline the journal by inserting rows into __migrations for the migrations whose ` +

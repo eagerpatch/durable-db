@@ -123,3 +123,85 @@ describe('chunk atomicity (real workerd)', () => {
     expect(tables).not.toContain('test_bad_pre');
   });
 });
+
+interface RaceEnv {
+  TEST_RACE_DO: DurableObjectNamespace & {
+    idFromName: (name: string) => DurableObjectId;
+    get: (id: DurableObjectId) => DurableObjectStub & {
+      countProducts: () => Promise<number>;
+      concurrentEnsure: (n: number) => Promise<void>;
+      journal: () => Promise<string[]>;
+    };
+  };
+  TEST_DEV_HANDOFF_DO: DurableObjectNamespace & {
+    idFromName: (name: string) => DurableObjectId;
+    get: (id: DurableObjectId) => DurableObjectStub & {
+      migrateWith: (
+        migrations: Record<string, { chunks: string[][] }>
+      ) => Promise<{ journal: string[]; columns: string[] } | { error: string; name: string }>;
+    };
+  };
+}
+
+const raceEnv = env as unknown as RaceEnv;
+
+describe('concurrent first calls (real workerd)', () => {
+  // A new tenant's first page: several calls (server components, a client
+  // component's RPC call on mount, StrictMode's double effect) reach a fresh
+  // Durable Object together. runMigrations() awaits the PITR probe/bookmark
+  // after reading the pending list; every call must wait for one run instead
+  // of re-running CREATE TABLE ("already exists" → MigrationSchemaConflictError).
+  it('lets N concurrent first calls on fresh instances all succeed, with one migration run each', async () => {
+    // Before the fix, concurrent fetch() calls lost the race on about one
+    // fresh instance in ten with "table products already exists"; twenty
+    // instances make a regression all but certain to show.
+    const failures: string[] = [];
+    for (let instance = 0; instance < 20; instance++) {
+      const stub = raceEnv.TEST_RACE_DO.get(raceEnv.TEST_RACE_DO.idFromName(`r-${crypto.randomUUID()}`));
+      const calls: Array<Promise<unknown>> = [];
+      for (let i = 0; i < 8; i++) {
+        calls.push(i % 2 === 0 ? stub.fetch(new Request('http://test/')) : stub.countProducts());
+      }
+      for (const result of await Promise.allSettled(calls)) {
+        if (result.status === 'rejected') failures.push(String(result.reason));
+      }
+      expect(await stub.journal()).toEqual(['20240101_init[0]', '20240101_init[1]']);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  it('shares one run between concurrent ensureMigrations() calls inside one invocation', async () => {
+    const stub = raceEnv.TEST_RACE_DO.get(raceEnv.TEST_RACE_DO.idFromName(`r-${crypto.randomUUID()}`));
+    await stub.concurrentEnsure(4);
+    expect(await stub.journal()).toEqual(['20240101_init[0]', '20240101_init[1]']);
+  });
+});
+
+describe('dev → production migration handoff (real workerd)', () => {
+  const init = {
+    '20261104100000_init': {
+      chunks: [['CREATE TABLE `products` (\n\t`id` text PRIMARY KEY NOT NULL\n);\n']],
+    },
+  };
+
+  it('records the generated migration as applied after the dev migration applied it', async () => {
+    const stub = raceEnv.TEST_DEV_HANDOFF_DO.get(raceEnv.TEST_DEV_HANDOFF_DO.idFromName(`d-${crypto.randomUUID()}`));
+
+    // `db push` → the dev server applies `_dev_dev_<hash>`.
+    const pushed = await stub.migrateWith({
+      ...init,
+      '_dev_dev_3b7e396f': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+    expect(pushed).toMatchObject({ columns: ['id', 'weight_grams'] });
+
+    // `db generate weight` → the same statement as a production migration.
+    const generated = await stub.migrateWith({
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+    expect(generated).toEqual({
+      journal: ['20261104100000_init[0]', '20261104111548_weight[0]', '_dev_dev_3b7e396f[0]'],
+      columns: ['id', 'weight_grams'],
+    });
+  });
+});

@@ -37,6 +37,68 @@ export class TestMigrationDO extends SqliteDurableObject {
   }
 }
 
+/**
+ * A DO whose first calls race: every method awaits ensureMigrations(), the
+ * way the generated `rpc()` does. Several first calls arriving together on a
+ * fresh instance must share one migration run.
+ */
+export class TestRaceDO extends SqliteDurableObject {
+  migrations: Migrations = {
+    '20240101_init': {
+      chunks: [
+        ['CREATE TABLE products (id TEXT PRIMARY KEY, name TEXT NOT NULL)'],
+        ['CREATE TABLE cart_items (id TEXT PRIMARY KEY, product_id TEXT NOT NULL)'],
+      ],
+    },
+  };
+
+  async countProducts(): Promise<number> {
+    await this.ensureMigrations();
+    return (this.sql.exec('SELECT count(*) AS n FROM products').toArray()[0] as { n: number }).n;
+  }
+
+  /** Several first calls inside one invocation, interleaved by the awaits. */
+  async concurrentEnsure(n: number): Promise<void> {
+    await Promise.all(Array.from({ length: n }, () => this.ensureMigrations()));
+  }
+
+  journal(): string[] {
+    return this.sql
+      .exec('SELECT name, chunk_index FROM __migrations ORDER BY name, chunk_index')
+      .toArray()
+      .map((r) => `${(r as { name: string }).name}[${(r as { chunk_index: number }).chunk_index}]`);
+  }
+}
+
+/**
+ * A DO whose migrations a test swaps between boots, standing in for a dev
+ * server that reloads its embedded migrations: `db push` adds a `_dev_`
+ * migration, `db generate` turns it into a production one.
+ */
+export class TestDevHandoffDO extends SqliteDurableObject {
+  migrations: Migrations = {};
+
+  async migrateWith(migrations: Migrations): Promise<{ journal: string[]; columns: string[] } | { error: string; name: string }> {
+    this.migrations = migrations;
+    this.resetMigrationState();
+    try {
+      await this.ensureMigrations();
+    } catch (error) {
+      return { error: (error as Error).message, name: (error as Error).name };
+    }
+    return {
+      journal: this.sql
+        .exec('SELECT name, chunk_index FROM __migrations ORDER BY name, chunk_index')
+        .toArray()
+        .map((r) => `${(r as { name: string }).name}[${(r as { chunk_index: number }).chunk_index}]`),
+      columns: this.sql
+        .exec(`SELECT name FROM pragma_table_info('products')`)
+        .toArray()
+        .map((r) => (r as { name: string }).name),
+    };
+  }
+}
+
 /** A DO with only successful migrations — used for the happy-path smoke. */
 export class TestHappyDO extends SqliteDurableObject {
   migrations: Migrations = {

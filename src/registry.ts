@@ -10,10 +10,10 @@ import { actionArgsType } from './db/actionArgs';
 // to its root, and which the cloudflare vite plugin's
 // getWorkerEntryExportTypes then fails to resolve. With arktype inlined into
 // this dist (tsdown noExternal), this is the SAME single instance durable-db
-// validates with — no second scope registry. It is arktype's `type` whose
-// validators first drop `undefined`-valued keys from plain-object args (see
-// ./db/actionArgs): an optional key passed as `undefined` validates, as the
-// inferred TypeScript type says it does.
+// validates with — no second scope registry. It is arktype's `type` from a
+// scope whose optional keys admit `undefined` (see ./db/actionArgs): an
+// optional key passed as `undefined` validates, as the inferred TypeScript
+// type says it does.
 export { actionArgsType as type };
 
 // ============================================================================

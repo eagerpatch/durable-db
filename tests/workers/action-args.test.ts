@@ -16,7 +16,7 @@ interface ArgsEnv {
 }
 
 describe('action args (real workerd)', () => {
-  it('accept an optional key given as undefined and drop it, and still reject a wrong type', async () => {
+  it('accept an optional key given as undefined, and still reject a wrong type', async () => {
     const ns = (env as unknown as ArgsEnv).TEST_ARGS_DO;
     const result = await ns.get(ns.idFromName(`a-${crypto.randomUUID()}`)).optionalKeyUndefined();
     expect(result.stub).toEqual({ productId: 'p1' });

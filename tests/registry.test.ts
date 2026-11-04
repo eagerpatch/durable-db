@@ -507,10 +507,15 @@ describe('type (the transform\'s args compiler)', () => {
   // Durable Object registers `validator: (args) => __ddType(<args>)(args)`.
   const schema = { productId: 'string', 'photoKey?': 'string' } as const;
 
-  it('lets the RPC stub pass an optional key given as undefined, and drops it', () => {
+  it('lets the RPC stub pass an optional key given as undefined', () => {
     const validated = ddType(schema).assert({ productId: 'p1', photoKey: undefined });
-    expect(validated).toEqual({ productId: 'p1' });
-    expect('photoKey' in (validated as object)).toBe(false);
+    expect(validated).toStrictEqual({ productId: 'p1', photoKey: undefined });
+  });
+
+  it('keeps a required key that admits undefined required, as 0.3.0 did', () => {
+    const required = ddType({ id: 'string', note: 'string | undefined' });
+    expect(required.assert({ id: 'a', note: undefined })).toStrictEqual({ id: 'a', note: undefined });
+    expect(() => required.assert({ id: 'a' })).toThrow(/note must be a string or undefined \(was missing\)/);
   });
 
   it('still rejects a wrong type and a missing required key', () => {
@@ -520,7 +525,10 @@ describe('type (the transform\'s args compiler)', () => {
 
   it('does the same for an args schema written as type(...)', () => {
     const validator = ddType(ddType(schema));
-    expect(validator.assert({ productId: 'p1', photoKey: undefined })).toEqual({ productId: 'p1' });
+    expect(validator.assert({ productId: 'p1', photoKey: undefined })).toStrictEqual({
+      productId: 'p1',
+      photoKey: undefined,
+    });
   });
 
   it('lets the Durable Object side (callAction) accept an optional key given as undefined', async () => {
@@ -537,6 +545,6 @@ describe('type (the transform\'s args compiler)', () => {
       { productId: 'p1', photoKey: undefined },
       createMockContext('reviews')
     );
-    expect(result).toEqual({ productId: 'p1' });
+    expect(result).toStrictEqual({ productId: 'p1', photoKey: undefined });
   });
 });

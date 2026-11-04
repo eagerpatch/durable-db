@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { defineDatabase } from '../../src/db/defineDatabase';
 import { type } from '../../src/arktypeConfig';
+import { actionArgsType } from '../../src/db/actionArgs';
 import { table, text } from '../../src/schema';
 
 describe('db', () => {
@@ -103,16 +104,27 @@ describe('db', () => {
       await expect(myAction({ name: undefined as never })).rejects.toThrow(/Invalid args/);
     });
 
-    it('accepts an undefined optional key in a type(...) args schema too', async () => {
+    it('accepts an undefined optional key in an args schema built with the registry\'s type(...)', async () => {
       const { action } = defineDatabase({ schema: {} });
       const myAction = action({
-        args: type({ name: 'string', 'photoKey?': 'string' }) as never,
+        args: actionArgsType({ name: 'string', 'photoKey?': 'string' }) as never,
         handler: async () => null,
       });
 
       await expect(myAction({ name: 'a', photoKey: undefined } as never)).rejects.toThrow(
         /called without transformation/
       );
+    });
+
+    it('keeps a required key that admits undefined required (TypeScript makes it so)', async () => {
+      const { action } = defineDatabase({ schema: {} });
+      const myAction = action({
+        args: { id: 'string', note: 'string | undefined' },
+        handler: async (db, args) => args,
+      });
+
+      await expect(myAction({ id: 'a', note: undefined })).rejects.toThrow(/called without transformation/);
+      await expect(myAction({ id: 'a' } as never)).rejects.toThrow(/note must be a string or undefined \(was missing\)/);
     });
 
     it('includes args schema keys in invalid-args error', async () => {

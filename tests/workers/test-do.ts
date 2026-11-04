@@ -1,4 +1,5 @@
 import { SqliteDurableObject, type Migrations } from '../../src/db/SqliteDurableObject';
+import { RemovedDatabaseDurableObject } from '../../src/db/RemovedDatabaseDurableObject';
 import { type as actionArgsType, registerAction, callAction } from '../../src/registry';
 import { createKyselyFromSql } from '../../src/db/kysely';
 import { integer, table, text } from '../../src/schema';
@@ -303,4 +304,13 @@ export class TestKyselyDO extends SqliteDurableObject {
       update: await attempt(() => db.updateTable('items').set({ weightGrams: 5 }).where('id', '=', 'w1').execute()),
     };
   }
+}
+
+/**
+ * What the generated module exports for the class of a removed database
+ * (`generateDurableObjectsModule`'s tombstones).
+ */
+export class TestRemovedDatabaseDO extends RemovedDatabaseDurableObject {
+  removedClassName = 'TestRemovedDatabaseDO';
+  deleteMigration = { tag: 'v2', deleted_classes: ['TestRemovedDatabaseDO'] };
 }

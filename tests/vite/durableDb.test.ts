@@ -240,9 +240,86 @@ export const { action } = defineDatabase({ schema: { users } });
 
     const error = await initializePlugin(undefined, 'build').then(() => null, (e: Error) => e);
 
-    expect(error?.message).toContain('binding class(es) the worker no longer exports (GoneDatabaseDO)');
+    expect(error?.message).toContain('binding class(es) of database(s) that no longer exist (GoneDatabaseDO)');
     expect(error?.message).not.toContain('missing');
     warnSpy.mockRestore();
+  });
+
+  describe('a removed database', () => {
+    // A database (here an extension's, mounted as `reviews`) is gone; its
+    // class stays in the migrations: only the user may delete its data.
+    beforeEach(() => {
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: {
+          bindings: [
+            { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
+            { name: 'REVIEWS_FEEDBACK_DATABASE_DO', class_name: 'ReviewsFeedbackDatabaseDO' },
+          ],
+        },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'ReviewsFeedbackDatabaseDO'] }],
+      }));
+    });
+
+    async function loadModule(options: Parameters<typeof durableDb>[0], command: 'serve' | 'build') {
+      const plugin = durableDb(options);
+      if (options?.patchWranglerConfig) {
+        await (plugin.config as Function)({ root: tempDir }, { command, mode: command === 'build' ? 'production' : 'development' });
+      }
+      await (plugin.configResolved as Function)({ root: tempDir, command } as ResolvedConfig);
+      const loaded = await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+      return typeof loaded === 'string' ? loaded : loaded.code;
+    }
+
+    it('drops the binding and exports a tombstone of the class, so dev starts and a build passes', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      for (const command of ['serve', 'build'] as const) {
+        const code = await loadModule({ patchWranglerConfig: true }, command);
+        expect(code).toContain('export class ReviewsFeedbackDatabaseDO extends RemovedDatabaseDurableObject');
+        expect(code).toContain('class MainDatabaseDO extends SqliteDurableObject');
+      }
+
+      const config = JSON.parse(fs.readFileSync(path.join(tempDir, 'wrangler.jsonc'), 'utf-8'));
+      expect(config.durable_objects.bindings).toEqual([{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }]);
+      expect(config.migrations).toEqual([
+        { tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'ReviewsFeedbackDatabaseDO'] },
+      ]);
+      // The note, once per start (the config hook; the load does not repeat it).
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      expect(warnSpy.mock.calls[0][0]).toContain('{"tag":"v2","deleted_classes":["ReviewsFeedbackDatabaseDO"]}');
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it('passes a production build without patching once the binding is gone', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'ReviewsFeedbackDatabaseDO'] }],
+      }));
+
+      const code = await loadModule(undefined, 'build');
+
+      expect(code).toContain('export class ReviewsFeedbackDatabaseDO extends RemovedDatabaseDurableObject');
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0][0]).toContain('[durable-db] note:');
+      warnSpy.mockRestore();
+    });
+
+    it('exports no tombstone once the class is deleted', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+        migrations: [
+          { tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'ReviewsFeedbackDatabaseDO'] },
+          { tag: 'v2', deleted_classes: ['ReviewsFeedbackDatabaseDO'] },
+        ],
+      }));
+      expect(await loadModule(undefined, 'build')).not.toContain('RemovedDatabaseDurableObject');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
   });
 
   describe('a mount change', () => {
@@ -280,6 +357,8 @@ export const { action } = defineDatabase({ schema: { users } });
       });
       expect(code).toContain('class FeedbackMainDatabaseDO');
       expect(code).toContain('20261101000000_init');
+      // Renamed away, the old class is no tombstone: the new one holds its data.
+      expect(code).not.toContain('RemovedDatabaseDurableObject');
       logSpy.mockRestore();
     });
 

@@ -7,7 +7,7 @@ import { debugVite } from '../utils/debug';
 
 import { discoverDatabaseFiles, discoverActionFiles, readFile } from './modules/discovery';
 import { parseDatabaseFile } from './modules/parser';
-import { checkWranglerConfig, describeWranglerCheck, type RenameConflict } from './modules/wrangler';
+import { checkWranglerConfig, describeWranglerCheck, tombstoneClasses, type RenameConflict } from './modules/wrangler';
 import { databaseSources, type DatabaseSource } from './modules/discovery';
 import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
 import { reconcileWranglerConfig, syncWranglerConfig } from './modules/syncWrangler';
@@ -573,11 +573,15 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         projectRoot: state.projectRoot,
         databasesDir: state.options.databasesDir,
       });
+      const databases = Array.from(state.databases.values());
       const code = generateDurableObjectsModule(
-        Array.from(state.databases.values()),
+        databases,
         state.options.registryImport,
         isDev,
-        actionFiles
+        actionFiles,
+        // Classes of removed databases the wrangler migrations still declare
+        // (read after the `config` hook reconciled the file).
+        tombstoneClasses(state.projectRoot, databases)
       );
 
       return { code };

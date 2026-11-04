@@ -62,8 +62,8 @@ export interface PatchResult {
   addedBindings: DurableObjectBinding[];
   /**
    * durable-db's own bindings (`<X>_DATABASE_DO` → `<X>DatabaseDO`) removed
-   * because their class is no longer a discovered database — the worker no
-   * longer exports it, and workerd refuses to start with a binding to it.
+   * because their class is no longer a discovered database (the worker
+   * exports it only as a tombstone, see {@link tombstoneClasses}).
    */
   removedBindings: DurableObjectBinding[];
   /** Classes added to a `new_sqlite_classes` migration. */
@@ -87,7 +87,8 @@ export interface PatchResult {
   /**
    * Classes of databases that are gone, still declared by the migrations.
    * Deleting a class deletes its data, so the `deleted_classes` migration is
-   * never written automatically — a warning gives the exact entry to add.
+   * never written automatically: the worker exports a tombstone of the class
+   * ({@link tombstoneClasses}) and a note gives the exact entry to add.
    */
   deletedClasses: string[];
 }
@@ -314,6 +315,42 @@ function nextTag(migrations: unknown): string {
     return match ? parseInt(match[1], 10) : 0;
   });
   return `v${numbers.length > 0 ? Math.max(...numbers) + 1 : 1}`;
+}
+
+/** A class durable-db keeps as a tombstone (see {@link tombstoneClasses}). */
+export interface TombstoneClass {
+  className: string;
+  /** The migration that deletes the class — and all its data — for good. */
+  deleteMigration: { tag: string; deleted_classes: string[] };
+}
+
+/**
+ * The classes of removed databases the worker must still export: of
+ * durable-db's naming, declared live by wrangler.jsonc's migrations (created
+ * or renamed to, and not deleted or renamed away since), defined by none of
+ * `databases`. @cloudflare/vite-plugin wraps every class the config names and
+ * Cloudflare refuses a deploy that drops a class with data, but only a
+ * `deleted_classes` migration drops one — deleting its data, which durable-db
+ * never decides for the user. So the generated module exports a tombstone of
+ * each (`RemovedDatabaseDurableObject`): storage untouched, every call
+ * refused. Read like the reconciliation reads the config: wrangler.jsonc/json
+ * only; none when there is no such file or it does not parse.
+ */
+export function tombstoneClasses(projectRoot: string, databases: DatabaseInfo[]): TombstoneClass[] {
+  const configPath = findWranglerConfig(projectRoot);
+  if (!configPath) return [];
+  let config: WranglerConfig;
+  try {
+    config = parseWranglerConfig(fs.readFileSync(configPath, 'utf-8'));
+  } catch (error) {
+    debugVite('Failed to parse wrangler config for tombstones: %O', error);
+    return [];
+  }
+  const discovered = new Set(databases.map((db) => db.className));
+  const tag = nextTag(config.migrations);
+  return [...declaredClasses(config.migrations)]
+    .filter((className) => isDurableDbClassName(className) && !discovered.has(className))
+    .map((className) => ({ className, deleteMigration: { tag, deleted_classes: [className] } }));
 }
 
 interface Reconciliation {
@@ -703,21 +740,24 @@ function removeElement(text: string, elementPath: JSONPath): string {
   return result;
 }
 
-/** The warning for classes whose `deleted_classes` migration only the user may write. */
-function deletedClassesWarning(file: string, classes: string[], tag: string): string {
+/**
+ * The note for classes whose `deleted_classes` migration only the user may
+ * write: the worker exports them as tombstones meanwhile, so nothing fails.
+ */
+function deletedClassesNote(file: string, classes: string[], tag: string): string {
   const entry = JSON.stringify({ tag, deleted_classes: classes });
   const list = classes.join(', ');
+  const one = classes.length === 1;
   return (
-    `[durable-db] ${file}: ${list} ${classes.length === 1 ? 'is' : 'are'} no longer a discovered ` +
-    `database, but the migrations still declare ${classes.length === 1 ? 'it' : 'them'}. ` +
-    `If ${classes.length === 1 ? 'it was' : 'they were'} deployed, Cloudflare keeps ` +
-    `${classes.length === 1 ? 'its' : 'their'} data and refuses a worker that no longer exports ` +
-    `${classes.length === 1 ? 'the class' : 'the classes'}. To delete ${classes.length === 1 ? 'it' : 'them'} ` +
-    `— and ALL ${classes.length === 1 ? 'its' : 'their'} data — add this migration to "migrations" yourself:\n` +
+    `[durable-db] note: ${file}: ${list} ${one ? 'is' : 'are'} no longer a discovered database, but ` +
+    `the migrations still declare ${one ? 'it' : 'them'}. The worker exports ${one ? 'it' : 'them'} as ` +
+    `${one ? 'a tombstone' : 'tombstones'} that keep${one ? 's' : ''} ${one ? 'its' : 'their'} data untouched ` +
+    `and refuse${one ? 's' : ''} every call (410 Gone), so dev starts and deploys pass; restoring the ` +
+    `database brings the data back. To delete ${one ? 'it' : 'them'} — and ALL ${one ? 'its' : 'their'} ` +
+    `data — add this migration to "migrations" yourself:\n` +
     `  ${entry}\n` +
-    `If ${classes.length === 1 ? 'it was' : 'they were'} never deployed, remove ${list} from ` +
-    `${classes.length === 1 ? 'its' : 'their'} new_sqlite_classes entry instead. ` +
-    `To keep the data, restore the database.`
+    `If ${one ? 'it was' : 'they were'} never deployed, remove ${list} from ` +
+    `${one ? 'its' : 'their'} new_sqlite_classes entry instead.`
   );
 }
 
@@ -728,8 +768,8 @@ function deletedClassesWarning(file: string, classes: string[], tag: string): st
  * place so its comments, formatting and trailing newline survive:
  * - adds a binding and a `new_sqlite_classes` migration for each new database;
  * - removes durable-db's own bindings (`<X>_DATABASE_DO` → `<X>DatabaseDO`)
- *   whose class is no longer discovered — a binding to a class the worker no
- *   longer exports keeps workerd from starting;
+ *   whose class is no longer discovered (the worker exports it only as a
+ *   tombstone);
  * - writes a `renamed_classes` migration when a database of a mounted source
  *   changed its class name unambiguously (a mount change), so its deployed
  *   data moves with it — and moves the old database's migrations directory
@@ -738,7 +778,8 @@ function deletedClassesWarning(file: string, classes: string[], tag: string): st
  *   directories exist, or several old ones): neither a rename nor a new class
  *   is written, `conflicts` lists it and a warning gives both ways out;
  * - never deletes a class (that deletes its data): a removed database's class
- *   gets a warning with the exact `deleted_classes` migration to add by hand.
+ *   stays, exported as a tombstone ({@link tombstoneClasses}), and a note
+ *   gives the exact `deleted_classes` migration to add by hand.
  * Bindings of other names, and bindings to other workers' classes
  * (`script_name`), are never touched.
  */
@@ -834,7 +875,7 @@ export function patchWranglerConfig(
       return tag;
     };
     if (plan.deletedClasses.length > 0) {
-      console.warn(deletedClassesWarning(file, plan.deletedClasses, suggestTag()));
+      console.warn(deletedClassesNote(file, plan.deletedClasses, suggestTag()));
     }
     for (const conflict of plan.conflicts) {
       console.warn(renameConflictWarning(file, projectRoot, conflict, databases, suggestTag()));
@@ -953,13 +994,14 @@ export interface WranglerCheckResult {
   missingSqliteClasses: string[];
   /**
    * durable-db's own bindings to a class that is no longer a discovered
-   * database: workerd refuses to start with them.
+   * database (exported only as a tombstone): a production build fails on them.
    */
   staleBindings: DurableObjectBinding[];
   /**
    * Classes of durable-db's naming the migrations still declare but no
-   * discovered database has: a rename needs a `renamed_classes` migration, a
-   * removal a hand-written `deleted_classes` one.
+   * discovered database has: a rename needs a `renamed_classes` migration; a
+   * removed database's class is no failure — the worker exports a tombstone
+   * of it until the user adds the `deleted_classes` migration (a note says how).
    */
   staleClasses: string[];
   /** The `renamed_classes` entries the config lacks (a mount change). */
@@ -996,14 +1038,8 @@ export function describeWranglerCheck(check: WranglerCheckResult): string {
   }
   if (check.staleBindings.length > 0) {
     parts.push(
-      `binding class(es) the worker no longer exports (${check.staleBindings.map((b) => b.class_name).join(', ')})`
+      `binding class(es) of database(s) that no longer exist (${check.staleBindings.map((b) => b.class_name).join(', ')})`
     );
-  }
-  const deleted = check.staleClasses.filter(
-    (c) => !check.renamedClasses.some((r) => r.from === c) && !check.conflicts.some((r) => r.from === c)
-  );
-  if (deleted.length > 0) {
-    parts.push(`declaring class(es) of database(s) that no longer exist (${deleted.join(', ')})`);
   }
   if (check.conflicts.length > 0) {
     parts.push(
@@ -1063,11 +1099,13 @@ export function checkWranglerConfig(
     ...plan.conflicts.map((c) => c.from),
     ...plan.deletedClasses,
   ];
+  // A removed database's class is no failure: the worker exports its tombstone.
   result.ok =
     result.missingBindings.length === 0 &&
     result.missingSqliteClasses.length === 0 &&
     result.staleBindings.length === 0 &&
-    result.staleClasses.length === 0;
+    plan.renamedClasses.length === 0 &&
+    plan.conflicts.length === 0;
 
   const existingMigrations = Array.isArray(config.migrations) ? config.migrations : [];
   const migration =
@@ -1131,20 +1169,17 @@ export function checkWranglerConfig(
     );
   }
 
-  if (result.staleBindings.length > 0 || plan.deletedClasses.length > 0 || plan.conflicts.length > 0) {
+  if (result.staleBindings.length > 0 || plan.conflicts.length > 0) {
     const lines: string[] = [];
     if (result.staleBindings.length > 0) {
       lines.push(
         `remove the Durable Object binding(s) ${result.staleBindings.map((b) => `${b.name} (${b.class_name})`).join(', ')}: ` +
-        `the worker no longer exports ${result.staleBindings.length === 1 ? 'that class' : 'those classes'}, ` +
-        `and workerd refuses to start with a binding to it`
+        `no database defines ${result.staleBindings.length === 1 ? 'that class' : 'those classes'} any more ` +
+        `(the worker exports ${result.staleBindings.length === 1 ? 'it' : 'them'} only as a tombstone)`
       );
     }
     // The standalone warnings, as items of this one's list.
     const item = (warning: string) => warning.replace(`[durable-db] ${file}: `, '');
-    if (plan.deletedClasses.length > 0) {
-      lines.push(item(deletedClassesWarning(file, plan.deletedClasses, suggestTag())));
-    }
     for (const conflict of plan.conflicts) {
       lines.push(item(renameConflictWarning(file, projectRoot, conflict, databases, suggestTag())));
     }
@@ -1155,6 +1190,9 @@ export function checkWranglerConfig(
         ? ''
         : `\nOr let the plugin reconcile the bindings for you: durableDb({ patchWranglerConfig: true })`)
     );
+  }
+  if (plan.deletedClasses.length > 0) {
+    console.warn(deletedClassesNote(file, plan.deletedClasses, suggestTag()));
   }
 
   return result;

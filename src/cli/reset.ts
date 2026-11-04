@@ -7,8 +7,11 @@ import {
   generateEpoch,
   clearDatabaseDevState,
   getDevPaths,
+  forgetDatabaseDevState,
+  runningDevServer,
+  type DevState,
 } from './state';
-import { discoverDatabases } from './shared';
+import { discoverDatabases, selectDatabases } from './shared';
 import { debugCli } from '../utils/debug';
 
 // ============================================================================
@@ -23,7 +26,11 @@ export interface ResetContext {
 }
 
 export interface ResetOptions {
-  /** Only reset this database */
+  /**
+   * Only reset this database: it gets its own new dev epoch (fresh instances
+   * for it alone — every other database keeps its data). An unknown name
+   * throws UnknownDatabaseError.
+   */
   database?: string;
   /** Don't bump the epoch (only clear dev migrations) */
   keepEpoch?: boolean;
@@ -32,13 +39,33 @@ export interface ResetOptions {
    *
    * Not needed for a fresh start — the epoch bump already rotates every
    * database to a brand-new DO instance. This only reclaims the disk space
-   * of the orphaned instances, and requires the dev server to be stopped.
+   * of the orphaned instances, and refuses while a dev server runs (workerd
+   * keeps the deleted files open: every database request fails until it
+   * restarts) unless `force` is set.
    */
   purgeLocalStorage?: boolean;
+  /** Purge even when a dev server appears to be running. */
+  force?: boolean;
+}
+
+/** `--purge-local-storage` while the project's dev server runs. */
+export class DevServerRunningError extends Error {
+  constructor(readonly pid: number) {
+    super(
+      `A dev server is running for this project (pid ${pid}). Purging local Durable Object storage under it ` +
+      `breaks every database request until it restarts (workerd keeps the deleted files open). ` +
+      `Stop the dev server first, or reset without --purge-local-storage — the new epoch already gives ` +
+      `fresh databases. Pass --force to purge anyway.`
+    );
+    this.name = 'DevServerRunningError';
+  }
 }
 
 export interface ResetResult {
-  /** New epoch value (null if keepEpoch was true) */
+  /**
+   * New epoch value (null if keepEpoch was true) — the project's, or with
+   * `database` that database's own.
+   */
   newEpoch: string | null;
   /** Databases that were reset */
   databases: string[];
@@ -124,7 +151,7 @@ export async function reset(
   options: ResetOptions = {}
 ): Promise<ResetResult> {
   const { projectRoot = process.cwd(), databasesDir = 'src/databases' } = ctx;
-  const { database: targetDb, keepEpoch = false, purgeLocalStorage = false } = options;
+  const { database: targetDb, keepEpoch = false, purgeLocalStorage = false, force = false } = options;
 
   const result: ResetResult = {
     newEpoch: null,
@@ -132,38 +159,54 @@ export async function reset(
     clearedStorageDirs: [],
   };
 
+  // Every check before the first change: an unknown --database name, a purge
+  // under a running dev server.
+  const target = targetDb
+    ? selectDatabases({ projectRoot, databasesDir, migrationsDir: 'migrations', database: targetDb })[0]
+    : null;
+  if (purgeLocalStorage && !force) {
+    const server = runningDevServer(projectRoot);
+    if (server) throw new DevServerRunningError(server.pid);
+  }
+
   // Load current dev state
   const devState = loadDevState(projectRoot);
 
-  // Bump epoch if requested
-  if (!keepEpoch) {
-    const newEpoch = generateEpoch();
-    devState.epoch = newEpoch;
-    result.newEpoch = newEpoch;
-    debugCli('New epoch: %s', newEpoch);
-  }
-
-  // If targeting specific database, only reset that one
-  if (targetDb) {
-    clearDatabaseDevState(projectRoot, targetDb);
-    delete devState.databases[targetDb];
-    result.databases.push(targetDb);
-    debugCli('Reset %s', targetDb);
+  // If targeting specific database, only reset that one: its own epoch, so
+  // only its instance keys rotate.
+  if (target) {
+    clearDatabaseDevState(projectRoot, target.name);
+    if (keepEpoch) {
+      forgetDatabaseDevState(devState, target.name);
+    } else {
+      const newEpoch = freshEpoch(devState);
+      devState.databases[target.name] = { epoch: newEpoch };
+      result.newEpoch = newEpoch;
+      debugCli('New epoch for %s: %s', target.name, newEpoch);
+    }
+    result.databases.push(target.name);
+    debugCli('Reset %s', target.name);
 
     if (purgeLocalStorage) {
-      const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir: 'migrations', database: targetDb });
-      const className = databases[0]?.className;
-      if (className) {
-        result.clearedStorageDirs = clearLocalDoStorage(projectRoot, className);
-      }
+      result.clearedStorageDirs = clearLocalDoStorage(projectRoot, target.className);
     }
   } else {
+    // Bump the project epoch if requested — every database starts fresh, so
+    // the databases' own epochs go too.
+    if (!keepEpoch) {
+      const newEpoch = freshEpoch(devState);
+      devState.epoch = newEpoch;
+      devState.databases = {};
+      result.newEpoch = newEpoch;
+      debugCli('New epoch: %s', newEpoch);
+    }
+
     // Discover all databases and reset them
     const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir: 'migrations' });
 
     for (const db of databases) {
       clearDatabaseDevState(projectRoot, db.name);
-      delete devState.databases[db.name];
+      forgetDatabaseDevState(devState, db.name);
       result.databases.push(db.name);
       debugCli('Reset %s', db.name);
     }
@@ -176,7 +219,7 @@ export async function reset(
       for (const dir of dirs) {
         if (!result.databases.includes(dir)) {
           clearDatabaseDevState(projectRoot, dir);
-          delete devState.databases[dir];
+          forgetDatabaseDevState(devState, dir);
           debugCli('Cleaned up orphaned: %s', dir);
         }
       }
@@ -191,6 +234,14 @@ export async function reset(
   saveDevState(projectRoot, devState);
 
   return result;
+}
+
+/** A new epoch, distinct from every one in use (two resets can share a millisecond). */
+function freshEpoch(devState: DevState): string {
+  const used = new Set([devState.epoch, ...Object.values(devState.databases).map((db) => db?.epoch)]);
+  let epoch = generateEpoch();
+  for (let n = 1; used.has(epoch); n++) epoch = `${generateEpoch()}${n.toString(36)}`;
+  return epoch;
 }
 
 /**

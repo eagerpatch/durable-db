@@ -68,6 +68,8 @@ export interface PatchResult {
   removedBindings: DurableObjectBinding[];
   /** Classes added to a `new_sqlite_classes` migration. */
   newClasses: string[];
+  /** The tag of the migration written for `newClasses` and `renamedClasses`, if any. */
+  migrationTag: string | null;
   /**
    * Classes renamed by a `renamed_classes` migration: a database of a mounted
    * source whose class name changed (its mount changed, or it moved into a
@@ -745,20 +747,11 @@ export function patchWranglerConfig(
   databases: DatabaseInfo[]
 ): PatchResult {
   const configPath = findWranglerConfig(projectRoot);
-  const empty = {
-    addedBindings: [],
-    removedBindings: [],
-    newClasses: [],
-    renamedClasses: [],
-    movedMigrations: [],
-    conflicts: [],
-    deletedClasses: [],
-  };
 
   if (!configPath) {
     console.warn('[db] wrangler.jsonc/json not found');
     logRequiredConfig(databases);
-    return { modified: false, configPath: null, error: null, ...empty };
+    return unchangedPatch(null);
   }
 
   const file = path.basename(configPath);
@@ -809,9 +802,10 @@ export function patchWranglerConfig(
 
     // Migrations: one new tag for the classes created and renamed.
     const migrations = Array.isArray(config.migrations) ? config.migrations : [];
-    if (plan.newClasses.length > 0 || plan.renamedClasses.length > 0) {
+    const migrationTag = plan.newClasses.length > 0 || plan.renamedClasses.length > 0 ? nextTag(migrations) : null;
+    if (migrationTag) {
       const migration: WranglerMigration = {
-        tag: nextTag(migrations),
+        tag: migrationTag,
         ...(plan.newClasses.length > 0 && { new_sqlite_classes: plan.newClasses }),
         ...(plan.renamedClasses.length > 0 && { renamed_classes: plan.renamedClasses }),
       };
@@ -826,17 +820,13 @@ export function patchWranglerConfig(
       debugVite('Updated %s with DO bindings', file);
     }
 
-    for (const binding of plan.removedBindings) {
-      console.log(
-        `[durable-db] ${file}: removed the Durable Object binding ${binding.name} — ` +
-        `${binding.class_name} is no longer a discovered database.`
-      );
-    }
+    // What changed is summed up by the caller (`reconcileWranglerConfig`);
+    // a rename also gets the line that says what happens to its data.
     for (const rename of plan.renamedClasses) {
       console.log(renameLog(file, projectRoot, rename, plan.migrationsMoves.get(rename.to)));
     }
     // Suggested migrations get tags after the one just written, one each.
-    const written = plan.newClasses.length > 0 || plan.renamedClasses.length > 0 ? [{ tag: nextTag(migrations) }] : [];
+    const written = migrationTag ? [{ tag: migrationTag }] : [];
     const suggested: Array<{ tag: string }> = [...migrations, ...written];
     const suggestTag = () => {
       const tag = nextTag(suggested);
@@ -857,6 +847,7 @@ export function patchWranglerConfig(
       addedBindings: plan.addBindings,
       removedBindings: plan.removedBindings,
       newClasses: plan.newClasses,
+      migrationTag,
       renamedClasses: plan.renamedClasses,
       movedMigrations,
       conflicts: plan.conflicts,
@@ -865,7 +856,39 @@ export function patchWranglerConfig(
   } catch (error) {
     debugVite('Failed to patch wrangler config: %O', error);
     logRequiredConfig(databases);
-    return { modified: false, configPath, error: error as Error, ...empty, movedMigrations };
+    return { ...unchangedPatch(configPath, error as Error), movedMigrations };
+  }
+}
+
+/** A {@link PatchResult} that changed nothing. */
+export function unchangedPatch(configPath: string | null, error: Error | null = null): PatchResult {
+  return {
+    modified: false,
+    configPath,
+    error,
+    addedBindings: [],
+    removedBindings: [],
+    newClasses: [],
+    migrationTag: null,
+    renamedClasses: [],
+    movedMigrations: [],
+    conflicts: [],
+    deletedClasses: [],
+  };
+}
+
+/**
+ * Whether the config at `configPath` binds any of durable-db's own classes
+ * (the bindings {@link patchWranglerConfig} reconciles). An unreadable config
+ * binds none.
+ */
+export function bindsDurableDbClasses(configPath: string | null): boolean {
+  if (!configPath) return false;
+  try {
+    const config = parseWranglerConfig(fs.readFileSync(configPath, 'utf-8'));
+    return (config.durable_objects?.bindings ?? []).some(isDurableDbBinding);
+  } catch {
+    return false;
   }
 }
 

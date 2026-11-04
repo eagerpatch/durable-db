@@ -5,7 +5,7 @@ import {
   loadDevMigrations,
   clearDevMigrations,
 } from './state';
-import { discoverDatabases, loadSchema, diffSchema } from './shared';
+import { discoverDatabases, selectDatabases, diffDatabases, type DiffResult, type RenameResolutionOptions } from './shared';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
@@ -13,11 +13,13 @@ import { debugCli } from '../utils/debug';
 // Types
 // ============================================================================
 
-export interface PushContext {
+export interface PushContext extends RenameResolutionOptions {
   projectRoot?: string;
   databasesDir?: string | DatabaseSource[];
   migrationsDir?: string;
   verbose?: boolean;
+  /** Only push this database (an unknown name throws UnknownDatabaseError). */
+  database?: string;
 }
 
 export interface PushResult {
@@ -25,6 +27,12 @@ export interface PushResult {
   hasChanges: boolean;
   statements: string[];
   migrationName: string | null;
+  /**
+   * What the pending change risks on a database that has rows — a NOT NULL
+   * column without a default fails the dev migration on every table with
+   * rows (and `db generate` refuses it), a dropped column/table loses data.
+   */
+  warnings: string[];
 }
 
 // ============================================================================
@@ -48,47 +56,41 @@ export async function push(ctx: PushContext = {}): Promise<PushResult[]> {
   const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
   const results: PushResult[] = [];
 
-  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir });
+  const databases = selectDatabases({ projectRoot, databasesDir, migrationsDir, database: ctx.database });
 
   if (databases.length === 0) {
     debugCli('No databases found');
     return results;
   }
 
-  for (const db of databases) {
-    const result = await pushDatabase(projectRoot, db);
-    results.push(result);
+  // Every diff first: an unanswered rename question in one database leaves
+  // the dev migrations of all of them untouched.
+  const diffs = await diffDatabases(projectRoot, databases, ctx);
+  for (const { db, diff } of diffs) {
+    results.push(writeDevMigration(projectRoot, db, diff));
   }
 
   return results;
 }
 
 /**
- * Push a single database
- *
- * Always diffs from the production snapshot to the current schema,
- * producing a single squashed dev migration with a deterministic
- * content-hash name.
+ * Write a database's squashed dev migration: the diff from the production
+ * snapshot to the current schema, with a deterministic content-hash name.
  */
-async function pushDatabase(
+function writeDevMigration(
   projectRoot: string,
   db: DatabaseInfo,
-): Promise<PushResult> {
+  diff: DiffResult | null,
+): PushResult {
   const result: PushResult = {
     database: db.name,
     hasChanges: false,
     statements: [],
     migrationName: null,
+    warnings: [],
   };
 
-  const schema = await loadSchema(db, projectRoot);
-  if (!schema) {
-    return result;
-  }
-
-  const diff = await diffSchema(schema, db.migrationsDir);
-
-  if (!diff.hasChanges) {
+  if (!diff || !diff.hasChanges) {
     debugCli('No changes for %s', db.name);
     return result;
   }
@@ -123,6 +125,7 @@ async function pushDatabase(
   result.hasChanges = true;
   result.statements = diff.statements;
   result.migrationName = migrationName;
+  result.warnings = diff.risks.map((risk) => risk.message);
 
   debugCli('Generated %s for %s (%d statements)', migrationName, db.name, diff.statements.length);
 
@@ -142,5 +145,6 @@ export async function pushOne(ctx: PushContext = {}, dbName: string): Promise<Pu
     return null;
   }
 
-  return await pushDatabase(projectRoot, databases[0]);
+  const [{ db, diff }] = await diffDatabases(projectRoot, databases, ctx);
+  return writeDevMigration(projectRoot, db, diff);
 }

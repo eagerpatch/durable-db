@@ -41,3 +41,38 @@ describe('createDbCommand', () => {
     expect(subcommandNames(dbGroup!)).toEqual(ALL_SUBCOMMANDS);
   });
 });
+
+describe('options', () => {
+  const option = (cmd: Command, name: string, flag: string) =>
+    cmd.commands.find((c) => c.name() === name)!.options.some((o) => o.long === flag);
+
+  it('every command that filters by database takes --database', () => {
+    const db = createDbCommand();
+    for (const name of ALL_SUBCOMMANDS) {
+      expect(option(db, name, '--database')).toBe(true);
+    }
+  });
+
+  it('push and generate take rename answers', () => {
+    const db = createDbCommand();
+    for (const name of ['push', 'generate']) {
+      expect(option(db, name, '--rename')).toBe(true);
+      expect(option(db, name, '--no-renames')).toBe(true);
+    }
+    expect(option(db, 'generate', '--force')).toBe(true);
+    expect(option(db, 'reset', '--force')).toBe(true);
+  });
+
+  it('collects repeated --rename answers', async () => {
+    const db = createDbCommand();
+    const generate = db.commands.find((c) => c.name() === 'generate')!;
+    let seen: Record<string, unknown> = {};
+    generate.action((_name, options) => { seen = options; });
+    await db.parseAsync(
+      ['generate', 'x', '--rename', 'a.b=c', '--rename', 'd=e', '--no-renames'],
+      { from: 'user' }
+    );
+    expect(seen.rename).toEqual(['a.b=c', 'd=e']);
+    expect(seen.renames).toBe(false);
+  });
+});

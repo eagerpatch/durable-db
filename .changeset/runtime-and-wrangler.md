@@ -50,7 +50,18 @@ Runtime and wrangler config fixes found by building an app on durable-db through
   them when patching is off, with an error that names what is missing and what is stale
   (`describeWranglerCheck()`). A rename target is no longer reported as a missing class too, and the
   suggested migration takes the next free tag. `PatchResult` gains `addedBindings`, `removedBindings`,
-  `newClasses`, `renamedClasses`, `movedMigrations`, `conflicts` and `deletedClasses`.
+  `newClasses`, `migrationTag`, `renamedClasses`, `movedMigrations`, `conflicts` and `deletedClasses`.
+- **wrangler.jsonc is patched before anything reads it.** With `patchWranglerConfig: true` the plugin
+  reconciles the file in its `config` hook, before `@cloudflare/vite-plugin` reads it. Patched lazily, a
+  build emitted the `wrangler.json` it had read before the patch — a database added since the last build
+  shipped unbound, without its migration — and the first dev start restarted mid-start (no URLs printed, an
+  unhandled rejection logged). A refused rename stops the plugin right there. A change is logged in one line
+  (`durable-db updated wrangler.jsonc (Durable Objects: +AUDIT_DATABASE_DO → AuditDatabaseDO; migration v2:
+  …)`, removals and renames included); nothing is written while a database file does not parse. Later, the
+  plugin reconciles again only when the set of databases changes (one added or remounted while the dev
+  server runs). `syncWranglerConfig({ projectRoot, databasesDir, migrationsDir })` from `durable-db/vite`
+  runs the same step for CLIs that want the file settled before Vite starts; it returns the `PatchResult`
+  (`conflicts` included) with the databases, the files that did not parse and the summary's `changes`.
 - **wrangler.jsonc edits keep the file as you wrote it.** Comments, formatting, the indentation style,
   line endings and the trailing newline all survive. Only the entries added or removed change, and one-line
   arrays stay on one line. No `wrangler.jsonc.backup` is written any more. The config is parsed as

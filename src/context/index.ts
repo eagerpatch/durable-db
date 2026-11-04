@@ -39,19 +39,28 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
 /**
  * Inside a Durable Object the instance key IS the tenant (per-tenant DBs key
  * their instances by tenant id, plus an optional `__dev_<epoch>` suffix in
- * dev). The registry publishes its DoContext store getter on globalThis — see
- * the note there for why this is not a module import — so getTenantId() works
- * in action handlers without the worker-side resolver, which the DO execution
- * context never registers.
+ * dev — the database's own epoch after `db reset --database`, else the
+ * project's). The registry publishes its DoContext store getter on globalThis
+ * — see the note there for why this is not a module import — so getTenantId()
+ * works in action handlers without the worker-side resolver, which the DO
+ * execution context never registers.
  */
 function tenantIdFromDoContext(): string | null {
   const getStore = (globalThis as Record<symbol, unknown>)[
     Symbol.for('durable-db.doContext')
   ] as (() => { instanceKey?: string } | undefined) | undefined;
   const key = getStore?.()?.instanceKey;
-  if (!key || key === 'global') return null;
-  const suffixAt = key.lastIndexOf('__dev_');
-  return suffixAt === -1 ? key : key.slice(0, suffixAt);
+  if (!key) return null;
+  const tenant = stripDevEpoch(key);
+  // A global database's instance has no tenant — in dev too, where its key
+  // carries the epoch suffix (`global__dev_<epoch>`).
+  return tenant === 'global' ? null : tenant;
+}
+
+/** An instance key without its dev-epoch suffix (`<key>__dev_<epoch>` → `<key>`). */
+function stripDevEpoch(instanceKey: string): string {
+  const suffixAt = instanceKey.lastIndexOf('__dev_');
+  return suffixAt === -1 ? instanceKey : instanceKey.slice(0, suffixAt);
 }
 
 export function getTenantId(): string {

@@ -17,10 +17,11 @@ const generate =
 // ============================================================================
 
 /**
- * Virtual module (served by the Vite plugin) exporting `applyDevEpoch(key)`.
- * In dev it suffixes instance keys with the current dev epoch so `db reset`
- * (which bumps the epoch) yields fresh DO instances; in production builds it
- * is the identity function.
+ * Virtual module (served by the Vite plugin) exporting
+ * `applyDevEpoch(key, dbName)`. In dev it suffixes instance keys with the
+ * database's dev epoch so `db reset` (which bumps the project epoch, or with
+ * `--database` that database's own) yields fresh DO instances; in production
+ * builds it is the identity function.
  */
 export const DEV_EPOCH_IMPORT = 'virtual:durable-db/__devEpoch';
 
@@ -928,8 +929,9 @@ function buildDoShortPath(config: StubConfig): t.Statement[] {
 }
 
 /**
- * Build `applyDevEpoch(<baseKey>)` — instance keys always pass through the
- * dev-epoch helper so `db reset` can rotate to fresh DO instances in dev.
+ * Build `applyDevEpoch(<baseKey>, "<dbName>")` — instance keys always pass
+ * through the dev-epoch helper so `db reset` can rotate to fresh DO instances
+ * in dev; the database name picks its own epoch after `db reset --database`.
  */
 function buildInstanceKeyExpr(database: DatabaseInfo): t.CallExpression {
   const baseKeyExpr =
@@ -937,7 +939,7 @@ function buildInstanceKeyExpr(database: DatabaseInfo): t.CallExpression {
       ? t.stringLiteral('global')
       : t.callExpression(t.identifier('getTenantId'), []);
 
-  return t.callExpression(t.identifier('applyDevEpoch'), [baseKeyExpr]);
+  return t.callExpression(t.identifier('applyDevEpoch'), [baseKeyExpr, t.stringLiteral(database.name)]);
 }
 
 function buildStubBodyStatements(config: StubConfig): t.Statement[] {

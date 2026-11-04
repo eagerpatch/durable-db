@@ -3,11 +3,20 @@ import { resolveImportPath } from '../vite/modules/discovery';
 import { loadViteAliases } from '../vite/modules/aliasResolver';
 import {
   loadMigrationFiles,
+  loadSnapshot,
   buildAndLoadSchema,
   generateCreateTableSQL,
 } from '../migrations/generator';
+import {
+  analyzeMigrationRisks,
+  describeAmbiguity,
+  exampleRenames,
+  findAmbiguities,
+  generateSnapshotFromSchema,
+  snapshotsEqual,
+} from '../migrations/snapshot';
 import { loadDevMigrations } from './state';
-import { discoverDatabases } from './shared';
+import { selectDatabases } from './shared';
 import { debugCli } from '../utils/debug';
 
 // ============================================================================
@@ -40,6 +49,14 @@ export interface ValidateResult {
   schemaDiffs: string[];
   migrationCount: number;
   includesDevMigrations: boolean;
+  /**
+   * What the schema change not yet in a migration (production snapshot →
+   * current schema) risks on a database that has rows: a NOT NULL column
+   * without a default (`db generate` refuses it), dropped columns/tables,
+   * names that may be renames. Warnings only — the replay runs on an empty
+   * database and cannot know which committed migrations already ran where.
+   */
+  pendingWarnings: string[];
 }
 
 // ============================================================================
@@ -290,6 +307,36 @@ function diffSchemas(fromMigrations: string[], fromSchema: string[]): string[] {
 }
 
 // ============================================================================
+// Pending change
+// ============================================================================
+
+/**
+ * Warnings for the schema change `db generate` has not written yet. Renames
+ * are unknown until it runs, so a new name next to a vanished one is reported
+ * both as a possible rename and with the risks of create + drop.
+ */
+async function pendingChangeWarnings(
+  migrationsDir: string,
+  schema: Record<string, unknown>,
+): Promise<string[]> {
+  const prod = loadSnapshot(migrationsDir);
+  const current = await generateSnapshotFromSchema(schema);
+  if (snapshotsEqual(prod, current)) return [];
+
+  const warnings = analyzeMigrationRisks(prod, current).map(
+    (risk) => `not yet generated: ${risk.message}`
+  );
+  for (const ambiguity of findAmbiguities(prod, current)) {
+    const example = exampleRenames(ambiguity)[0];
+    warnings.push(
+      `not yet generated: ${describeAmbiguity(ambiguity)} — if this is a rename, answer it when you ` +
+      `generate${example ? ` (--rename ${example})` : ''}, or the data is dropped`
+    );
+  }
+  return warnings;
+}
+
+// ============================================================================
 // Validate Command
 // ============================================================================
 
@@ -321,7 +368,7 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
 
   const results: ValidateResult[] = [];
 
-  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir, database: onlyDatabase });
+  const databases = selectDatabases({ projectRoot, databasesDir, migrationsDir, database: onlyDatabase });
 
   if (databases.length === 0) {
     debugCli('No databases found');
@@ -360,6 +407,7 @@ async function validateDatabase(
     schemaDiffs: [],
     migrationCount: 0,
     includesDevMigrations: false,
+    pendingWarnings: [],
   };
 
   // ---- Path A: Migration replay ----
@@ -428,6 +476,8 @@ async function validateDatabase(
           const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
 
           if (Object.keys(schema).length > 0) {
+            result.pendingWarnings = await pendingChangeWarnings(db.migrationsDir, schema);
+
             const createStatements = await generateCreateTableSQL(schema);
 
             const schemaDb = new Database(':memory:');

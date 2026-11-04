@@ -26,6 +26,29 @@ export interface ClassRename {
 }
 
 /**
+ * A database's migrations directory moved with its class rename: the renamed
+ * Durable Object keeps the old database's tables and `__migrations` journal,
+ * so the build must embed the migrations that journal names.
+ */
+export interface MigrationsMove {
+  /** The old database's migrations directory (absolute). */
+  from: string;
+  /** The renamed database's migrations directory (absolute). */
+  to: string;
+}
+
+/**
+ * A stale class and a new database that look like the same database under a
+ * new mount, whose rename is not written: moving the data would leave it
+ * without the migrations its journal names, or the old migrations directory
+ * is not unique. Neither the rename nor a new class is written for the pair
+ * until the user resolves it (the warning says how).
+ */
+export interface RenameConflict extends ClassRename {
+  reason: string;
+}
+
+/**
  * Result of wrangler config patching
  */
 export interface PatchResult {
@@ -46,11 +69,19 @@ export interface PatchResult {
   /** Classes added to a `new_sqlite_classes` migration. */
   newClasses: string[];
   /**
-   * Classes renamed by a `renamed_classes` migration: a database whose class
-   * name changed (a mount change, a database moved into or out of a mounted
-   * source) keeps its data.
+   * Classes renamed by a `renamed_classes` migration: a database of a mounted
+   * source whose class name changed (its mount changed, or it moved into a
+   * mounted source) keeps its deployed data.
    */
   renamedClasses: ClassRename[];
+  /** Migrations directories moved with a rename (see {@link MigrationsMove}). */
+  movedMigrations: MigrationsMove[];
+  /**
+   * Renames refused: written neither as a rename nor as a new class until the
+   * user resolves them (see {@link RenameConflict}). A production build should
+   * fail on them.
+   */
+  conflicts: RenameConflict[];
   /**
    * Classes of databases that are gone, still declared by the migrations.
    * Deleting a class deletes its data, so the `deleted_classes` migration is
@@ -228,9 +259,50 @@ function declaredClasses(migrations: unknown): Set<string> {
   return declared;
 }
 
+/** The database's file name without its extension: its name without a source's prefix. */
+function fileStem(db: DatabaseInfo): string {
+  return path.basename(db.filePath).replace(/\.(ts|js)$/, '');
+}
+
 /** The class a database would have without its source's prefix (`feedback` → `FeedbackDatabaseDO`). */
 function unprefixedClassName(db: DatabaseInfo): string {
-  return toPascalCase(path.basename(db.filePath).replace(/\.(ts|js)$/, '')) + CLASS_SUFFIX;
+  return toPascalCase(fileStem(db)) + CLASS_SUFFIX;
+}
+
+/** Whether the database comes from a mounted source (`<prefix>-<file>`). */
+function isPrefixed(db: DatabaseInfo): boolean {
+  return db.name !== fileStem(db);
+}
+
+/**
+ * The migrations directories, next to `db`'s own, of the database whose class
+ * is `className` — every subdirectory whose name gives that class
+ * (`reviews-feedback` → `ReviewsFeedbackDatabaseDO`). Exact: no name is
+ * guessed, and more than one match is the caller's to refuse. Empty when `db`
+ * has no migrations directory configured or none matches.
+ */
+function migrationsDirsOfClass(db: DatabaseInfo, className: string): string[] {
+  if (!db.migrationsDir) return [];
+  const root = path.dirname(db.migrationsDir);
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && toPascalCase(entry.name) + CLASS_SUFFIX === className)
+    .map((entry) => path.join(root, entry.name))
+    .sort();
+}
+
+/** Whether `dir` exists with anything in it. */
+function hasEntries(dir: string): boolean {
+  try {
+    return fs.readdirSync(dir).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** The next free `v<N>` tag. */
@@ -249,6 +321,9 @@ interface Reconciliation {
   removedBindings: DurableObjectBinding[];
   newClasses: string[];
   renamedClasses: ClassRename[];
+  /** The migrations directory each rename needs moved, by the class it renames to. */
+  migrationsMoves: Map<string, MigrationsMove>;
+  conflicts: RenameConflict[];
   deletedClasses: string[];
 }
 
@@ -299,33 +374,122 @@ function reconcile(config: WranglerConfig, databases: DatabaseInfo[]): Reconcili
   );
   const missing = databases.filter((db) => !declared.has(db.className));
 
-  // A stale class and a missing one are the same database renamed when each is
-  // the other's only candidate: the stale class ends with the new database's
-  // unprefixed class name (`ReviewsFeedbackDatabaseDO` → `FeedbackFeedbackDatabaseDO`
-  // after a mount change, or a database moved into or out of a mounted source).
+  // A stale class and a missing database are the same database under a new
+  // mount when the database comes from a mounted source, its file name is the
+  // one the stale class ends with (`ReviewsFeedbackDatabaseDO` →
+  // `FeedbackFeedbackDatabaseDO` after a mount change; `FeedbackDatabaseDO` →
+  // `ReviewsFeedbackDatabaseDO` for a database moved into a mounted source),
+  // and each is the other's only candidate. A database of an unprefixed source
+  // is never paired: `ProductCatalogDatabaseDO` → `CatalogDatabaseDO` (a
+  // database moved out of a mount) reads exactly like an app replacing
+  // product-catalog.ts with catalog.ts, and a wrong pairing hands one
+  // database's data to another.
   const candidatesOf = (staleClass: string) =>
-    missing.filter((db) => staleClass.endsWith(unprefixedClassName(db)) || db.className.endsWith(staleClass));
+    missing.filter(
+      (db) => isPrefixed(db) && staleClass !== db.className && staleClass.endsWith(unprefixedClassName(db))
+    );
   const renamedClasses: ClassRename[] = [];
+  const migrationsMoves = new Map<string, MigrationsMove>();
+  const conflicts: RenameConflict[] = [];
   for (const staleClass of stale) {
     const candidates = candidatesOf(staleClass);
     if (candidates.length !== 1) continue;
     const [db] = candidates;
     const rivals = stale.filter((other) => candidatesOf(other).includes(db));
     if (rivals.length !== 1) continue;
-    renamedClasses.push({ from: staleClass, to: db.className });
+
+    // The renamed Durable Object keeps the old storage — its tables and its
+    // `__migrations` journal — so the old database's migrations move with it.
+    // Without an old migrations directory nothing was ever deployed with
+    // tables (production builds embed only those migrations): the rename
+    // carries no data and needs no move.
+    const rename = { from: staleClass, to: db.className };
+    const oldDirs = migrationsDirsOfClass(db, staleClass);
+    if (oldDirs.length > 1) {
+      conflicts.push({
+        ...rename,
+        reason: `several migrations directories belong to ${staleClass}: ${oldDirs.join(', ')}`,
+      });
+    } else if (oldDirs.length === 1 && hasEntries(db.migrationsDir)) {
+      conflicts.push({
+        ...rename,
+        reason: `both ${oldDirs[0]} and ${db.migrationsDir} exist`,
+      });
+    } else {
+      renamedClasses.push(rename);
+      if (oldDirs.length === 1) migrationsMoves.set(db.className, { from: oldDirs[0], to: db.migrationsDir });
+    }
   }
 
   const renamedTo = new Set(renamedClasses.map((r) => r.to));
   const renamedFrom = new Set(renamedClasses.map((r) => r.from));
+  const conflictTo = new Set(conflicts.map((c) => c.to));
+  const conflictFrom = new Set(conflicts.map((c) => c.from));
 
   return {
     addBindings,
     removeBindingIndexes,
     removedBindings,
-    newClasses: missing.map((db) => db.className).filter((c) => !renamedTo.has(c)),
+    newClasses: missing.map((db) => db.className).filter((c) => !renamedTo.has(c) && !conflictTo.has(c)),
     renamedClasses,
-    deletedClasses: stale.filter((c) => !renamedFrom.has(c)),
+    migrationsMoves,
+    conflicts,
+    deletedClasses: stale.filter((c) => !renamedFrom.has(c) && !conflictFrom.has(c)),
   };
+}
+
+/** `dir` relative to the project root, for messages and commands. */
+function relativeDir(projectRoot: string, dir: string): string {
+  const relative = path.relative(projectRoot, dir);
+  return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? relative : dir;
+}
+
+/** A path as one shell word. */
+function shellWord(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The warning for a rename refused, with both ways out. */
+function renameConflictWarning(
+  file: string,
+  projectRoot: string,
+  conflict: RenameConflict,
+  databases: DatabaseInfo[],
+  tag: string
+): string {
+  const db = databases.find((d) => d.className === conflict.to);
+  const newDir = db?.migrationsDir ? relativeDir(projectRoot, db.migrationsDir) : null;
+  const oldDirs = db ? migrationsDirsOfClass(db, conflict.from).map((dir) => relativeDir(projectRoot, dir)) : [];
+  const reason = conflict.reason
+    .split(projectRoot + path.sep)
+    .join('');
+  const keep =
+    newDir && oldDirs.length === 1
+      ? `rm -r ${shellWord(newDir)} && mv ${shellWord(oldDirs[0])} ${shellWord(newDir)}`
+      : `keep exactly one migrations directory for ${conflict.from} and move it to ${newDir ?? 'the new database\'s'}`;
+  return (
+    `[durable-db] ${file}: ${conflict.to} looks like ${conflict.from} under a new mount, but its ` +
+    `data cannot move with it: ${reason}. A renamed_classes migration hands the new class the ` +
+    `old storage and its __migrations journal, which names the migrations of the old directory — ` +
+    `deployed with other migrations it would fail. Neither a rename nor a new class is written ` +
+    `until you choose:\n` +
+    `- keep the data (when ${newDir ?? 'the new directory'} was never deployed): ${keep}, then restart;\n` +
+    `- start empty and DELETE the old data: add ${JSON.stringify({ tag, deleted_classes: [conflict.from] })} ` +
+    `to "migrations"${oldDirs.length > 0 ? ` and remove ${oldDirs.join(', ')}` : ''}.`
+  );
+}
+
+/** The log line for a rename written, with its migrations move and what dev keeps. */
+function renameLog(file: string, projectRoot: string, rename: ClassRename, move: MigrationsMove | undefined): string {
+  return (
+    `[durable-db] ${file}: renamed the Durable Object class ${rename.from} to ${rename.to} ` +
+    `(a renamed_classes migration): on deploy, Cloudflare moves its deployed data to the new class` +
+    (move
+      ? `, and ${relativeDir(projectRoot, move.from)} moved to ${relativeDir(projectRoot, move.to)} so its ` +
+        `migrations still match the journal that data carries.`
+      : ` (it has no migrations directory, so there is no deployed data to carry).`) +
+    ` Local dev storage is kept per class name: in dev the database starts empty.`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -564,8 +728,13 @@ function deletedClassesWarning(file: string, classes: string[], tag: string): st
  * - removes durable-db's own bindings (`<X>_DATABASE_DO` → `<X>DatabaseDO`)
  *   whose class is no longer discovered — a binding to a class the worker no
  *   longer exports keeps workerd from starting;
- * - writes a `renamed_classes` migration when a database's class name
- *   changed unambiguously (a mount change), so its data moves with it;
+ * - writes a `renamed_classes` migration when a database of a mounted source
+ *   changed its class name unambiguously (a mount change), so its deployed
+ *   data moves with it — and moves the old database's migrations directory
+ *   to the new name, since that data carries the old migrations' journal;
+ * - refuses such a rename when the migrations cannot follow (both
+ *   directories exist, or several old ones): neither a rename nor a new class
+ *   is written, `conflicts` lists it and a warning gives both ways out;
  * - never deletes a class (that deletes its data): a removed database's class
  *   gets a warning with the exact `deleted_classes` migration to add by hand.
  * Bindings of other names, and bindings to other workers' classes
@@ -581,6 +750,8 @@ export function patchWranglerConfig(
     removedBindings: [],
     newClasses: [],
     renamedClasses: [],
+    movedMigrations: [],
+    conflicts: [],
     deletedClasses: [],
   };
 
@@ -591,6 +762,7 @@ export function patchWranglerConfig(
   }
 
   const file = path.basename(configPath);
+  const movedMigrations: MigrationsMove[] = [];
 
   try {
     const content = fs.readFileSync(configPath, 'utf-8');
@@ -598,6 +770,25 @@ export function patchWranglerConfig(
     const plan = reconcile(config, databases);
     const layout = layoutOf(content);
     let text = content;
+
+    // Migrations directories move first: a rename whose directory cannot move
+    // is refused, not written.
+    for (const rename of [...plan.renamedClasses]) {
+      const move = plan.migrationsMoves.get(rename.to);
+      if (!move) continue;
+      try {
+        // An empty directory (a `db` command may create one) gives way.
+        if (fs.existsSync(move.to)) fs.rmdirSync(move.to);
+        fs.renameSync(move.from, move.to);
+        movedMigrations.push(move);
+      } catch (error) {
+        plan.renamedClasses.splice(plan.renamedClasses.indexOf(rename), 1);
+        plan.conflicts.push({
+          ...rename,
+          reason: `${move.from} could not be moved to ${move.to} (${(error as Error).message})`,
+        });
+      }
+    }
 
     // Bindings: remove from the end so earlier indexes stay valid.
     for (const index of [...plan.removeBindingIndexes].sort((a, b) => b - a)) {
@@ -642,17 +833,21 @@ export function patchWranglerConfig(
       );
     }
     for (const rename of plan.renamedClasses) {
-      console.log(
-        `[durable-db] ${file}: renamed the Durable Object class ${rename.from} to ${rename.to} ` +
-        `(a renamed_classes migration), so the database keeps its data.`
-      );
+      console.log(renameLog(file, projectRoot, rename, plan.migrationsMoves.get(rename.to)));
     }
+    // Suggested migrations get tags after the one just written, one each.
+    const written = plan.newClasses.length > 0 || plan.renamedClasses.length > 0 ? [{ tag: nextTag(migrations) }] : [];
+    const suggested: Array<{ tag: string }> = [...migrations, ...written];
+    const suggestTag = () => {
+      const tag = nextTag(suggested);
+      suggested.push({ tag });
+      return tag;
+    };
     if (plan.deletedClasses.length > 0) {
-      const tag = nextTag([
-        ...migrations,
-        ...(plan.newClasses.length > 0 || plan.renamedClasses.length > 0 ? [{ tag: nextTag(migrations) }] : []),
-      ]);
-      console.warn(deletedClassesWarning(file, plan.deletedClasses, tag));
+      console.warn(deletedClassesWarning(file, plan.deletedClasses, suggestTag()));
+    }
+    for (const conflict of plan.conflicts) {
+      console.warn(renameConflictWarning(file, projectRoot, conflict, databases, suggestTag()));
     }
 
     return {
@@ -663,12 +858,14 @@ export function patchWranglerConfig(
       removedBindings: plan.removedBindings,
       newClasses: plan.newClasses,
       renamedClasses: plan.renamedClasses,
+      movedMigrations,
+      conflicts: plan.conflicts,
       deletedClasses: plan.deletedClasses,
     };
   } catch (error) {
     debugVite('Failed to patch wrangler config: %O', error);
     logRequiredConfig(databases);
-    return { modified: false, configPath, error: error as Error, ...empty };
+    return { modified: false, configPath, error: error as Error, ...empty, movedMigrations };
   }
 }
 
@@ -726,7 +923,10 @@ export interface WranglerCheckResult {
   configPath: string | null;
   /** Bindings declared by databases but absent from the config */
   missingBindings: Array<{ name: string; class_name: string }>;
-  /** DO classes missing from any migrations[].new_sqlite_classes entry */
+  /**
+   * DO classes no migration declares — a rename target is not missing: its
+   * `renamed_classes` entry is in {@link renamedClasses}.
+   */
   missingSqliteClasses: string[];
   /**
    * durable-db's own bindings to a class that is no longer a discovered
@@ -739,6 +939,12 @@ export interface WranglerCheckResult {
    * removal a hand-written `deleted_classes` one.
    */
   staleClasses: string[];
+  /** The `renamed_classes` entries the config lacks (a mount change). */
+  renamedClasses: ClassRename[];
+  /** The migrations directories those renames need moved. */
+  migrationsMoves: MigrationsMove[];
+  /** Renames that cannot be written as they stand (see {@link RenameConflict}). */
+  conflicts: RenameConflict[];
   ok: boolean;
   /**
    * True when the project only has a wrangler.toml — the check can't parse
@@ -749,11 +955,47 @@ export interface WranglerCheckResult {
 }
 
 /**
+ * What a failed {@link checkWranglerConfig} found, in one sentence: what is
+ * missing and what is stale.
+ */
+export function describeWranglerCheck(check: WranglerCheckResult): string {
+  const parts: string[] = [];
+  if (check.missingBindings.length > 0) {
+    parts.push(`missing the binding(s) ${check.missingBindings.map((b) => b.name).join(', ')}`);
+  }
+  if (check.missingSqliteClasses.length > 0) {
+    parts.push(`missing a migration declaring ${check.missingSqliteClasses.join(', ')}`);
+  }
+  if (check.renamedClasses.length > 0) {
+    parts.push(
+      `missing the renamed_classes migration for ${check.renamedClasses.map((r) => `${r.from} → ${r.to}`).join(', ')}`
+    );
+  }
+  if (check.staleBindings.length > 0) {
+    parts.push(
+      `binding class(es) the worker no longer exports (${check.staleBindings.map((b) => b.class_name).join(', ')})`
+    );
+  }
+  const deleted = check.staleClasses.filter(
+    (c) => !check.renamedClasses.some((r) => r.from === c) && !check.conflicts.some((r) => r.from === c)
+  );
+  if (deleted.length > 0) {
+    parts.push(`declaring class(es) of database(s) that no longer exist (${deleted.join(', ')})`);
+  }
+  if (check.conflicts.length > 0) {
+    parts.push(
+      `holding renamed database(s) whose migrations cannot follow (${check.conflicts.map((c) => `${c.from} → ${c.to}`).join(', ')})`
+    );
+  }
+  return parts.join('; ');
+}
+
+/**
  * Verify (without writing) that the wrangler config contains the Durable
  * Object bindings and sqlite migration entries the discovered databases
  * need, and no binding or class of a database that is gone. Logs an
  * actionable warning with the exact JSON to add (or remove) when something
- * is off.
+ * is off — and, for a rename, the `mv` that moves its migrations with it.
  *
  * This is the default behavior of the Vite plugin — automatic patching
  * is opt-in via the `patchWranglerConfig` plugin option.
@@ -770,6 +1012,9 @@ export function checkWranglerConfig(
     missingSqliteClasses: [],
     staleBindings: [],
     staleClasses: [],
+    renamedClasses: [],
+    migrationsMoves: [],
+    conflicts: [],
     ok: true,
     tomlOnly: !configPath && fs.existsSync(path.join(projectRoot, 'wrangler.toml')),
   };
@@ -785,27 +1030,46 @@ export function checkWranglerConfig(
 
   const plan = reconcile(config, databases);
   result.missingBindings = plan.addBindings;
-  const declared = declaredClasses(config.migrations ?? []);
-  result.missingSqliteClasses = databases.map((db) => db.className).filter((c) => !declared.has(c));
+  result.missingSqliteClasses = plan.newClasses;
   result.staleBindings = plan.removedBindings;
-  result.staleClasses = [...plan.renamedClasses.map((r) => r.from), ...plan.deletedClasses];
-
+  result.renamedClasses = plan.renamedClasses;
+  result.migrationsMoves = plan.renamedClasses.flatMap((r) => plan.migrationsMoves.get(r.to) ?? []);
+  result.conflicts = plan.conflicts;
+  result.staleClasses = [
+    ...plan.renamedClasses.map((r) => r.from),
+    ...plan.conflicts.map((c) => c.from),
+    ...plan.deletedClasses,
+  ];
   result.ok =
     result.missingBindings.length === 0 &&
     result.missingSqliteClasses.length === 0 &&
     result.staleBindings.length === 0 &&
     result.staleClasses.length === 0;
 
-  const missing = result.missingBindings.length > 0 || result.missingSqliteClasses.length > 0;
-  if (missing) {
+  const existingMigrations = Array.isArray(config.migrations) ? config.migrations : [];
+  const migration =
+    plan.newClasses.length > 0 || plan.renamedClasses.length > 0
+      ? {
+          tag: nextTag(existingMigrations),
+          ...(plan.newClasses.length > 0 && { new_sqlite_classes: plan.newClasses }),
+          ...(plan.renamedClasses.length > 0 && { renamed_classes: plan.renamedClasses }),
+        }
+      : null;
+  const suggested: Array<{ tag: string }> = [...existingMigrations, ...(migration ? [migration] : [])];
+  const suggestTag = () => {
+    const tag = nextTag(suggested);
+    suggested.push({ tag });
+    return tag;
+  };
+
+  const file = configPath ? path.basename(configPath) : 'wrangler.jsonc';
+  if (result.missingBindings.length > 0 || migration) {
     const snippet = JSON.stringify(
       {
         ...(result.missingBindings.length > 0 && {
           durable_objects: { bindings: result.missingBindings },
         }),
-        ...(result.missingSqliteClasses.length > 0 && {
-          migrations: [{ tag: 'v1', new_sqlite_classes: result.missingSqliteClasses }],
-        }),
+        ...(migration && { migrations: [migration] }),
       },
       null,
       2
@@ -821,19 +1085,30 @@ export function checkWranglerConfig(
         ? 'wrangler.toml (not supported — only wrangler.jsonc/json can be verified or patched)'
         : 'wrangler.jsonc';
 
+    const moves = result.migrationsMoves.map(
+      (move) =>
+        `mv ${shellWord(relativeDir(projectRoot, move.from))} ${shellWord(relativeDir(projectRoot, move.to))}`
+    );
     console.warn(
       `[durable-db] ${where} is missing ` +
       `Durable Object config for your database(s). Add ${hasToml ? 'the equivalent of ' : ''}this` +
       `${configPath || hasToml ? '' : ' to a new wrangler.jsonc'}:\n` +
       `${snippet}\n` +
+      (plan.renamedClasses.length > 0
+        ? `renamed_classes hands each new class the old one's deployed data (the same database under a ` +
+          `new mount)` +
+          (moves.length > 0
+            ? `, and that data's __migrations journal names the old migrations — move them with it:\n` +
+              moves.map((move) => `  ${move}`).join('\n') + '\n'
+            : '.\n')
+        : '') +
       (hasToml
         ? ''
         : `Or let the plugin write it for you: durableDb({ patchWranglerConfig: true })`)
     );
   }
 
-  if (result.staleBindings.length > 0 || result.staleClasses.length > 0) {
-    const file = configPath ? path.basename(configPath) : 'wrangler.jsonc';
+  if (result.staleBindings.length > 0 || plan.deletedClasses.length > 0 || plan.conflicts.length > 0) {
     const lines: string[] = [];
     if (result.staleBindings.length > 0) {
       lines.push(
@@ -842,19 +1117,20 @@ export function checkWranglerConfig(
         `and workerd refuses to start with a binding to it`
       );
     }
-    if (plan.renamedClasses.length > 0) {
-      lines.push(
-        `add a migration renaming the class(es), so the data moves with the database: ` +
-        JSON.stringify({ tag: nextTag(config.migrations ?? []), renamed_classes: plan.renamedClasses })
-      );
-    }
+    // The standalone warnings, as items of this one's list.
+    const item = (warning: string) => warning.replace(`[durable-db] ${file}: `, '');
     if (plan.deletedClasses.length > 0) {
-      lines.push(deletedClassesWarning(file, plan.deletedClasses, nextTag(config.migrations ?? [])));
+      lines.push(item(deletedClassesWarning(file, plan.deletedClasses, suggestTag())));
+    }
+    for (const conflict of plan.conflicts) {
+      lines.push(item(renameConflictWarning(file, projectRoot, conflict, databases, suggestTag())));
     }
     console.warn(
       `[durable-db] ${file} declares Durable Objects of database(s) that no longer exist:\n` +
       lines.map((line) => `- ${line}`).join('\n') +
-      `\nOr let the plugin reconcile the bindings for you: durableDb({ patchWranglerConfig: true })`
+      (plan.conflicts.length > 0
+        ? ''
+        : `\nOr let the plugin reconcile the bindings for you: durableDb({ patchWranglerConfig: true })`)
     );
   }
 

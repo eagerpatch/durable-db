@@ -10,6 +10,7 @@ import {
   generateRequiredConfig,
   stripJsoncComments,
   contentHasComments,
+  describeWranglerCheck,
 } from '../../../src/vite/modules/wrangler';
 import { vi } from 'vitest';
 import type { DatabaseInfo } from '../../../src/db';
@@ -613,6 +614,140 @@ describe('wrangler', () => {
       expect(warnSpy).not.toHaveBeenCalled();
     });
 
+    describe('moves the renamed database\'s migrations with its data', () => {
+      /** `db` with its migrations directory under `<tempDir>/migrations/<name>`. */
+      function withMigrations(db: DatabaseInfo): DatabaseInfo {
+        return { ...db, migrationsDir: path.join(tempDir, 'migrations', db.name) };
+      }
+      function writeMigration(dbName: string, file: string, sql: string) {
+        fs.mkdirSync(path.join(tempDir, 'migrations', dbName), { recursive: true });
+        fs.writeFileSync(path.join(tempDir, 'migrations', dbName, file), sql);
+      }
+      const init = 'CREATE TABLE `reviews` (`id` text PRIMARY KEY NOT NULL);';
+
+      it('moves migrations/<old> to migrations/<new> together with the renamed_classes migration', () => {
+        writeConfig(storeConfig);
+        writeMigration('reviews-feedback', '20261101000000_init.sql', init);
+        writeMigration('reviews-feedback', '_snapshot.json', '{}');
+
+        const result = patchWranglerConfig(tempDir, [withMigrations(catalog), withMigrations(feedbackFeedback)]);
+
+        expect(result.renamedClasses).toEqual([
+          { from: 'ReviewsFeedbackDatabaseDO', to: 'FeedbackFeedbackDatabaseDO' },
+        ]);
+        expect(result.movedMigrations).toEqual([
+          {
+            from: path.join(tempDir, 'migrations', 'reviews-feedback'),
+            to: path.join(tempDir, 'migrations', 'feedback-feedback'),
+          },
+        ]);
+        expect(result.conflicts).toEqual([]);
+        expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-feedback'))).toBe(false);
+        expect(fs.readdirSync(path.join(tempDir, 'migrations', 'feedback-feedback')).sort()).toEqual([
+          '20261101000000_init.sql',
+          '_snapshot.json',
+        ]);
+        expect(readConfig().migrations?.[1]).toEqual({
+          tag: 'v2',
+          renamed_classes: [{ from: 'ReviewsFeedbackDatabaseDO', to: 'FeedbackFeedbackDatabaseDO' }],
+        });
+
+        const log = logSpy.mock.calls.flat().join('\n');
+        expect(log).toContain(`${path.join('migrations', 'reviews-feedback')} moved to ${path.join('migrations', 'feedback-feedback')}`);
+        expect(log).toContain('in dev the database starts empty');
+        expect(log).not.toContain('keeps its data');
+
+        // Settled.
+        const again = patchWranglerConfig(tempDir, [withMigrations(catalog), withMigrations(feedbackFeedback)]);
+        expect(again.modified).toBe(false);
+        expect(again.movedMigrations).toEqual([]);
+      });
+
+      it('takes the place of an empty new directory', () => {
+        writeConfig(storeConfig);
+        writeMigration('reviews-feedback', '20261101000000_init.sql', init);
+        fs.mkdirSync(path.join(tempDir, 'migrations', 'feedback-feedback'));
+
+        const result = patchWranglerConfig(tempDir, [withMigrations(catalog), withMigrations(feedbackFeedback)]);
+
+        expect(result.movedMigrations).toHaveLength(1);
+        expect(fs.readdirSync(path.join(tempDir, 'migrations', 'feedback-feedback'))).toEqual([
+          '20261101000000_init.sql',
+        ]);
+      });
+
+      it('refuses the rename when the new database already has migrations, naming both directories', () => {
+        writeConfig(storeConfig);
+        writeMigration('reviews-feedback', '20261101000000_init.sql', init);
+        // `db generate` ran under the new mount before dev reconciled the rename.
+        writeMigration('feedback-feedback', '20261104000000_init.sql', init);
+
+        const result = patchWranglerConfig(tempDir, [withMigrations(catalog), withMigrations(feedbackFeedback)]);
+
+        expect(result.renamedClasses).toEqual([]);
+        expect(result.newClasses).toEqual([]);
+        expect(result.deletedClasses).toEqual([]);
+        expect(result.movedMigrations).toEqual([]);
+        expect(result.conflicts).toEqual([
+          expect.objectContaining({ from: 'ReviewsFeedbackDatabaseDO', to: 'FeedbackFeedbackDatabaseDO' }),
+        ]);
+        // Nothing moved, and no class change written: the binding swap only.
+        expect(fs.readdirSync(path.join(tempDir, 'migrations', 'reviews-feedback'))).toEqual(['20261101000000_init.sql']);
+        expect(readConfig().migrations).toEqual([
+          { tag: 'v1', new_sqlite_classes: ['CatalogDatabaseDO', 'ReviewsFeedbackDatabaseDO'] },
+        ]);
+        expect(readConfig().durable_objects?.bindings).toEqual([
+          { name: 'CATALOG_DATABASE_DO', class_name: 'CatalogDatabaseDO' },
+          { name: 'FEEDBACK_FEEDBACK_DATABASE_DO', class_name: 'FeedbackFeedbackDatabaseDO' },
+        ]);
+
+        const warning = warnSpy.mock.calls.flat().join('\n');
+        expect(warning).toContain(
+          `rm -r ${path.join('migrations', 'feedback-feedback')} && mv ${path.join('migrations', 'reviews-feedback')} ${path.join('migrations', 'feedback-feedback')}`
+        );
+        expect(warning).toContain('{"tag":"v2","deleted_classes":["ReviewsFeedbackDatabaseDO"]}');
+
+        // Either way out settles it. Keeping the data:
+        fs.rmSync(path.join(tempDir, 'migrations', 'feedback-feedback'), { recursive: true });
+        fs.renameSync(path.join(tempDir, 'migrations', 'reviews-feedback'), path.join(tempDir, 'migrations', 'feedback-feedback'));
+        const kept = patchWranglerConfig(tempDir, [withMigrations(catalog), withMigrations(feedbackFeedback)]);
+        expect(kept.conflicts).toEqual([]);
+        expect(kept.renamedClasses).toEqual([
+          { from: 'ReviewsFeedbackDatabaseDO', to: 'FeedbackFeedbackDatabaseDO' },
+        ]);
+      });
+
+      it('settles a refused rename once the old class is deleted by hand', () => {
+        writeConfig(storeConfig.replace(
+          '{ "tag": "v1", "new_sqlite_classes": ["CatalogDatabaseDO", "ReviewsFeedbackDatabaseDO"] }',
+          '{ "tag": "v1", "new_sqlite_classes": ["CatalogDatabaseDO", "ReviewsFeedbackDatabaseDO"] },\n' +
+          '    { "tag": "v2", "deleted_classes": ["ReviewsFeedbackDatabaseDO"] }'
+        ));
+        writeMigration('reviews-feedback', '20261101000000_init.sql', init);
+        writeMigration('feedback-feedback', '20261104000000_init.sql', init);
+
+        const result = patchWranglerConfig(tempDir, [withMigrations(catalog), withMigrations(feedbackFeedback)]);
+
+        expect(result.conflicts).toEqual([]);
+        expect(result.newClasses).toEqual(['FeedbackFeedbackDatabaseDO']);
+      });
+
+      it('refuses when several migrations directories belong to the old class', () => {
+        writeConfig(storeConfig);
+        writeMigration('reviews-feedback', '20261101000000_init.sql', init);
+        writeMigration('reviews_feedback', '20261101000000_init.sql', init);
+
+        const result = patchWranglerConfig(tempDir, [withMigrations(catalog), withMigrations(feedbackFeedback)]);
+
+        expect(result.renamedClasses).toEqual([]);
+        expect(result.conflicts).toEqual([
+          expect.objectContaining({ reason: expect.stringContaining('several migrations directories') }),
+        ]);
+        expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-feedback'))).toBe(true);
+        expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews_feedback'))).toBe(true);
+      });
+    });
+
     it('drops the binding of a removed extension and asks for the deleted_classes migration instead of writing it', () => {
       writeConfig(storeConfig);
 
@@ -656,7 +791,7 @@ describe('wrangler', () => {
       expect(warnSpy).not.toHaveBeenCalled();
     });
 
-    it('renames when a database moves into a mounted extension, and back', () => {
+    it('renames when a database moves into a mounted extension, but never guesses one out of it', () => {
       const appFeedback = database('/acme/apps/store/src/databases/feedback.ts');
       writeConfig(`{
   "durable_objects": { "bindings": [{ "name": "FEEDBACK_DATABASE_DO", "class_name": "FeedbackDatabaseDO" }] },
@@ -667,10 +802,45 @@ describe('wrangler', () => {
       expect(patchWranglerConfig(tempDir, [reviewsFeedback]).renamedClasses).toEqual([
         { from: 'FeedbackDatabaseDO', to: 'ReviewsFeedbackDatabaseDO' },
       ]);
-      expect(patchWranglerConfig(tempDir, [appFeedback]).renamedClasses).toEqual([
-        { from: 'ReviewsFeedbackDatabaseDO', to: 'FeedbackDatabaseDO' },
-      ]);
+
+      // Out of the mount reads exactly like an app replacing reviews-feedback.ts
+      // with feedback.ts: a new class, and the old one left to the user.
+      const back = patchWranglerConfig(tempDir, [appFeedback]);
+      expect(back.renamedClasses).toEqual([]);
+      expect(back.newClasses).toEqual(['FeedbackDatabaseDO']);
+      expect(back.deletedClasses).toEqual(['ReviewsFeedbackDatabaseDO']);
       expect(readConfig().migrations?.map((m) => m.tag)).toEqual(['v1', 'v2', 'v3']);
+    });
+
+    it('does not guess a rename between two databases of the app', () => {
+      // src/databases/catalog.ts deleted, src/databases/product-catalog.ts added.
+      const productCatalog = database('/acme/apps/store/src/databases/product-catalog.ts');
+      writeConfig(`{
+  "durable_objects": { "bindings": [{ "name": "CATALOG_DATABASE_DO", "class_name": "CatalogDatabaseDO" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CatalogDatabaseDO"] }]
+}
+`);
+
+      const result = patchWranglerConfig(tempDir, [productCatalog]);
+
+      expect(result.renamedClasses).toEqual([]);
+      expect(result.newClasses).toEqual(['ProductCatalogDatabaseDO']);
+      expect(result.deletedClasses).toEqual(['CatalogDatabaseDO']);
+      expect(readConfig().migrations).toEqual([
+        { tag: 'v1', new_sqlite_classes: ['CatalogDatabaseDO'] },
+        { tag: 'v2', new_sqlite_classes: ['ProductCatalogDatabaseDO'] },
+      ]);
+
+      // …nor the other way round.
+      writeConfig(`{
+  "durable_objects": { "bindings": [{ "name": "PRODUCT_CATALOG_DATABASE_DO", "class_name": "ProductCatalogDatabaseDO" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ProductCatalogDatabaseDO"] }]
+}
+`);
+      const reverse = patchWranglerConfig(tempDir, [catalog]);
+      expect(reverse.renamedClasses).toEqual([]);
+      expect(reverse.newClasses).toEqual(['CatalogDatabaseDO']);
+      expect(reverse.deletedClasses).toEqual(['ProductCatalogDatabaseDO']);
     });
 
     it('does not guess a rename when it is ambiguous', () => {
@@ -882,9 +1052,79 @@ describe('wrangler', () => {
 
       expect(result.ok).toBe(false);
       expect(result.staleClasses).toEqual(['ReviewsMainDatabaseDO']);
+      expect(result.renamedClasses).toEqual([{ from: 'ReviewsMainDatabaseDO', to: 'FeedbackMainDatabaseDO' }]);
+      // The rename target is not "missing" too: one migration entry, no class declared twice.
+      expect(result.missingSqliteClasses).toEqual([]);
+      const warning = warnSpy.mock.calls.flat().join('\n');
+      const snippet = JSON.parse(warning.slice(warning.indexOf('{\n'), warning.indexOf('\n}\n') + 2));
+      expect(snippet).toEqual({
+        durable_objects: { bindings: [{ name: 'FEEDBACK_MAIN_DATABASE_DO', class_name: 'FeedbackMainDatabaseDO' }] },
+        migrations: [{ tag: 'v2', renamed_classes: [{ from: 'ReviewsMainDatabaseDO', to: 'FeedbackMainDatabaseDO' }] }],
+      });
+      expect(warning).not.toContain('new_sqlite_classes');
+      warnSpy.mockRestore();
+    });
+
+    it('gives the mv that moves a renamed database\'s migrations, and never moves them itself', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: { bindings: [{ name: 'REVIEWS_MAIN_DATABASE_DO', class_name: 'ReviewsMainDatabaseDO' }] },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['ReviewsMainDatabaseDO'] }],
+      }));
+      fs.mkdirSync(path.join(tempDir, 'migrations', 'reviews-main'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'migrations', 'reviews-main', '20261101000000_init.sql'), 'CREATE TABLE `a` (`id` text);');
+
+      const result = checkWranglerConfig(tempDir, [{
+        ...mockDatabase,
+        filePath: '/ext/databases/main.ts',
+        name: 'feedback-main',
+        className: 'FeedbackMainDatabaseDO',
+        bindingName: 'FEEDBACK_MAIN_DATABASE_DO',
+        migrationsDir: path.join(tempDir, 'migrations', 'feedback-main'),
+      }]);
+
+      expect(result.migrationsMoves).toEqual([{
+        from: path.join(tempDir, 'migrations', 'reviews-main'),
+        to: path.join(tempDir, 'migrations', 'feedback-main'),
+      }]);
       expect(warnSpy.mock.calls.flat().join('\n')).toContain(
-        '{"tag":"v2","renamed_classes":[{"from":"ReviewsMainDatabaseDO","to":"FeedbackMainDatabaseDO"}]}'
+        `mv ${path.join('migrations', 'reviews-main')} ${path.join('migrations', 'feedback-main')}`
       );
+      expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-main'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('suggests the next free tag for missing classes', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['OtherDO'] }],
+      }));
+
+      const result = checkWranglerConfig(tempDir, [mockDatabase]);
+
+      expect(result.missingSqliteClasses).toEqual(['MainDatabaseDO']);
+      expect(warnSpy.mock.calls.flat().join('\n')).toContain('"tag": "v2"');
+      warnSpy.mockRestore();
+    });
+
+    it('describes what is wrong: stale, not missing, when only a removed database is left', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: {
+          bindings: [
+            { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
+            { name: 'OLD_DATABASE_DO', class_name: 'OldDatabaseDO' },
+          ],
+        },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'OldDatabaseDO'] }],
+      }));
+
+      const description = describeWranglerCheck(checkWranglerConfig(tempDir, [mockDatabase]));
+
+      expect(description).toContain('binding class(es) the worker no longer exports (OldDatabaseDO)');
+      expect(description).toContain('declaring class(es) of database(s) that no longer exist (OldDatabaseDO)');
+      expect(description).not.toContain('missing');
       warnSpy.mockRestore();
     });
   });

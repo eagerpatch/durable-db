@@ -187,7 +187,7 @@ export const { action } = defineDatabase({ schema: { users } });
     fs.writeFileSync(configPath, '{"name": "my-worker"}');
 
     await expect(initializePlugin(undefined, 'build')).rejects.toThrow(
-      /missing Durable Object bindings/
+      /missing the binding\(s\) MAIN_DATABASE_DO; missing a migration declaring MainDatabaseDO/
     );
 
     // Config still untouched, and the JSON-to-add warning was printed first
@@ -222,6 +222,77 @@ export const { action } = defineDatabase({ schema: { users } });
     expect(warnSpy).toHaveBeenCalled();
     expect(warnSpy.mock.calls[0][0]).toContain('wrangler.toml');
     warnSpy.mockRestore();
+  });
+
+  it('names a stale binding, not a missing one, when that is what fails the build', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+      durable_objects: {
+        bindings: [
+          { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
+          { name: 'GONE_DATABASE_DO', class_name: 'GoneDatabaseDO' },
+        ],
+      },
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'GoneDatabaseDO'] }],
+    }));
+
+    const error = await initializePlugin(undefined, 'build').then(() => null, (e: Error) => e);
+
+    expect(error?.message).toContain('binding class(es) the worker no longer exports (GoneDatabaseDO)');
+    expect(error?.message).not.toContain('missing');
+    warnSpy.mockRestore();
+  });
+
+  describe('a mount change', () => {
+    // src/databases/main.ts served under the mount `feedback`, previously `reviews`.
+    const mounted = { databasesDir: [{ dir: 'src/databases', prefix: 'feedback' }], patchWranglerConfig: true };
+    const init = 'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);';
+
+    beforeEach(() => {
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: { bindings: [{ name: 'REVIEWS_MAIN_DATABASE_DO', class_name: 'ReviewsMainDatabaseDO' }] },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['ReviewsMainDatabaseDO'] }],
+      }));
+      fs.mkdirSync(path.join(tempDir, 'migrations', 'reviews-main'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'migrations', 'reviews-main', '20261101000000_init.sql'), init);
+    });
+
+    async function loadModule(options: Parameters<typeof durableDb>[0], command: 'serve' | 'build') {
+      const plugin = durableDb(options);
+      await (plugin.configResolved as Function)({ root: tempDir, command } as ResolvedConfig);
+      const loaded = await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+      return typeof loaded === 'string' ? loaded : loaded.code;
+    }
+
+    it('renames the class, moves the migrations and embeds them from their new place', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const code = await loadModule(mounted, 'build');
+
+      expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-main'))).toBe(false);
+      expect(fs.readdirSync(path.join(tempDir, 'migrations', 'feedback-main'))).toEqual(['20261101000000_init.sql']);
+      const config = JSON.parse(fs.readFileSync(path.join(tempDir, 'wrangler.jsonc'), 'utf-8'));
+      expect(config.migrations[1]).toEqual({
+        tag: 'v2',
+        renamed_classes: [{ from: 'ReviewsMainDatabaseDO', to: 'FeedbackMainDatabaseDO' }],
+      });
+      expect(code).toContain('class FeedbackMainDatabaseDO');
+      expect(code).toContain('20261101000000_init');
+      logSpy.mockRestore();
+    });
+
+    it('stops when the new database already has migrations of its own', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.mkdirSync(path.join(tempDir, 'migrations', 'feedback-main'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'migrations', 'feedback-main', '20261104000000_init.sql'), init);
+
+      await expect(loadModule(mounted, 'serve')).rejects.toThrow(
+        /ReviewsMainDatabaseDO → FeedbackMainDatabaseDO: a renamed database's migrations cannot move with its data/
+      );
+      expect(warnSpy.mock.calls.flat().join('\n')).toContain('mv migrations/reviews-main migrations/feedback-main');
+      expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-main'))).toBe(true);
+      warnSpy.mockRestore();
+    });
   });
 
   it('writes the bindings when patchWranglerConfig is true', async () => {

@@ -7,7 +7,7 @@ import { debugVite } from '../utils/debug';
 
 import { discoverDatabaseFiles, discoverActionFiles, readFile } from './modules/discovery';
 import { parseDatabaseFile } from './modules/parser';
-import { patchWranglerConfig, checkWranglerConfig } from './modules/wrangler';
+import { patchWranglerConfig, checkWranglerConfig, describeWranglerCheck } from './modules/wrangler';
 import { databaseSources, type DatabaseSource } from './modules/discovery';
 import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
 import { loadMigrationFiles } from '../migrations/generator';
@@ -187,7 +187,6 @@ class PluginState {
         parsed.database.migrationsDir = path.resolve(this.projectRoot, this.options.migrationsDir, parsed.database.name);
         this.databases.set(parsed.database.name, parsed.database);
         this.registerDatabaseFile(file.absolutePath, parsed.database.name);
-        await this.loadMigrations(parsed.database);
       }
     }
 
@@ -195,23 +194,41 @@ class PluginState {
       debugVite('Found %d database(s)', this.databases.size);
       const databases = Array.from(this.databases.values());
       if (this.options.patchWranglerConfig) {
-        patchWranglerConfig(this.projectRoot, databases);
+        const patch = patchWranglerConfig(this.projectRoot, databases);
+        // A refused rename leaves the database's class undeclared: deployed,
+        // its data would be stranded or meet migrations its journal does not
+        // know; in dev the class would not get SQLite storage. Stop until the
+        // user chooses (the warning above gives both ways out).
+        if (patch.conflicts.length > 0) {
+          throw new Error(
+            `[durable-db] ${patch.conflicts.map((c) => `${c.from} → ${c.to}`).join(', ')}: a renamed ` +
+            `database's migrations cannot move with its data (${patch.conflicts.map((c) => c.reason).join('; ')}). ` +
+            `Keep the data or delete it as the warning above says, then restart.`
+          );
+        }
       } else {
         const check = checkWranglerConfig(this.projectRoot, databases);
         // In dev a missing binding fails the first request, so a warning is
         // enough. In a production build it's invisible — the build succeeds
-        // and the deploy ships a worker with no DO bindings — so fail the
-        // build instead. wrangler.toml can't be parsed, so its check result
-        // is inconclusive and only warns.
+        // and the deploy ships a worker with no DO bindings (or binding a
+        // class it no longer exports) — so fail the build instead.
+        // wrangler.toml can't be parsed, so its check result is inconclusive
+        // and only warns.
         if (!check.ok && !check.tomlOnly && this.config.command === 'build') {
           throw new Error(
-            `[durable-db] wrangler config is missing Durable Object bindings/migrations for ` +
-            `discovered database(s) — deploying this build would ship a worker without them. ` +
-            `Add the JSON from the warning above to ${check.configPath ? path.basename(check.configPath) : 'wrangler.jsonc'}, ` +
-            `or opt in to automatic patching with durableDb({ patchWranglerConfig: true }).`
+            `[durable-db] ${check.configPath ? path.basename(check.configPath) : 'wrangler.jsonc'} does not ` +
+            `match the discovered database(s): it is ${describeWranglerCheck(check)}. Deploying this build ` +
+            `would ship a worker whose Durable Objects do not match it. Make the changes the warning above ` +
+            `gives, or opt in to automatic patching with durableDb({ patchWranglerConfig: true }).`
           );
         }
       }
+    }
+
+    // After the wrangler config: a rename moves a database's migrations
+    // directory, and the moved migrations are the ones to embed.
+    for (const database of this.databases.values()) {
+      await this.loadMigrations(database);
     }
 
     this.initialized = true;

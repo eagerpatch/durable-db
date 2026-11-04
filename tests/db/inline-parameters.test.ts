@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { inlineParameters } from '../../src/db/kysely';
+import { inlineParameters, createKyselyFromSql } from '../../src/db/kysely';
+import { table, text, integer } from '../../src/schema';
 
 /**
  * Unit tests for the >100-parameter fallback (workerd's
@@ -46,6 +47,13 @@ describe('inlineParameters', () => {
     );
   });
 
+  it('leaves ? inside backtick-quoted identifiers alone', () => {
+    expect(inlineParameters('select `col?name` from `t` where `x` = ?', [1])).toBe(
+      'select `col?name` from `t` where `x` = 1',
+    );
+    expect(inlineParameters('select `a``?` , ?', [2])).toBe('select `a``?` , 2');
+  });
+
   it('leaves ? inside comments alone', () => {
     expect(inlineParameters('select ? -- why?\n/* huh? */', [3])).toBe(
       'select 3 -- why?\n/* huh? */',
@@ -61,5 +69,34 @@ describe('inlineParameters', () => {
     expect(() => inlineParameters('select ?', [Number.NaN])).toThrow(/non-finite/i);
     expect(() => inlineParameters('select ?', ['bad\0string'])).toThrow(/NUL/i);
     expect(() => inlineParameters('select ?', [{} as never])).toThrow(/type object/i);
+  });
+});
+
+describe('identifier quoting', () => {
+  // SQLite reads a double-quoted identifier that names no column as a string
+  // literal (workerd's build does), so a not-yet-migrated column would select
+  // its own name. Backticks are always identifiers: "no such column" instead.
+  const products = table('products', {
+    id: text().primaryKey(),
+    weightGrams: integer(),
+  });
+  const db = createKyselyFromSql<any>({} as SqlStorage, { schema: { products } });
+
+  it('quotes identifiers with backticks', () => {
+    const { sql } = db
+      .selectFrom('products')
+      .select(['id', 'weightGrams'])
+      .where('weightGrams', 'is', null)
+      .compile();
+    expect(sql).toBe('select `id`, `weight_grams` from `products` where `weight_grams` is null');
+    expect(sql).not.toContain('"');
+  });
+
+  it('escapes a backtick inside an identifier', () => {
+    const { sql } = createKyselyFromSql<any>({} as SqlStorage, { camelCase: false })
+      .selectFrom('odd`name')
+      .selectAll()
+      .compile();
+    expect(sql).toBe('select * from `odd``name`');
   });
 });

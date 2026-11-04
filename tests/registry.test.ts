@@ -5,6 +5,7 @@ import {
   getDoContext,
   runWithDoContext,
   callAction,
+  type as ddType,
   type ActionDefinition,
   type DoContext,
   type RpcContext,
@@ -494,5 +495,56 @@ describe('callAction', () => {
     const result = await callAction({}, 'analytics', 'trackRpc', {}, ctx);
     expect(result).toEqual({ tracked: true });
     expect(rpcSpy).toHaveBeenCalled();
+  });
+});
+
+// ============================================================================
+// The `type` the action transform injects (`__ddType`)
+// ============================================================================
+
+describe('type (the transform\'s args compiler)', () => {
+  // The generated RPC stub runs `__ddType(<args>).assert(args)`; the generated
+  // Durable Object registers `validator: (args) => __ddType(<args>)(args)`.
+  const schema = { productId: 'string', 'photoKey?': 'string' } as const;
+
+  it('lets the RPC stub pass an optional key given as undefined', () => {
+    const validated = ddType(schema).assert({ productId: 'p1', photoKey: undefined });
+    expect(validated).toStrictEqual({ productId: 'p1', photoKey: undefined });
+  });
+
+  it('keeps a required key that admits undefined required, as 0.3.0 did', () => {
+    const required = ddType({ id: 'string', note: 'string | undefined' });
+    expect(required.assert({ id: 'a', note: undefined })).toStrictEqual({ id: 'a', note: undefined });
+    expect(() => required.assert({ id: 'a' })).toThrow(/note must be a string or undefined \(was missing\)/);
+  });
+
+  it('still rejects a wrong type and a missing required key', () => {
+    expect(() => ddType(schema).assert({ productId: 'p1', photoKey: 3 })).toThrow(/photoKey must be a string/);
+    expect(() => ddType(schema).assert({ productId: undefined })).toThrow(/productId must be a string/);
+  });
+
+  it('does the same for an args schema written as type(...)', () => {
+    const validator = ddType(ddType(schema));
+    expect(validator.assert({ productId: 'p1', photoKey: undefined })).toStrictEqual({
+      productId: 'p1',
+      photoKey: undefined,
+    });
+  });
+
+  it('lets the Durable Object side (callAction) accept an optional key given as undefined', async () => {
+    const validator = ddType(schema);
+    registerAction('reviews', 'addReview', {
+      validator: (args) => validator(args),
+      handler: async (_db, args) => args,
+    });
+
+    const result = await callAction(
+      {},
+      'reviews',
+      'addReview',
+      { productId: 'p1', photoKey: undefined },
+      createMockContext('reviews')
+    );
+    expect(result).toStrictEqual({ productId: 'p1', photoKey: undefined });
   });
 });

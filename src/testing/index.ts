@@ -4,7 +4,12 @@ import { type } from '../arktypeConfig'; // jitless `type` — eval-free for Wor
 import type { Kysely } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { createKyselyFromSql } from '../db/kysely';
-import { ACTION_TEST_META, type ActionTestMeta } from '../db/defineDatabase';
+import {
+  ACTION_TEST_META,
+  liveTestDatabases,
+  type ActionTestMeta,
+  type LiveTestDatabase,
+} from '../db/defineDatabase';
 import { setTenantIdResolver } from '../context';
 import {
   createEmptySnapshot,
@@ -26,7 +31,10 @@ import {
 // `action()` is just a function carrying its `{ args, handler, validator }`
 // under ACTION_TEST_META (see src/db/defineDatabase.ts). The harness reads that,
 // validates args exactly like production, and invokes the handler with a Kysely
-// bound to the in-memory db.
+// bound to the in-memory db. A live test database is also published (see
+// liveTestDatabases), so code under test that calls an action directly — a
+// page, a procedure, a job — runs it against the test database created for
+// that action's tables.
 // ---------------------------------------------------------------------------
 
 // Loaded at runtime (not a static import) so no bundler tries to resolve
@@ -68,11 +76,18 @@ export interface TestDatabase<TSchema = any> {
    * Run an `action()` the way production does: validate `args` with the
    * action's arktype schema, then invoke its handler against {@link db}.
    * Throws the same "Invalid args" error as production on a bad payload.
+   *
+   * Calling the action directly does the same while this database is live:
+   * an action call runs against the newest live test database created with
+   * every table of the action's database.
    */
   run<TArgs, TResult>(action: (args: TArgs) => Promise<TResult>, args: TArgs): Promise<TResult>;
   /** The raw `node:sqlite` handle, for escape-hatch SQL. */
   sqlite: DatabaseSync;
-  /** Close the database and clear the tenant resolver. */
+  /**
+   * Close the database, stop routing direct action calls to it and clear the
+   * tenant resolver.
+   */
   destroy(): void;
 }
 
@@ -134,24 +149,53 @@ export async function createTestDatabase<TSchema = any>(
 
   setTenantIdResolver(() => tenantId);
 
+  async function run<TArgs, TResult>(
+    action: (args: TArgs) => Promise<TResult>,
+    args: TArgs
+  ): Promise<TResult> {
+    const meta = (action as TestableAction)[ACTION_TEST_META];
+    if (!meta) {
+      throw new Error(
+        'createTestDatabase().run() was given a function that is not a durable-db action ' +
+          '(no test metadata). Pass an export created by `action({ … })`.'
+      );
+    }
+    const validated = (meta.validator as (input: unknown) => unknown)(args);
+    if (validated instanceof type.errors) {
+      throw new Error(`Invalid args for action: ${validated.summary}`);
+    }
+    return (await meta.handler(db, validated)) as TResult;
+  }
+
+  const live: LiveTestDatabase = {
+    tables: new Set(Object.values(schema)),
+    run: (action, args) => run(action, args),
+    clear() {
+      const tables = sqlite
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'`)
+        .all() as Array<{ name: string }>;
+      // Rows go in any order: foreign keys are off while the tables empty.
+      const { foreign_keys: foreignKeys } = sqlite.prepare('PRAGMA foreign_keys').get() as {
+        foreign_keys: number;
+      };
+      sqlite.exec('PRAGMA foreign_keys = OFF');
+      try {
+        for (const { name } of tables) sqlite.exec(`DELETE FROM \`${name.replaceAll('`', '``')}\``);
+      } finally {
+        sqlite.exec(`PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'}`);
+      }
+    },
+  };
+  liveTestDatabases().push(live);
+
   return {
     db,
-    async run(action, args) {
-      const meta = (action as TestableAction)[ACTION_TEST_META];
-      if (!meta) {
-        throw new Error(
-          'createTestDatabase().run() was given a function that is not a durable-db action ' +
-            '(no test metadata). Pass an export created by `action({ … })`.'
-        );
-      }
-      const validated = (meta.validator as (input: unknown) => unknown)(args);
-      if (validated instanceof type.errors) {
-        throw new Error(`Invalid args for action: ${validated.summary}`);
-      }
-      return (await meta.handler(db, validated)) as Awaited<ReturnType<typeof action>>;
-    },
+    run,
     sqlite,
     destroy() {
+      const registry = liveTestDatabases();
+      const index = registry.indexOf(live);
+      if (index !== -1) registry.splice(index, 1);
       setTenantIdResolver(null);
       sqlite.close();
     },

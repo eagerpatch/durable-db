@@ -2,7 +2,16 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { type Snapshot, createEmptySnapshot, snapshotsEqual, hashSnapshot } from '../../src/migrations/snapshot';
+import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import {
+  type Snapshot,
+  createEmptySnapshot,
+  snapshotsEqual,
+  hashSnapshot,
+  generateSnapshotFromSchema,
+  generateMigrationStatements,
+  SchemaRenameRequiredError,
+} from '../../src/migrations/snapshot';
 import { loadMigrationFiles, generateMigrationName, loadSnapshot, saveSnapshot } from '../../src/migrations/generator';
 
 describe('migrations', () => {
@@ -211,5 +220,78 @@ CREATE INDEX idx_posts_user ON posts(user_id);`
       // Files with only comments are not added to the map
       expect(migrations.has('001_comments')).toBe(false);
     });
+  });
+});
+
+// ============================================================================
+// Rename resolution (generateMigrationStatements)
+// ============================================================================
+
+describe('generateMigrationStatements rename resolution', () => {
+  const columns = { id: text().primaryKey() };
+
+  async function renameDiff() {
+    const prev = await generateSnapshotFromSchema({
+      products: sqliteTable('products', { ...columns, description: text().notNull(), price: integer() }),
+    });
+    const cur = await generateSnapshotFromSchema({
+      products: sqliteTable('products', { ...columns, summary: text().notNull(), price: integer() }),
+    });
+    return { prev, cur };
+  }
+
+  /** Apply the "before" table with a row, then the statements; return the rows. */
+  async function applyWithRow(prev: Snapshot, statements: string[]) {
+    const { default: Database } = (await import('libsql')) as any;
+    const db = new Database(':memory:');
+    for (const stmt of await generateMigrationStatements(createEmptySnapshot(), prev)) db.exec(stmt);
+    db.exec("INSERT INTO products (id, description, price) VALUES ('p1', 'A widget', 100)");
+    for (const stmt of statements) db.exec(stmt);
+    const rows = db.prepare('SELECT * FROM products').all();
+    db.close();
+    return rows;
+  }
+
+  it('throws SchemaRenameRequiredError instead of drizzle-kit\'s TTY error when it cannot prompt', async () => {
+    const { prev, cur } = await renameDiff();
+    const error = await generateMigrationStatements(prev, cur, { interactive: false }).catch((e) => e);
+    expect(error).toBeInstanceOf(SchemaRenameRequiredError);
+    expect(error.ambiguities).toEqual([
+      { kind: 'column', table: 'products', created: ['summary'], deleted: ['description'] },
+    ]);
+    expect(error.message).not.toContain('Interactive prompts require a TTY terminal (process.stdin');
+  });
+
+  it('applies a --rename answer without asking, keeping the data', async () => {
+    const { prev, cur } = await renameDiff();
+    const statements = await generateMigrationStatements(prev, cur, {
+      renames: ['products.description=summary'],
+      interactive: false,
+    });
+    expect(statements).toEqual(['ALTER TABLE `products` RENAME COLUMN "description" TO "summary";']);
+    expect(await applyWithRow(prev, statements)).toEqual([{ id: 'p1', summary: 'A widget', price: 100 }]);
+  });
+
+  it('answers every question with create + drop under noRenames', async () => {
+    const prev = await generateSnapshotFromSchema({
+      products: sqliteTable('products', { ...columns, description: text(), price: integer() }),
+    });
+    const cur = await generateSnapshotFromSchema({
+      products: sqliteTable('products', { ...columns, summary: text(), price: integer() }),
+    });
+    const statements = await generateMigrationStatements(prev, cur, { noRenames: true, interactive: false });
+    expect(statements.join('\n')).toContain('DROP COLUMN `description`');
+    expect(statements.join('\n')).toContain('ADD `summary` text');
+    expect(await applyWithRow(prev, statements)).toEqual([{ id: 'p1', price: 100, summary: null }]);
+  });
+
+  it('leaves unambiguous diffs to drizzle-kit untouched', async () => {
+    const prev = await generateSnapshotFromSchema({ products: sqliteTable('products', { ...columns }) });
+    const cur = await generateSnapshotFromSchema({
+      products: sqliteTable('products', { ...columns, note: text() }),
+    });
+    expect(await generateMigrationStatements(prev, cur, { interactive: false })).toEqual([
+      'ALTER TABLE `products` ADD `note` text;',
+    ]);
   });
 });

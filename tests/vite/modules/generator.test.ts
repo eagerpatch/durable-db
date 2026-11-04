@@ -118,6 +118,23 @@ describe('generateDurableObjectsModule', () => {
     expect(code).toContain('migrations = {}');
   });
 
+  it('names the database the db commands know, for recovery hints', () => {
+    const code = generateDurableObjectsModule(
+      [{ ...mockDatabase, name: 'orderItems', className: 'OrderItemsDatabaseDO' }],
+      'durable-db/registry'
+    );
+    // Not `order-items`: the class name alone cannot tell the two apart.
+    expect(code).toMatch(/class OrderItemsDatabaseDO extends SqliteDurableObject \{[\s\S]*?databaseName = "orderItems";/);
+  });
+
+  it('names the database inside a Browsable() wrapper too', () => {
+    const code = generateDurableObjectsModule(
+      [{ ...mockDatabase, name: 'reviews-feedback', browsable: true }],
+      'durable-db/registry'
+    );
+    expect(code).toMatch(/Browsable\(\)\(class extends SqliteDurableObject \{[\s\S]*?databaseName = "reviews-feedback";/);
+  });
+
   it('generates rpc method', () => {
     const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('async rpc(method, args, rpcContext)');
@@ -389,7 +406,7 @@ export const createUser = action({
       actionsInFile: [logEventAction],
     });
 
-    expect(result!.code).toContain('instanceKey = applyDevEpoch("global")');
+    expect(result!.code).toContain('instanceKey = applyDevEpoch("global", "analytics")');
   });
 
   it('uses getTenantId() for per-tenant databases', () => {
@@ -411,7 +428,8 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toContain('instanceKey = applyDevEpoch(getTenantId())');
+    // The database name picks its own epoch after `db reset --database main`
+    expect(result!.code).toContain('instanceKey = applyDevEpoch(getTenantId(), "main")');
     expect(result!.code).toMatch(
       /import\s*\{[^}]*applyDevEpoch[^}]*\}\s*from\s*["']virtual:durable-db\/__devEpoch["']/
     );
@@ -594,7 +612,7 @@ export const { action, destroyDatabase } = defineDatabase({
 
     expect(result).not.toBeNull();
     expect(result!.code).toContain('export async function destroyDatabase');
-    expect(result!.code).toContain('instanceKey = applyDevEpoch("global")');
+    expect(result!.code).toContain('instanceKey = applyDevEpoch("global", "analytics")');
     expect(result!.code).not.toContain('getTenantId');
   });
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createRequire } from 'node:module';
 
 /**
  * Tests for SqliteDurableObject PITR integration.
@@ -874,5 +875,393 @@ describe('SqliteDurableObject', () => {
       expect(applied[0].name).toBe('20240101_first');
       expect(applied[1].name).toBe('20240201_second');
     });
+  });
+});
+
+// ============================================================================
+// Concurrent first calls (one migration run)
+// ============================================================================
+
+describe('concurrent first calls', () => {
+  const initial: Migrations = {
+    '20240101_initial': {
+      chunks: [['CREATE TABLE users (id TEXT PRIMARY KEY)'], ['CREATE TABLE posts (id TEXT PRIMARY KEY)']],
+    },
+  };
+
+  for (const pitrAvailable of [false, true]) {
+    it(`share one migration run (PITR ${pitrAvailable ? 'available' : 'unavailable'})`, async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const { state, mockSql } = createMockDurableObjectState({ pitrAvailable });
+      const dobj = new TestDurableObject(state, {});
+      dobj.migrations = initial;
+
+      // runMigrations() awaits the PITR probe/bookmark between reading the
+      // pending list and applying it: every call here arrives in that window.
+      const results = await Promise.allSettled(
+        Array.from({ length: 5 }, () => dobj.fetch(new Request('http://test/')))
+      );
+
+      expect(results.map((r) => r.status)).toEqual(Array(5).fill('fulfilled'));
+      const creates = mockSql.getExecLog().filter((sql) => /^CREATE TABLE (users|posts)/.test(sql));
+      expect(creates).toHaveLength(2);
+      expect(state.storage.sql.exec('SELECT name, chunk_index FROM __migrations').toArray()).toHaveLength(2);
+      expect(logSpy.mock.calls.filter(([line]) => String(line).includes('Applied'))).toHaveLength(1);
+      logSpy.mockRestore();
+    });
+  }
+
+  it('lets the next call retry after a failed run', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { state } = createMockDurableObjectState({ pitrAvailable: false });
+    const dobj = new TestDurableObject(state, {});
+    dobj.migrations = { '20240101_bad': { chunks: [['INVALID SQL']] } };
+
+    const both = await Promise.allSettled([
+      dobj.fetch(new Request('http://test/')),
+      dobj.fetch(new Request('http://test/')),
+    ]);
+    expect(both.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+
+    dobj.migrations = { '20240101_good': { chunks: [['CREATE TABLE users (id TEXT PRIMARY KEY)']] } };
+    await expect(dobj.fetch(new Request('http://test/'))).resolves.toBeInstanceOf(Response);
+    errSpy.mockRestore();
+  });
+
+  it('does not let a run in flight during resetMigrationState mark the reset storage migrated', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { state } = createMockDurableObjectState({ pitrAvailable: false });
+    const dobj = new TestDurableObject(state, {});
+    dobj.migrations = initial;
+
+    const first = dobj.fetch(new Request('http://test/'));
+    (dobj as any).resetMigrationState();
+    await first;
+    expect((dobj as any).migrationsApplied).toBe(false);
+    logSpy.mockRestore();
+  });
+});
+
+// ============================================================================
+// Dev → production migration handoff (`db push`, then `db generate`)
+// ============================================================================
+
+/**
+ * A DurableObjectState over a real in-memory SQLite (node:sqlite), so schema
+ * errors ("duplicate column name", "already exists") are SQLite's own.
+ */
+function createSqliteState() {
+  const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+  const sqlite = new DatabaseSync(':memory:');
+  const sql = {
+    exec(query: string, ...params: unknown[]) {
+      const rows = sqlite.prepare(query).all(...(params as never[]));
+      return { toArray: () => rows };
+    },
+  };
+  const state = {
+    storage: {
+      sql,
+      getCurrentBookmark: vi.fn().mockRejectedValue(new Error('PITR not available')),
+      onNextSessionRestoreBookmark: vi.fn(),
+      transactionSync<T>(callback: () => T): T {
+        sqlite.exec('BEGIN');
+        try {
+          const result = callback();
+          sqlite.exec('COMMIT');
+          return result;
+        } catch (error) {
+          sqlite.exec('ROLLBACK');
+          throw error;
+        }
+      },
+    },
+    id: { toString: () => 'test-id' },
+    abort: vi.fn(),
+  };
+  const journal = () =>
+    (sqlite.prepare('SELECT name, chunk_index FROM __migrations ORDER BY name, chunk_index').all() as Array<{
+      name: string;
+      chunk_index: number;
+    }>).map((row) => `${row.name}[${row.chunk_index}]`);
+  const columns = (table: string) =>
+    (sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+  return { state, sqlite, journal, columns };
+}
+
+class CatalogDatabaseDO extends SqliteDurableObject {
+  migrations: Migrations = {};
+}
+
+describe('dev → production migration handoff', () => {
+  const init = {
+    '20261104100000_init': {
+      chunks: [['CREATE TABLE `products` (\n\t`id` text PRIMARY KEY NOT NULL,\n\t`name` text NOT NULL\n);\n']],
+    },
+  };
+
+  /** Boot a fresh instance (a dev server restart) over the same storage. */
+  async function boot(state: unknown, migrations: Migrations) {
+    const dobj = new CatalogDatabaseDO(state, {});
+    dobj.migrations = migrations;
+    await dobj.fetch(new Request('http://test/'));
+    return dobj;
+  }
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    return () => {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    };
+  });
+
+  it('records the generated migration as applied when the dev migration already applied it', async () => {
+    const { state, journal, columns } = createSqliteState();
+
+    // `db push`: the dev server applies the squashed dev migration.
+    await boot(state, {
+      ...init,
+      '_dev_dev_3b7e396f': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+    expect(columns('products')).toContain('weight_grams');
+
+    // `db generate weight`: the dev migration becomes a production one.
+    await boot(state, {
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+
+    expect(journal()).toEqual([
+      '20261104100000_init[0]',
+      '20261104111548_weight[0]',
+      '_dev_dev_3b7e396f[0]',
+    ]);
+    expect(logSpy.mock.calls.map(([line]) => String(line)).join('\n')).toContain(
+      'Recorded migration 20261104111548_weight as applied without running it: dev migration(s) _dev_dev_3b7e396f'
+    );
+  });
+
+  it('matches a dev CREATE TABLE IF NOT EXISTS to the generated CREATE TABLE, across chunks', async () => {
+    const { state, journal } = createSqliteState();
+    await boot(state, {
+      ...init,
+      '_dev_dev_aaaa1111': {
+        chunks: [[
+          'CREATE TABLE IF NOT EXISTS `reviews` (\n\t`id` text PRIMARY KEY NOT NULL\n);\n',
+          'CREATE INDEX IF NOT EXISTS `reviews_id_idx` ON `reviews` (`id`);',
+        ]],
+      },
+    });
+
+    await boot(state, {
+      ...init,
+      '20261105000000_reviews': {
+        chunks: [
+          ['CREATE TABLE `reviews` (\n\t`id` text PRIMARY KEY NOT NULL\n);\n'],
+          ['CREATE INDEX `reviews_id_idx` ON `reviews` (`id`);'],
+        ],
+      },
+    });
+
+    expect(journal()).toContain('20261105000000_reviews[0]');
+    expect(journal()).toContain('20261105000000_reviews[1]');
+  });
+
+  it('still runs a generated migration with statements no dev migration ran — and explains a conflict', async () => {
+    const { state, journal } = createSqliteState();
+    await boot(state, {
+      ...init,
+      '_dev_dev_3b7e396f': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+
+    const err = await boot(state, {
+      ...init,
+      '20261104111548_weight': {
+        chunks: [[
+          'ALTER TABLE `products` ADD `weight_grams` integer;',
+          'ALTER TABLE `products` ADD `color` text;',
+        ]],
+      },
+    }).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+    expect(err!.message).toContain('duplicate column name: weight_grams');
+    expect(err!.message).toContain('_dev_dev_3b7e396f');
+    expect(err!.message).toContain('db reset --database catalog');
+    expect(journal()).not.toContain('20261104111548_weight[0]');
+  });
+
+  it('lets each dev statement stand in for one production migration only', async () => {
+    const { state, journal } = createSqliteState();
+    await boot(state, {
+      ...init,
+      '_dev_dev_3b7e396f': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+    await boot(state, {
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+
+    // A later migration with the same statement is not "already applied".
+    const err = await boot(state, {
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+      '20261106000000_again': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    }).then(() => null, (e: Error) => e);
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+    expect(journal()).not.toContain('20261106000000_again[0]');
+  });
+
+  it('leaves a storage that never ran a dev migration alone', async () => {
+    const { state, journal, columns, sqlite } = createSqliteState();
+    await boot(state, init);
+    await boot(state, {
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    });
+
+    expect(columns('products')).toContain('weight_grams');
+    expect(journal()).toEqual(['20261104100000_init[0]', '20261104111548_weight[0]']);
+    const devTable = sqlite
+      .prepare(`SELECT name FROM sqlite_master WHERE name = '__dev_migration_statements'`)
+      .all();
+    expect(devTable).toEqual([]);
+  });
+
+  it('maps "duplicate column name" to MigrationSchemaConflictError with a db reset hint', async () => {
+    const { state, sqlite } = createSqliteState();
+    await boot(state, init);
+    sqlite.exec('ALTER TABLE `products` ADD `weight_grams` integer');
+
+    const err = await boot(state, {
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    }).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+    expect(err!.message).toContain('db reset --database catalog');
+    expect(err!.message).toContain('duplicate column name');
+  });
+
+  it('names the database by its databaseName in the reset hint (the generated DO sets it)', async () => {
+    class OrderItemsDatabaseDO extends SqliteDurableObject {
+      migrations: Migrations = {};
+      protected databaseName = 'orderItems';
+    }
+    const { state, sqlite } = createSqliteState();
+    const dobj = new OrderItemsDatabaseDO(state, {});
+    dobj.migrations = init;
+    await dobj.fetch(new Request('http://test/'));
+    sqlite.exec('ALTER TABLE `products` ADD `weight_grams` integer');
+
+    const again = new OrderItemsDatabaseDO(state, {});
+    again.migrations = {
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    };
+    const err = await again.fetch(new Request('http://test/')).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+    // Not `order-items`, which is what the class name alone would give.
+    expect(err!.message).toContain('db reset --database orderItems');
+  });
+});
+
+describe('repeated `db push` in dev', () => {
+  // `db push` diffs the schema against the PRODUCTION snapshot, so every push
+  // until the next `db generate` repeats the earlier pushes' statements.
+  const init = {
+    '20261104100000_init': {
+      chunks: [['CREATE TABLE `products` (\n\t`id` text PRIMARY KEY NOT NULL\n);\n']],
+    },
+  };
+  const addWeight = 'ALTER TABLE `products` ADD `weight_grams` integer;';
+  const addColor = 'ALTER TABLE `products` ADD `color_code` text;';
+  const addSku = 'ALTER TABLE `products` ADD `sku` text;';
+
+  async function boot(state: unknown, migrations: Migrations) {
+    const dobj = new CatalogDatabaseDO(state, {});
+    dobj.migrations = migrations;
+    await dobj.fetch(new Request('http://test/'));
+    return dobj;
+  }
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    return () => {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    };
+  });
+
+  it('skips what a second push repeats of the first, then hands both off to db generate', async () => {
+    const { state, journal, columns } = createSqliteState();
+
+    // Add weightGrams, restart dev: push writes dev_A.
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight]] } });
+    // Add colorCode, restart dev: push writes dev_B = dev_A's statement + the new one.
+    await boot(state, { ...init, '_dev_dev_bbbb0002': { chunks: [[addWeight, addColor]] } });
+
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code']);
+    expect(journal()).toEqual(['20261104100000_init[0]', '_dev_dev_aaaa0001[0]', '_dev_dev_bbbb0002[0]']);
+    expect(logSpy.mock.calls.map(([line]) => String(line)).join('\n')).toContain(
+      'Dev migration _dev_dev_bbbb0002: skipped the statement(s) dev migration(s) _dev_dev_aaaa0001 already applied'
+    );
+
+    // A third push repeats both.
+    await boot(state, { ...init, '_dev_dev_cccc0003': { chunks: [[addWeight, addColor, addSku]] } });
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code', 'sku']);
+
+    // `db generate`: the production migration holds all three.
+    await boot(state, { ...init, '20261105000000_product_fields': { chunks: [[addWeight, addColor, addSku]] } });
+    expect(journal()).toContain('20261105000000_product_fields[0]');
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code', 'sku']);
+  });
+
+  it('skips the repeated statements whatever their order in the new push', async () => {
+    const { state, columns } = createSqliteState();
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight]] } });
+
+    // A column added above weightGrams in the table: drizzle-kit lists it first.
+    await boot(state, { ...init, '_dev_dev_bbbb0002': { chunks: [[addColor, addWeight]] } });
+
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code']);
+  });
+
+  it('runs a statement an earlier push ran only when that push is not repeated whole — and explains the conflict', async () => {
+    const { state, journal } = createSqliteState();
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight, addColor]] } });
+
+    // colorCode changed type since: dev_A is not repeated whole.
+    const err = await boot(state, {
+      ...init,
+      '_dev_dev_bbbb0002': { chunks: [[addWeight, 'ALTER TABLE `products` ADD `color_code` integer;']] },
+    }).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+    expect(err!.message).toContain('duplicate column name: weight_grams');
+    expect(err!.message).toContain('earlier dev migration (_dev_dev_aaaa0001)');
+    expect(err!.message).toContain('db reset --database catalog');
+    expect(journal()).not.toContain('_dev_dev_bbbb0002[0]');
+  });
+
+  it('never skips anything in a production migration', async () => {
+    const { state } = createSqliteState();
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight]] } });
+
+    // A production migration that is not dev_A squashed (it has more) still runs whole.
+    const err = await boot(state, {
+      ...init,
+      '20261105000000_fields': { chunks: [[addWeight, addColor]] },
+    }).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
   });
 });

@@ -5,10 +5,12 @@
 declare module "virtual:durable-db/__durableObjects";
 
 // Dev-epoch helpers baked in at build time. `applyDevEpoch` suffixes instance
-// keys with the current dev epoch (identity in production builds).
+// keys with the database's dev epoch — its own after `db reset --database`,
+// else the project's (identity in production builds).
 declare module "virtual:durable-db/__devEpoch" {
   export const devEpoch: string | null;
-  export function applyDevEpoch(key: string): string;
+  export const devEpochs: Record<string, string>;
+  export function applyDevEpoch(key: string, dbName?: string): string;
 }
 
 /** @deprecated Use "virtual:durable-db/__durableObjects" instead. */

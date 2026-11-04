@@ -17,6 +17,15 @@ import {
   loadDevSnapshot,
   saveDevSnapshot,
   getInstanceKey,
+  getDatabaseEpoch,
+  getDatabaseEpochs,
+  forgetDatabaseDevState,
+  getDevEpoch,
+  writeDevServerLock,
+  removeDevServerLock,
+  readDevServerLock,
+  runningDevServer,
+  isProcessAlive,
 } from '../../src/cli/state';
 
 describe('CLI state management', () => {
@@ -247,6 +256,68 @@ describe('CLI state management', () => {
 
     it('works with global key', () => {
       expect(getInstanceKey('global', 'xyz')).toBe('global__dev_xyz');
+    });
+  });
+  describe('per-database epochs', () => {
+    it('falls back to the project epoch for a database without its own', () => {
+      const state = { epoch: 'project', databases: { catalog: { epoch: 'own' }, reviews: { lastPush: null } } };
+      expect(getDatabaseEpoch(state, 'catalog')).toBe('own');
+      expect(getDatabaseEpoch(state, 'reviews')).toBe('project');
+      expect(getDatabaseEpoch(state, 'unknown')).toBe('project');
+      expect(getDatabaseEpochs(state)).toEqual({ catalog: 'own' });
+    });
+
+    it('reads a state.json from before per-database epochs', () => {
+      fs.mkdirSync(path.dirname(getDevPaths(tempDir).stateFile), { recursive: true });
+      fs.writeFileSync(getDevPaths(tempDir).stateFile, JSON.stringify({ epoch: 'old' }));
+      const state = loadDevState(tempDir);
+      expect(state.databases).toEqual({});
+      expect(getDatabaseEpoch(state, 'catalog')).toBe('old');
+      expect(getDevEpoch(tempDir, 'catalog')).toBe('old');
+    });
+
+    it('forgetting a database\'s bookkeeping keeps its epoch', () => {
+      const state = {
+        epoch: 'project',
+        databases: {
+          catalog: { epoch: 'own', prodSnapshotHash: 'h', lastPush: 'x' },
+          reviews: { prodSnapshotHash: 'h', lastPush: 'x' },
+        },
+      };
+      forgetDatabaseDevState(state, 'catalog');
+      forgetDatabaseDevState(state, 'reviews');
+      expect(state.databases).toEqual({ catalog: { epoch: 'own' } });
+    });
+
+    it('an epoch-only entry is not a changed production snapshot', () => {
+      const state = { epoch: 'project', databases: { catalog: { epoch: 'own' } } };
+      expect(hasProdSnapshotChanged(state, 'catalog', 'hash')).toBe(false);
+      expect(getDatabaseDevState(state, 'catalog', 'hash')).toEqual({ epoch: 'own', prodSnapshotHash: 'hash', lastPush: null });
+    });
+  });
+
+  describe('dev-server lock', () => {
+    it('records this process and removes only its own lock', () => {
+      const first = writeDevServerLock(tempDir);
+      expect(readDevServerLock(tempDir)).toMatchObject({ pid: process.pid, token: first });
+      expect(runningDevServer(tempDir)?.pid).toBe(process.pid);
+
+      // A restart writes its own lock before the old server closes
+      const second = writeDevServerLock(tempDir);
+      removeDevServerLock(tempDir, first);
+      expect(readDevServerLock(tempDir)?.token).toBe(second);
+
+      removeDevServerLock(tempDir, second);
+      expect(readDevServerLock(tempDir)).toBeNull();
+      expect(runningDevServer(tempDir)).toBeNull();
+    });
+
+    it('ignores a lock whose process is gone', () => {
+      const lockFile = path.join(getDevPaths(tempDir).cacheDir, 'dev-server.json');
+      fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+      fs.writeFileSync(lockFile, JSON.stringify({ pid: 2 ** 22 + 12345, token: 't', startedAt: '' }));
+      expect(isProcessAlive(2 ** 22 + 12345)).toBe(false);
+      expect(runningDevServer(tempDir)).toBeNull();
     });
   });
 });

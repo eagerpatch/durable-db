@@ -1,6 +1,7 @@
 import {
   Kysely,
   SqliteDialect,
+  SqliteQueryCompiler,
   CamelCasePlugin,
   type CompiledQuery,
   type DatabaseConnection,
@@ -42,6 +43,29 @@ export interface CreateKyselyOptions {
 // one statement, identical semantics (RETURNING, ON CONFLICT, changes() all
 // behave the same).
 const MAX_BOUND_PARAMETERS = 100;
+
+/**
+ * Kysely's SQLite compiler with identifiers quoted in backticks instead of
+ * double quotes. SQLite (workerd's build included) reads a double-quoted
+ * identifier that names no column as a string literal, so a column missing
+ * from the database — a schema change not yet migrated — silently selects its
+ * own name (`"weight_grams"` → 'weight_grams') and a WHERE on it compares two
+ * constants. A backtick-quoted identifier is never a literal: the query fails
+ * with "no such column". The migrations already quote with backticks.
+ */
+export class BacktickSqliteQueryCompiler extends SqliteQueryCompiler {
+  protected override getLeftIdentifierWrapper(): string {
+    return '`';
+  }
+
+  protected override getRightIdentifierWrapper(): string {
+    return '`';
+  }
+
+  protected override sanitizeIdentifier(identifier: string): string {
+    return identifier.replaceAll('`', '``');
+  }
+}
 
 /**
  * workerd has no boolean binding type and silently stringifies JS booleans
@@ -86,8 +110,8 @@ function escapeLiteral(value: unknown): string {
 /**
  * Replace each `?` placeholder in `sql` with the escaped literal of its
  * parameter. A real scanner, not a regex: '…' string literals ('' escapes),
- * "…" quoted identifiers, `--` line comments and C-style block comments are
- * skipped, so a `?` inside any of them is never touched.
+ * "…" and `…` quoted identifiers, `--` line comments and C-style block
+ * comments are skipped, so a `?` inside any of them is never touched.
  *
  * Exported for tests.
  */
@@ -96,7 +120,7 @@ export function inlineParameters(sql: string, parameters: readonly unknown[]): s
   let p = 0;
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
-    if (ch === "'" || ch === '"') {
+    if (ch === "'" || ch === '"' || ch === '`') {
       let j = i + 1;
       while (j < sql.length) {
         if (sql[j] === ch) {
@@ -288,7 +312,7 @@ export function createKyselyFromSql<T>(
       createAdapter: () => sqliteDialect.createAdapter(),
       createDriver: () => new CloudflareSqliteDriver(sqlStorage),
       createIntrospector: (db) => sqliteDialect.createIntrospector(db),
-      createQueryCompiler: () => sqliteDialect.createQueryCompiler(),
+      createQueryCompiler: () => new BacktickSqliteQueryCompiler(),
     },
     plugins: allPlugins,
   });

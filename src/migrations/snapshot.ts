@@ -3,10 +3,67 @@ import {
 } from 'drizzle-kit/api';
 
 import { createRequire } from 'node:module'
+import {
+  applyRenames,
+  findAmbiguities,
+  parseRenameSpec,
+  SchemaRenameRequiredError,
+  withoutRemoved,
+  type RenameAnswer,
+} from './renames';
 const require = createRequire(import.meta.url)
 const { generateSQLiteDrizzleJson, generateSQLiteMigration } = require('drizzle-kit/api') as typeof import('drizzle-kit/api')
 
 export type Snapshot = DrizzleSQLiteSnapshotJSON;
+
+export {
+  applyRenames,
+  describeAmbiguity,
+  exampleRenames,
+  findAmbiguities,
+  formatRename,
+  parseRenameSpec,
+  renamesFromStatements,
+  SchemaRenameRequiredError,
+  unusedRenames,
+  type RenameAnswer,
+  type SchemaAmbiguity,
+} from './renames';
+export {
+  analyzeMigrationRisks,
+  NOT_NULL_WITHOUT_DEFAULT_HINT,
+  type MigrationRisk,
+  type MigrationRiskKind,
+} from './risks';
+
+/**
+ * How to answer drizzle-kit's "created or renamed?" questions — asked when a
+ * table (or a table's columns) has both a new and a vanished name.
+ */
+export interface MigrationResolution {
+  /**
+   * Renames, as `RenameAnswer`s or `<table>.<old>=<new>` / `<old>=<new>`
+   * strings. Applied before drizzle-kit diffs, so it never asks about them.
+   */
+  renames?: Array<RenameAnswer | string>;
+  /**
+   * Answer every remaining question with "create": the vanished column/table
+   * is dropped (its data is lost) and the new one created.
+   */
+  noRenames?: boolean;
+  /**
+   * Whether drizzle-kit may prompt for what is still unanswered. Default:
+   * when stdin and stdout are TTYs. Without prompts an unanswered question
+   * throws {@link SchemaRenameRequiredError} (instead of drizzle-kit's bare
+   * "Interactive prompts require a TTY terminal").
+   */
+  interactive?: boolean;
+}
+
+/** Whether drizzle-kit's prompts can run (it checks the same). */
+export function canPrompt(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
 
 /**
  * Create an empty snapshot (for initial migration from nothing)
@@ -67,13 +124,35 @@ export async function generateSnapshotFromSchema(
  */
 export async function generateMigrationStatements(
   from: Snapshot,
-  to: Snapshot
+  to: Snapshot,
+  resolution: MigrationResolution = {}
 ): Promise<string[]> {
+  const answers = (resolution.renames ?? []).map((r) => (typeof r === 'string' ? parseRenameSpec(r) : r));
+  const renamed = answers.length > 0
+    ? applyRenames(from, to, answers)
+    : { snapshot: from, statements: [] as string[] };
+  const ambiguities = findAmbiguities(renamed.snapshot, to);
 
-  return await generateSQLiteMigration(
-    from,
-    to,
-  );
+  if (ambiguities.length === 0) {
+    return [...renamed.statements, ...(await generateSQLiteMigration(renamed.snapshot, to))];
+  }
+
+  if (resolution.noRenames) {
+    // Two diffs, neither of which has both a new and a vanished name.
+    const dropped = withoutRemoved(renamed.snapshot, to);
+    return [
+      ...renamed.statements,
+      ...(await generateSQLiteMigration(renamed.snapshot, dropped)),
+      ...(await generateSQLiteMigration(dropped, to)),
+    ];
+  }
+
+  if (!(resolution.interactive ?? canPrompt())) {
+    throw new SchemaRenameRequiredError(ambiguities);
+  }
+
+  // drizzle-kit asks in the terminal.
+  return [...renamed.statements, ...(await generateSQLiteMigration(renamed.snapshot, to))];
 }
 
 /**

@@ -5,10 +5,17 @@ import {
   loadDevState,
   saveDevState,
   clearDatabaseDevState,
+  forgetDatabaseDevState,
 } from './state';
-import { type Snapshot } from '../migrations/snapshot';
+import { type MigrationRisk, type Snapshot } from '../migrations/snapshot';
 import { saveSnapshot, generateMigrationName } from '../migrations/generator';
-import { discoverDatabases, loadSchema, diffSchema } from './shared';
+import {
+  selectDatabases,
+  diffDatabases,
+  UnknownDatabaseError,
+  type DiffResult,
+  type RenameResolutionOptions,
+} from './shared';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
@@ -23,11 +30,17 @@ export interface GenerateContext {
   verbose?: boolean;
 }
 
-export interface GenerateOptions {
+export interface GenerateOptions extends RenameResolutionOptions {
   /** Custom migration name suffix (e.g., 'add_user_bio') */
   name?: string;
-  /** Only generate for this database */
+  /** Only generate for this database (an unknown name throws UnknownDatabaseError) */
   database?: string;
+  /**
+   * Write the migration even when a statement fails on every table that has
+   * rows (a NOT NULL column without a default) — e.g. a table known to be
+   * empty in every tenant.
+   */
+  force?: boolean;
 }
 
 export interface GenerateResult {
@@ -36,6 +49,30 @@ export interface GenerateResult {
   statements: string[];
   migrationName: string | null;
   migrationPath: string | null;
+  /**
+   * What the migration risks on a database that has rows: dropped columns and
+   * tables (data loss), columns made NOT NULL, and — with `force` — the
+   * statements that fail on every table with rows.
+   */
+  warnings: string[];
+}
+
+/**
+ * `db generate` refuses a migration that fails on every table that has rows.
+ * Per-tenant databases migrate lazily, so the failure would surface after the
+ * deploy, once per tenant with data, each of them broken until a fixed
+ * migration ships — and `db validate` cannot catch it: it replays migrations
+ * on an empty database.
+ */
+export class UnsafeMigrationError extends Error {
+  constructor(readonly risks: Array<MigrationRisk & { database: string }>) {
+    super(
+      'Refusing to write a migration that fails on every table that has rows:\n' +
+      risks.map((risk) => `  ${risk.database}: ${risk.message}`).join('\n') +
+      '\nFix the schema and run generate again, or pass --force if every such table is empty everywhere.'
+    );
+    this.name = 'UnsafeMigrationError';
+  }
 }
 
 // ============================================================================
@@ -59,29 +96,39 @@ export async function generate(
   options: GenerateOptions = {}
 ): Promise<GenerateResult[]> {
   const { projectRoot = process.cwd(), databasesDir = 'src/databases', migrationsDir = 'migrations' } = ctx;
-  const { name: customName, database: targetDb } = options;
+  const { name: customName, database: targetDb, force = false } = options;
   const results: GenerateResult[] = [];
 
   // Load global dev state
   const devState = loadDevState(projectRoot);
 
-  const databases = discoverDatabases({ projectRoot, databasesDir, migrationsDir, database: targetDb });
+  const databases = selectDatabases({ projectRoot, databasesDir, migrationsDir, database: targetDb });
 
   if (databases.length === 0) {
     debugCli('No databases found');
     return results;
   }
 
-  for (const db of databases) {
-    const result = await generateDatabase(db, customName, projectRoot);
+  // Every diff (and every refusal) before the first file is written.
+  const diffs = await diffDatabases(projectRoot, databases, options);
+
+  const blocking = diffs.flatMap(({ db, diff }) =>
+    (diff?.risks ?? [])
+      .filter((risk) => risk.severity === 'error')
+      .map((risk) => ({ ...risk, database: db.name }))
+  );
+  if (blocking.length > 0 && !force) {
+    throw new UnsafeMigrationError(blocking);
+  }
+
+  for (const { db, diff } of diffs) {
+    const result = writeMigration(db, diff, customName);
     results.push(result);
 
     // Clear dev state for this database if migration was generated
     if (result.hasChanges) {
       clearDatabaseDevState(projectRoot, db.name);
-      if (devState.databases[db.name]) {
-        delete devState.databases[db.name];
-      }
+      forgetDatabaseDevState(devState, db.name);
     }
   }
 
@@ -92,29 +139,23 @@ export async function generate(
 }
 
 /**
- * Generate migration for a single database
+ * Write a database's migration file and its new production snapshot
  */
-async function generateDatabase(
+function writeMigration(
   db: DatabaseInfo,
+  diff: DiffResult | null,
   customName: string | undefined,
-  projectRoot: string,
-): Promise<GenerateResult> {
+): GenerateResult {
   const result: GenerateResult = {
     database: db.name,
     hasChanges: false,
     statements: [],
     migrationName: null,
     migrationPath: null,
+    warnings: [],
   };
 
-  const schema = await loadSchema(db, projectRoot);
-  if (!schema) {
-    return result;
-  }
-
-  const diff = await diffSchema(schema, db.migrationsDir);
-
-  if (!diff.hasChanges) {
+  if (!diff || !diff.hasChanges) {
     debugCli('No changes for %s', db.name);
     return result;
   }
@@ -142,6 +183,7 @@ async function generateDatabase(
   result.statements = diff.statements;
   result.migrationName = migrationName;
   result.migrationPath = migrationPath;
+  result.warnings = diff.risks.map((risk) => risk.message);
 
   debugCli('Generated %s for %s (%d statements)', migrationName, db.name, diff.statements.length);
   debugCli('Migration path: %s', migrationPath);
@@ -157,6 +199,11 @@ export async function generateOne(
   dbName: string,
   options: Omit<GenerateOptions, 'database'> = {}
 ): Promise<GenerateResult | null> {
-  const results = await generate(ctx, { ...options, database: dbName });
-  return results.length > 0 ? results[0] : null;
+  try {
+    const results = await generate(ctx, { ...options, database: dbName });
+    return results.length > 0 ? results[0] : null;
+  } catch (error) {
+    if (error instanceof UnknownDatabaseError) return null;
+    throw error;
+  }
 }

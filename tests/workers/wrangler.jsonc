@@ -6,13 +6,16 @@
   "durable_objects": {
     "bindings": [
       { "name": "TEST_DO", "class_name": "TestMigrationDO" },
-      { "name": "TEST_KYSELY_DO", "class_name": "TestKyselyDO" }
+      { "name": "TEST_KYSELY_DO", "class_name": "TestKyselyDO" },
+      { "name": "TEST_RACE_DO", "class_name": "TestRaceDO" },
+      { "name": "TEST_DEV_HANDOFF_DO", "class_name": "TestDevHandoffDO" },
+      { "name": "TEST_ARGS_DO", "class_name": "TestArgsDO" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestMigrationDO", "TestKyselyDO"]
+      "new_sqlite_classes": ["TestMigrationDO", "TestKyselyDO", "TestRaceDO", "TestDevHandoffDO", "TestArgsDO"]
     }
   ]
 }

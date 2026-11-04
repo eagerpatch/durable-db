@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { durableDb, databasePlugin } from '../../src/vite/durableDb';
+import { pathToFileURL } from 'node:url';
+import { durableDb, databasePlugin, syncWranglerConfig } from '../../src/vite/durableDb';
+import { syncWranglerConfig as moduleSyncWranglerConfig } from '../../src/vite/modules/syncWrangler';
 import type { Plugin, ResolvedConfig } from 'vite';
 
 // ============================================================================
@@ -187,7 +189,7 @@ export const { action } = defineDatabase({ schema: { users } });
     fs.writeFileSync(configPath, '{"name": "my-worker"}');
 
     await expect(initializePlugin(undefined, 'build')).rejects.toThrow(
-      /missing Durable Object bindings/
+      /missing the binding\(s\) MAIN_DATABASE_DO; missing a migration declaring MainDatabaseDO/
     );
 
     // Config still untouched, and the JSON-to-add warning was printed first
@@ -224,6 +226,99 @@ export const { action } = defineDatabase({ schema: { users } });
     warnSpy.mockRestore();
   });
 
+  it('names a stale binding, not a missing one, when that is what fails the build', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+      durable_objects: {
+        bindings: [
+          { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
+          { name: 'GONE_DATABASE_DO', class_name: 'GoneDatabaseDO' },
+        ],
+      },
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'GoneDatabaseDO'] }],
+    }));
+
+    const error = await initializePlugin(undefined, 'build').then(() => null, (e: Error) => e);
+
+    expect(error?.message).toContain('binding class(es) the worker no longer exports (GoneDatabaseDO)');
+    expect(error?.message).not.toContain('missing');
+    warnSpy.mockRestore();
+  });
+
+  describe('a mount change', () => {
+    // src/databases/main.ts served under the mount `feedback`, previously `reviews`.
+    const mounted = { databasesDir: [{ dir: 'src/databases', prefix: 'feedback' }], patchWranglerConfig: true };
+    const init = 'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL);';
+
+    beforeEach(() => {
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: { bindings: [{ name: 'REVIEWS_MAIN_DATABASE_DO', class_name: 'ReviewsMainDatabaseDO' }] },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['ReviewsMainDatabaseDO'] }],
+      }));
+      fs.mkdirSync(path.join(tempDir, 'migrations', 'reviews-main'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'migrations', 'reviews-main', '20261101000000_init.sql'), init);
+    });
+
+    async function loadModule(options: Parameters<typeof durableDb>[0], command: 'serve' | 'build') {
+      const plugin = durableDb(options);
+      await (plugin.configResolved as Function)({ root: tempDir, command } as ResolvedConfig);
+      const loaded = await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+      return typeof loaded === 'string' ? loaded : loaded.code;
+    }
+
+    it('renames the class, moves the migrations and embeds them from their new place', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      const code = await loadModule(mounted, 'build');
+
+      expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-main'))).toBe(false);
+      expect(fs.readdirSync(path.join(tempDir, 'migrations', 'feedback-main'))).toEqual(['20261101000000_init.sql']);
+      const config = JSON.parse(fs.readFileSync(path.join(tempDir, 'wrangler.jsonc'), 'utf-8'));
+      expect(config.migrations[1]).toEqual({
+        tag: 'v2',
+        renamed_classes: [{ from: 'ReviewsMainDatabaseDO', to: 'FeedbackMainDatabaseDO' }],
+      });
+      expect(code).toContain('class FeedbackMainDatabaseDO');
+      expect(code).toContain('20261101000000_init');
+      logSpy.mockRestore();
+    });
+
+    it('stops when the new database already has migrations of its own', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.mkdirSync(path.join(tempDir, 'migrations', 'feedback-main'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'migrations', 'feedback-main', '20261104000000_init.sql'), init);
+
+      await expect(loadModule(mounted, 'serve')).rejects.toThrow(
+        /ReviewsMainDatabaseDO → FeedbackMainDatabaseDO: a renamed database's migrations cannot move with its data/
+      );
+      expect(warnSpy.mock.calls.flat().join('\n')).toContain('mv migrations/reviews-main migrations/feedback-main');
+      expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-main'))).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it('moves the migrations with the rename in the config hook too', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      (durableDb(mounted).config as Function)({ root: tempDir }, { command: 'build', mode: 'production' });
+
+      expect(fs.readdirSync(path.join(tempDir, 'migrations', 'feedback-main'))).toEqual(['20261101000000_init.sql']);
+      expect(fs.existsSync(path.join(tempDir, 'migrations', 'reviews-main'))).toBe(false);
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('migration v2: ReviewsMainDatabaseDO → FeedbackMainDatabaseDO'));
+      logSpy.mockRestore();
+    });
+
+    it('stops in the config hook, before anything reads the config', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.mkdirSync(path.join(tempDir, 'migrations', 'feedback-main'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'migrations', 'feedback-main', '20261104000000_init.sql'), init);
+
+      expect(() => (durableDb(mounted).config as Function)({ root: tempDir }, { command: 'serve', mode: 'development' }))
+        .toThrow(/ReviewsMainDatabaseDO → FeedbackMainDatabaseDO: a renamed database's migrations cannot move/);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      warnSpy.mockRestore();
+    });
+  });
+
   it('writes the bindings when patchWranglerConfig is true', async () => {
     const configPath = path.join(tempDir, 'wrangler.jsonc');
     fs.writeFileSync(configPath, '{"name": "my-worker"}');
@@ -235,6 +330,84 @@ export const { action } = defineDatabase({ schema: { users } });
       { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
     ]);
     expect(config.migrations[0].new_sqlite_classes).toEqual(['MainDatabaseDO']);
+  });
+
+  // @cloudflare/vite-plugin reads wrangler.jsonc in its `config` hook and
+  // builds dist/worker/wrangler.json from that copy (and restarts a dev
+  // server when the file changes later): the patch must land before it.
+  it('patches in the config hook, before any other plugin resolves the config', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker", "migrations": [{"tag": "v1", "new_sqlite_classes": ["OtherDO"]}]}');
+
+    const plugin = durableDb({ patchWranglerConfig: true });
+    expect(typeof plugin.config).toBe('function');
+    await (plugin.config as Function)({ root: tempDir }, { command: 'build', mode: 'production' });
+
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(config.durable_objects.bindings).toEqual([
+      { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },
+    ]);
+    expect(config.migrations).toEqual([
+      { tag: 'v1', new_sqlite_classes: ['OtherDO'] },
+      { tag: 'v2', new_sqlite_classes: ['MainDatabaseDO'] },
+    ]);
+    // visible, not only under DEBUG
+    expect(logSpy).toHaveBeenCalledWith(
+      'durable-db updated wrangler.jsonc (Durable Objects: +MAIN_DATABASE_DO → MainDatabaseDO; migration v2: MainDatabaseDO)'
+    );
+    logSpy.mockRestore();
+  });
+
+  // The config hook settled the file; the first load has nothing to add (no
+  // second summary, no second "not found" warning). A plugin driven without
+  // the hook reconciles on load (the tests above).
+  it('does not reconcile again on load after the config hook', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), '{"name": "my-worker"}');
+    const plugin = durableDb({ patchWranglerConfig: true });
+    await (plugin.config as Function)({ root: tempDir }, { command: 'build', mode: 'production' });
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'build' } as ResolvedConfig);
+    // Gone after the hook: a load that reconciled again would warn it is not found.
+    fs.rmSync(path.join(tempDir, 'wrangler.jsonc'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+
+    expect(logSpy.mock.calls.flat().filter((line) => String(line).startsWith('durable-db updated'))).toHaveLength(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    logSpy.mockRestore();
+  });
+
+  it('resolves a relative root against the working directory', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+    const cwd = process.cwd();
+    process.chdir(path.dirname(tempDir));
+    try {
+      await (durableDb({ patchWranglerConfig: true }).config as Function)(
+        { root: path.basename(tempDir) }, { command: 'serve', mode: 'development' }
+      );
+    } finally {
+      process.chdir(cwd);
+    }
+    expect(JSON.parse(fs.readFileSync(configPath, 'utf-8')).durable_objects.bindings).toHaveLength(1);
+    logSpy.mockRestore();
+  });
+
+  it('leaves the config alone in the config hook unless patching is on', async () => {
+    const configPath = path.join(tempDir, 'wrangler.jsonc');
+    fs.writeFileSync(configPath, '{"name": "my-worker"}');
+
+    await (durableDb().config as Function)({ root: tempDir }, { command: 'build', mode: 'production' });
+
+    expect(fs.readFileSync(configPath, 'utf-8')).toBe('{"name": "my-worker"}');
+  });
+
+  it('exports syncWranglerConfig from durable-db/vite for CLIs', () => {
+    expect(syncWranglerConfig).toBe(moduleSyncWranglerConfig);
   });
 });
 
@@ -289,6 +462,35 @@ describe('__devEpoch virtual module', () => {
   it('emits a null epoch (identity applyDevEpoch) for production builds', async () => {
     const code = await loadDevEpochModule('build');
     expect(code).toContain('export const devEpoch = null');
+    const mod = await importModule(code);
+    expect(mod.applyDevEpoch('tenant', 'main')).toBe('tenant');
+  });
+
+  async function importModule(code: string) {
+    const file = path.join(tempDir, `epoch-${Math.random().toString(36).slice(2)}.mjs`);
+    fs.writeFileSync(file, code);
+    return import(pathToFileURL(file).href);
+  }
+
+  it('applies a database\'s own epoch after `db reset --database`, the project epoch to the rest', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'src', 'databases', 'main.ts'),
+      `import { defineDatabase } from 'durable-db';\nexport const { action } = defineDatabase({});\n`
+    );
+    const { loadDevState, saveDevState } = await import('../../src/cli/state');
+    const state = loadDevState(tempDir);
+    state.epoch = 'project';
+    saveDevState(tempDir, state);
+
+    const { reset } = await import('../../src/cli/reset');
+    const { newEpoch } = await reset({ projectRoot: tempDir, databasesDir: 'src/databases' }, { database: 'main' });
+
+    const mod = await importModule(await loadDevEpochModule('serve'));
+    expect(mod.devEpoch).toBe('project');
+    expect(mod.applyDevEpoch('tenant', 'main')).toBe(`tenant__dev_${newEpoch}`);
+    expect(mod.applyDevEpoch('tenant', 'reviews')).toBe('tenant__dev_project');
+    // stubs generated before per-database epochs pass no name
+    expect(mod.applyDevEpoch('tenant')).toBe('tenant__dev_project');
   });
 
   it('reflects an epoch bump (db reset) on the next load', async () => {
@@ -377,6 +579,45 @@ describe('dev cache watcher', () => {
     expect(workerSend).not.toHaveBeenCalled();
   });
 
+  it('records the running dev server and removes the lock when it closes', async () => {
+    const { readDevServerLock, runningDevServer } = await import('../../src/cli/state');
+    const plugin = durableDb();
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
+    const { server, clientSend } = createMockServer();
+    (plugin.configureServer as Function)(server);
+
+    expect(runningDevServer(tempDir)?.pid).toBe(process.pid);
+
+    // writing the lock is not a dev-state change
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(clientSend).not.toHaveBeenCalled();
+
+    closeServer?.();
+    closeServer = null;
+    expect(readDevServerLock(tempDir)).toBeNull();
+  });
+
+  it('a restarted server keeps its lock when the old one closes', async () => {
+    const { readDevServerLock } = await import('../../src/cli/state');
+    const plugin = durableDb();
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
+
+    const first = createMockServer();
+    const closeFirst = closeServer!;
+    try {
+      (plugin.configureServer as Function)(first.server);
+      const second = createMockServer();
+      (plugin.configureServer as Function)(second.server);
+      const secondToken = readDevServerLock(tempDir)?.token;
+      expect(secondToken).toBeDefined();
+
+      closeFirst();
+      expect(readDevServerLock(tempDir)?.token).toBe(secondToken);
+    } finally {
+      closeFirst();
+    }
+  });
+
   it('survives a hot channel that throws on send and still reloads the rest', async () => {
     const plugin = durableDb();
     await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
@@ -386,15 +627,23 @@ describe('dev cache watcher', () => {
     // External change, like the CLI writing state.json (`db reset`)
     const { loadDevState, saveDevState } = await import('../../src/cli/state');
     const devState = loadDevState(tempDir);
-    devState.epoch = 'bumped';
-    saveDevState(tempDir, devState);
+    let bumps = 0;
 
+    // fs.watch's FSEvents stream (macOS) starts on another thread after
+    // fs.watch() returns, so a write right after configureServer can land
+    // before it listens (a real `db reset` comes long after the server
+    // started). Write again on each poll until a reload is seen; the poll
+    // interval outlasts the plugin's 100 ms reload debounce.
     await vi.waitFor(
       () => {
+        if (clientSend.mock.calls.length === 0) {
+          devState.epoch = `bumped-${++bumps}`;
+          saveDevState(tempDir, devState);
+        }
         expect(workerSend).toHaveBeenCalledWith({ type: 'full-reload' });
         expect(clientSend).toHaveBeenCalledWith({ type: 'full-reload' });
       },
-      { timeout: 3000 }
+      { timeout: 5000, interval: 500 }
     );
   });
 });
@@ -464,6 +713,69 @@ describe('transform', () => {
       path.join(tempDir, 'src', 'other.ts')
     );
     expect(result).toBeNull();
+  });
+
+  it('passes a file with a syntax error and no durable-db usage through untouched', async () => {
+    // A page being edited: the compiler that owns it reports the error, not
+    // durable-db's Babel parse ([plugin:durable-db] for every syntax error).
+    const transform = plugin.transform as Function;
+    const page = `import { Suspense } from 'react';\nexport default function Page() {\n  return ((\n    <form action={save}><Suspense /></form>\n  );\n}\n`;
+    const result = await transform.call(
+      { resolve: async () => null },
+      page,
+      path.join(tempDir, 'src', 'pages', 'products', 'index.tsx')
+    );
+    expect(result).toBeNull();
+  });
+
+  it('still parses a file that imports an action factory', async () => {
+    const transform = plugin.transform as Function;
+    await expect(transform.call(
+      { resolve: async () => null },
+      `import { action } from '../databases/main';\nexport const x = (;`,
+      path.join(tempDir, 'src', 'actions.ts')
+    )).rejects.toThrow();
+  });
+
+  // The pre-check must admit every import the parser takes an `action`
+  // factory from — a syntax error after it proves the parse is reached.
+  it.each([
+    ['a default binding before the braces', `import main, { action } from '../databases/main';`],
+    ['a renamed factory, no spaces', `import main,{action as act} from '../databases/main';`],
+    ['a multi-line clause with a type specifier', `import {\n  type Main,\n  action,\n} from '../databases/main';`],
+    ['a comment before the braces', `import /* factory */ { action } from '../databases/main';`],
+    ['a string specifier', `import { "action" as act } from '../databases/main';`],
+  ])('still parses an action file importing the factory with %s', async (_, importLine) => {
+    const transform = plugin.transform as Function;
+    await expect(transform.call(
+      { resolve: async () => null },
+      `${importLine}\nexport const x = (;`,
+      path.join(tempDir, 'src', 'actions.ts')
+    )).rejects.toThrow();
+  });
+
+  it('transforms an action file that also imports the database module\'s default export', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'src', 'databases', 'main.ts'),
+      `import { defineDatabase } from 'durable-db';\nimport { users } from './schema';\n` +
+      `export const { action } = defineDatabase({ schema: { users } });\nexport default 1;\n`
+    );
+    const file = path.join(tempDir, 'src', 'actions', 'users.ts');
+    const code =
+      `import main, { action } from '../databases/main';\n` +
+      `export const getUser = action({ args: {}, handler: async () => main });\n`;
+
+    const transform = plugin.transform as Function;
+    const result = await transform.call(
+      { resolve: async (source: string, importer: string) => ({ id: path.resolve(path.dirname(importer), source) + '.ts' }) },
+      code,
+      file
+    );
+
+    expect(result).not.toBeNull();
+    expect(result.code).toContain('export async function getUser');
+    expect(result.code).toContain('registerAction("main", "getUser"');
+    expect(result.code).not.toContain('getUser = action(');
   });
 
   it('handles query parameters in id', async () => {

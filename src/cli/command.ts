@@ -1,11 +1,41 @@
 import { Command } from 'commander';
 import type { DatabaseSource } from '../vite/modules/discovery';
+import { SchemaRenameRequiredError } from '../migrations/snapshot';
 import { push } from './push';
 import { generate } from './generate';
 import { status, formatStatus } from './status';
 import { reset } from './reset';
 import { validate } from './validate';
 import { reportCliError } from './shared';
+
+/** Collect a repeatable option's values. */
+function collect(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+/** The command as the user typed it: `lagerverk db push`, `db push`. */
+function commandPath(command: Command): string {
+  const names: string[] = [];
+  for (let current: Command | null = command; current; current = current.parent) {
+    if (current.name()) names.unshift(current.name());
+  }
+  return names.join(' ');
+}
+
+/** Print a command's error; a rename question names the command to re-run. */
+function fail(command: Command, error: unknown, verbose?: boolean): never {
+  if (error instanceof SchemaRenameRequiredError) {
+    console.error(`Error: ${error.describe(commandPath(command))}`);
+  } else {
+    reportCliError(error, verbose);
+  }
+  process.exit(1);
+}
+
+const RENAME_HELP =
+  'Answer a rename question: <table>.<old>=<new> renames a column, <old>=<new> a table (repeatable)';
+const NO_RENAMES_HELP =
+  'Answer every remaining rename question with "create" (the old column/table is dropped, its data lost)';
 
 /**
  * Register all database subcommands (push, generate, status, reset,
@@ -34,14 +64,20 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
   });
   program.command('push')
     .description('Push schema changes to dev migrations')
+    .option('--database <db>', 'Only push this database')
+    .option('--rename <table.old=new>', RENAME_HELP, collect)
+    .option('--no-renames', NO_RENAMES_HELP)
     .option('-d, --databases-dir <dir>', 'Directory containing databases (default: src/databases)')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations (default: migrations)')
     .option('-v, --verbose', 'Verbose output')
-    .action(async (options) => {
+    .action(async (options, command: Command) => {
       try {
         const results = await push({
           ...dirs(options),
           verbose: options.verbose,
+          database: options.database,
+          renames: options.rename,
+          noRenames: options.renames === false,
         });
 
         if (results.length === 0) {
@@ -54,6 +90,9 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           if (r.hasChanges) {
             hasChanges = true;
             console.log(`✓ ${r.database}: ${r.migrationName} (${r.statements.length} statements)`);
+            for (const warning of r.warnings) {
+              console.warn(`  ⚠ ${warning}`);
+            }
           } else {
             console.log(`· ${r.database}: no changes`);
           }
@@ -63,18 +102,20 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           console.log('\nAll databases are up to date.');
         }
       } catch (error) {
-        reportCliError(error, options.verbose);
-        process.exit(1);
+        fail(command, error, options.verbose);
       }
     });
 
   program.command('generate [name]')
     .description('Generate production migration from schema changes')
     .option('--database <db>', 'Only generate for this database')
+    .option('--rename <table.old=new>', RENAME_HELP, collect)
+    .option('--no-renames', NO_RENAMES_HELP)
+    .option('--force', 'Write the migration even when a statement fails on every table that has rows (a NOT NULL column without a default)')
     .option('-d, --databases-dir <dir>', 'Directory containing databases (default: src/databases)')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations (default: migrations)')
     .option('-v, --verbose', 'Verbose output')
-    .action(async (name, options) => {
+    .action(async (name, options, command: Command) => {
       try {
         const results = await generate(
           {
@@ -84,6 +125,9 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           {
             name,
             database: options.database,
+            renames: options.rename,
+            noRenames: options.renames === false,
+            force: options.force,
           }
         );
 
@@ -99,6 +143,9 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
             console.log(`✓ ${r.database}: ${r.migrationName}`);
             console.log(`  → ${r.migrationPath}`);
             console.log(`  ${r.statements.length} statement(s)`);
+            for (const warning of r.warnings) {
+              console.warn(`  ⚠ ${warning}`);
+            }
           } else {
             console.log(`· ${r.database}: no changes`);
           }
@@ -108,39 +155,40 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           console.log('\nNo pending changes to generate.');
         }
       } catch (error) {
-        reportCliError(error, options.verbose);
-        process.exit(1);
+        fail(command, error, options.verbose);
       }
     });
 
   program.command('status')
     .description('Show database migration status')
+    .option('--database <db>', 'Only show this database')
     .option('-d, --databases-dir <dir>', 'Directory containing databases (default: src/databases)')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations (default: migrations)')
     .option('-v, --verbose', 'Verbose output')
-    .action(async (options) => {
+    .action(async (options, command: Command) => {
       try {
         const result = await status({
           ...dirs(options),
           verbose: options.verbose,
+          database: options.database,
         });
 
         console.log(formatStatus(result));
       } catch (error) {
-        reportCliError(error, options.verbose);
-        process.exit(1);
+        fail(command, error, options.verbose);
       }
     });
 
   program.command('reset')
     .description('Reset dev state and create fresh DB instances (via epoch bump)')
     .option('--keep-epoch', 'Only clear dev migrations, keep the same epoch')
-    .option('--purge-local-storage', "Also delete workerd's persisted DO storage under .wrangler/ (requires the dev server to be stopped)")
-    .option('--database <db>', 'Only reset this database')
+    .option('--purge-local-storage', "Also delete workerd's persisted DO storage under .wrangler/ (refused while the dev server runs)")
+    .option('--force', 'With --purge-local-storage: purge even when a dev server appears to be running')
+    .option('--database <db>', 'Only reset this database (it alone starts fresh)')
     .option('-d, --databases-dir <dir>', 'Directory containing databases (default: src/databases)')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations (default: migrations)')
     .option('-v, --verbose', 'Verbose output')
-    .action(async (options) => {
+    .action(async (options, command: Command) => {
       try {
         const result = await reset(
           {
@@ -150,11 +198,14 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           {
             keepEpoch: options.keepEpoch,
             purgeLocalStorage: options.purgeLocalStorage,
+            force: options.force,
             database: options.database,
           }
         );
 
-        if (result.newEpoch) {
+        if (result.newEpoch && options.database) {
+          console.log(`✓ New epoch for ${options.database}: ${result.newEpoch} — it starts fresh on the next request (other databases keep their data)`);
+        } else if (result.newEpoch) {
           console.log(`✓ New epoch: ${result.newEpoch} — databases start fresh on the next request`);
         } else {
           console.log(`✓ Epoch unchanged`);
@@ -173,8 +224,7 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           );
         }
       } catch (error) {
-        reportCliError(error, options.verbose);
-        process.exit(1);
+        fail(command, error, options.verbose);
       }
     });
 
@@ -185,7 +235,7 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
     .option('-d, --databases-dir <dir>', 'Directory containing databases (default: src/databases)')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations (default: migrations)')
     .option('-v, --verbose', 'Show each migration as it is applied')
-    .action(async (options) => {
+    .action(async (options, command: Command) => {
       try {
         const results = await validate({
           ...dirs(options),
@@ -224,14 +274,17 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           } else if (r.migrationsValid) {
             console.log(`  Schema matches ✓`);
           }
+
+          for (const warning of r.pendingWarnings) {
+            console.warn(`  ⚠ ${warning}`);
+          }
         }
 
         if (!allValid) {
           process.exit(1);
         }
       } catch (error) {
-        reportCliError(error, options.verbose);
-        process.exit(1);
+        fail(command, error, options.verbose);
       }
     });
 

@@ -124,6 +124,15 @@ const items = table('items', {
   createdAt: integer({ mode: 'timestamp' }).notNull(),
 });
 
+/** `items` as a schema change not yet migrated sees it: one column more. */
+const itemsWithWeight = table('items', {
+  id: text().primaryKey(),
+  day: integer().notNull(),
+  active: integer({ mode: 'boolean' }).notNull().default(false),
+  createdAt: integer({ mode: 'timestamp' }).notNull(),
+  weightGrams: integer(),
+});
+
 export class TestKyselyDO extends SqliteDurableObject {
   migrations: Migrations = {
     '20240101_items': {
@@ -239,5 +248,28 @@ export class TestKyselyDO extends SqliteDurableObject {
     const t = await db.selectFrom('items').selectAll().where('id', '=', 'legacy-t').executeTakeFirst();
     const f = await db.selectFrom('items').selectAll().where('id', '=', 'legacy-f').executeTakeFirst();
     return { t: (t as any).active, f: (f as any).active };
+  }
+
+  /**
+   * Query a column the table does not have (schema changed, not migrated):
+   * a select, a WHERE and an update. Each must fail with "no such column" —
+   * never read back the column's name, or compare it as a string.
+   */
+  async missingColumn(): Promise<{ select: string; where: string; update: string }> {
+    await this.ensureMigrations();
+    this.sql.exec(`INSERT OR IGNORE INTO items (id, day, active, created_at) VALUES ('w1', 1, 0, 0)`);
+    const db = createKyselyFromSql<any>(this.sql, { schema: { items: itemsWithWeight } });
+    const attempt = async (query: () => Promise<unknown>): Promise<string> => {
+      try {
+        return `ok: ${JSON.stringify(await query())}`;
+      } catch (error) {
+        return `error: ${(error as Error).message}`;
+      }
+    };
+    return {
+      select: await attempt(() => db.selectFrom('items').select(['id', 'weightGrams']).execute()),
+      where: await attempt(() => db.selectFrom('items').select('id').where('weightGrams', 'is', null).execute()),
+      update: await attempt(() => db.updateTable('items').set({ weightGrams: 5 }).where('id', '=', 'w1').execute()),
+    };
   }
 }

@@ -28,6 +28,7 @@ interface TestEnv {
         falseReadValue: unknown;
       }>;
       legacyStringBooleanRead: () => Promise<{ t: unknown; f: unknown }>;
+      missingColumn: () => Promise<{ select: string; where: string; update: string }>;
     };
   };
 }
@@ -71,5 +72,15 @@ describe('Kysely E2E (real workerd SqlStorage)', () => {
     const result = await stub.legacyStringBooleanRead();
     expect(result.t).toBe(true);
     expect(result.f).toBe(false);
+  });
+
+  it('fails with "no such column" for a column the table lacks, never reading it as a string', async () => {
+    // workerd's SQLite reads a double-quoted identifier that names no column
+    // as a string literal: `select "weight_grams"` returned 'weight_grams' and
+    // a WHERE on it compared two constants. Identifiers are backtick-quoted.
+    const result = await newStub().missingColumn();
+    expect(result.select).toMatch(/^error: no such column: weight_grams/);
+    expect(result.where).toMatch(/^error: no such column: weight_grams/);
+    expect(result.update).toMatch(/^error: no such column: weight_grams/);
   });
 });

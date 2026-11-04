@@ -5,6 +5,7 @@ import * as t from '@babel/types';
 import _generate from '@babel/generator';
 import { parse } from '@babel/parser';
 import { BABEL_PARSER_PLUGINS } from './parser';
+import type { TombstoneClass } from './wrangler';
 
 // Handle ESM/CJS babel packages
 const generate =
@@ -224,11 +225,17 @@ function generateWithMap(ast: t.File, sourceFileName?: string) {
 // Durable Objects Module Generation
 // ============================================================================
 
+/**
+ * The module the worker re-exports its Durable Objects from: a class per
+ * database, plus a tombstone per class of a removed database the wrangler
+ * migrations still declare (`tombstones`, from `tombstoneClasses()`).
+ */
 export function generateDurableObjectsModule(
   databases: DatabaseInfo[],
   registryImport: string,
   isDev: boolean = false,
-  actionFiles: string[] = []
+  actionFiles: string[] = [],
+  tombstones: TombstoneClass[] = []
 ): string {
   const bindingNamesExpr = buildBindingNamesObject(databases);
   const dbTransportsExpr = buildDbTransportsObject(databases);
@@ -238,7 +245,10 @@ export function generateDurableObjectsModule(
   const anyWebSocket = databases.some((db) => db.transport === 'websocket');
 
   const imports: t.ImportDeclaration[] = [
-    createNamedImport(['SqliteDurableObject', 'type'], 'durable-db/db'),
+    createNamedImport(
+      ['SqliteDurableObject', 'type', ...(tombstones.length > 0 ? ['RemovedDatabaseDurableObject'] : [])],
+      'durable-db/db'
+    ),
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
     // Side-effect imports of every action-defining file, so their
     // `registerAction(...)` calls run at DO startup and populate the registry in
@@ -264,9 +274,29 @@ export function generateDurableObjectsModule(
   for (const db of databases) {
     statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, dbTransportsExpr, isDev));
   }
+  for (const tombstone of tombstones) {
+    statements.push(buildTombstoneStatement(tombstone));
+  }
 
   const program = t.program(statements);
   return generateCode(t.file(program));
+}
+
+/**
+ * `export class <Old>DatabaseDO extends RemovedDatabaseDurableObject { … }`:
+ * the class of a removed database, kept so the worker still exports every
+ * class its migrations declare — its storage untouched, every call refused.
+ */
+function buildTombstoneStatement(tombstone: TombstoneClass): t.Statement {
+  const classDecl = t.classDeclaration(
+    t.identifier(tombstone.className),
+    t.identifier('RemovedDatabaseDurableObject'),
+    t.classBody([
+      t.classProperty(t.identifier('removedClassName'), t.stringLiteral(tombstone.className)),
+      t.classProperty(t.identifier('deleteMigration'), t.valueToNode(tombstone.deleteMigration)),
+    ])
+  );
+  return t.exportNamedDeclaration(classDecl);
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   stripJsoncComments,
   contentHasComments,
   describeWranglerCheck,
+  tombstoneClasses,
 } from '../../../src/vite/modules/wrangler';
 import { vi } from 'vitest';
 import type { DatabaseInfo } from '../../../src/db';
@@ -1122,10 +1123,82 @@ describe('wrangler', () => {
 
       const description = describeWranglerCheck(checkWranglerConfig(tempDir, [mockDatabase]));
 
-      expect(description).toContain('binding class(es) the worker no longer exports (OldDatabaseDO)');
-      expect(description).toContain('declaring class(es) of database(s) that no longer exist (OldDatabaseDO)');
+      expect(description).toContain('binding class(es) of database(s) that no longer exist (OldDatabaseDO)');
+      expect(description).not.toContain('declaring');
       expect(description).not.toContain('missing');
       warnSpy.mockRestore();
+    });
+
+    it('passes with a removed database\'s class left in the migrations, printing the deleted_classes note once', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+        durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'OldDatabaseDO'] }],
+      }));
+
+      const result = checkWranglerConfig(tempDir, [mockDatabase]);
+
+      // The worker exports a tombstone of the class: nothing for a build to fail on.
+      expect(result.ok).toBe(true);
+      expect(result.staleClasses).toEqual(['OldDatabaseDO']);
+      expect(warnSpy).toHaveBeenCalledOnce();
+      expect(warnSpy.mock.calls[0][0]).toContain('[durable-db] note:');
+      expect(warnSpy.mock.calls[0][0]).toContain('{"tag":"v2","deleted_classes":["OldDatabaseDO"]}');
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('tombstoneClasses', () => {
+    const write = (config: unknown) =>
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), `// the app's\n${JSON.stringify(config, null, 2)}\n`);
+
+    it('keeps the class of a removed database, with the migration that deletes it', () => {
+      write({
+        durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+        migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'ReviewsFeedbackDatabaseDO', 'OtherDO'] }],
+      });
+
+      expect(tombstoneClasses(tempDir, [mockDatabase])).toEqual([
+        {
+          className: 'ReviewsFeedbackDatabaseDO',
+          deleteMigration: { tag: 'v2', deleted_classes: ['ReviewsFeedbackDatabaseDO'] },
+        },
+      ]);
+    });
+
+    it('keeps a class created by new_classes or renamed to, and one a user binding still names', () => {
+      write({
+        durable_objects: { bindings: [{ name: 'LEGACY', class_name: 'LegacyDatabaseDO' }] },
+        migrations: [
+          { tag: 'v1', new_classes: ['LegacyDatabaseDO'], new_sqlite_classes: ['ReviewsMainDatabaseDO'] },
+          { tag: 'v2', renamed_classes: [{ from: 'ReviewsMainDatabaseDO', to: 'FeedbackMainDatabaseDO' }] },
+        ],
+      });
+
+      expect(tombstoneClasses(tempDir, []).map((t) => t.className)).toEqual([
+        'LegacyDatabaseDO',
+        'FeedbackMainDatabaseDO',
+      ]);
+    });
+
+    it('keeps none for a deleted class, a class renamed away, or a database that exists', () => {
+      write({
+        migrations: [
+          { tag: 'v1', new_sqlite_classes: ['MainDatabaseDO', 'GoneDatabaseDO', 'ReviewsMainDatabaseDO'] },
+          { tag: 'v2', renamed_classes: [{ from: 'ReviewsMainDatabaseDO', to: 'FeedbackMainDatabaseDO' }] },
+          { tag: 'v3', deleted_classes: ['GoneDatabaseDO'] },
+        ],
+      });
+      const feedbackMain = { ...mockDatabase, name: 'feedback-main', className: 'FeedbackMainDatabaseDO' };
+
+      expect(tombstoneClasses(tempDir, [mockDatabase, feedbackMain])).toEqual([]);
+    });
+
+    it('keeps none without a wrangler.jsonc/json, or when it does not parse', () => {
+      fs.writeFileSync(path.join(tempDir, 'wrangler.toml'), '[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["GoneDatabaseDO"]\n');
+      expect(tombstoneClasses(tempDir, [])).toEqual([]);
+      fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), '{ "migrations": [');
+      expect(tombstoneClasses(tempDir, [])).toEqual([]);
     });
   });
 });

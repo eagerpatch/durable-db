@@ -113,6 +113,32 @@ describe('generateDurableObjectsModule', () => {
     expect(code).toContain('class MainDatabaseDO extends SqliteDurableObject');
   });
 
+  it('exports a tombstone for each class of a removed database', () => {
+    const deleteMigration = { tag: 'v3', deleted_classes: ['ReviewsFeedbackDatabaseDO'] };
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry', false, [], [
+      { className: 'ReviewsFeedbackDatabaseDO', deleteMigration },
+    ]);
+    expect(code).toMatch(/import\s*\{[^}]*RemovedDatabaseDurableObject[^}]*\}\s*from\s*["']durable-db\/db["']/);
+    expect(code).toContain('export class ReviewsFeedbackDatabaseDO extends RemovedDatabaseDurableObject');
+    expect(code).toContain('removedClassName = "ReviewsFeedbackDatabaseDO"');
+    expect(code).toContain('class MainDatabaseDO extends SqliteDurableObject');
+    // The entry the tombstone's errors name, as data.
+    const entry = /deleteMigration = (\{[\s\S]*?\});/.exec(code)?.[1];
+    expect(entry && new Function(`return ${entry}`)()).toEqual(deleteMigration);
+  });
+
+  it('exports tombstones even when no database is left', () => {
+    const code = generateDurableObjectsModule([], 'durable-db/registry', true, [], [
+      { className: 'GoneDatabaseDO', deleteMigration: { tag: 'v2', deleted_classes: ['GoneDatabaseDO'] } },
+    ]);
+    expect(code).toContain('export class GoneDatabaseDO extends RemovedDatabaseDurableObject');
+  });
+
+  it('imports no tombstone base without tombstones', () => {
+    const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
+    expect(code).not.toContain('RemovedDatabaseDurableObject');
+  });
+
   it('includes migrations property', () => {
     const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('migrations = {}');

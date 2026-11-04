@@ -88,6 +88,7 @@
     "drizzle-kit": "^0.31.11",
     "drizzle-orm": "^0.45.4",
     "esbuild": "^0.27.1",
+    "jsonc-parser": "^3.3.1",
     "kysely": "^0.29.6",
     "libsql": "^0.5.0",
     "magic-string": "^0.30.21"

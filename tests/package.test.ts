@@ -6,6 +6,7 @@ import * as path from 'node:path';
 const root = path.resolve(import.meta.dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf-8')) as {
   peerDependencies: Record<string, string>;
+  dependencies: Record<string, string>;
 };
 
 /** The majors a `^A.0.0 || ^B.0.0` range admits. */
@@ -25,5 +26,9 @@ describe('package.json', () => {
 
     expect(caretMajors(pkg.peerDependencies.vite)).toContain(major);
     expect(caretMajors(pkg.peerDependencies.vite)).toContain(8);
+  });
+
+  it('lists jsonc-parser, which the wrangler config editing imports at runtime', () => {
+    expect(pkg.dependencies['jsonc-parser']).toBeDefined();
   });
 });

@@ -46,11 +46,14 @@ export const DEV_MIGRATION_PREFIX = '_dev_';
 
 /**
  * Journal of the statements applied by dev migrations, written in dev only
- * (production builds embed no dev migrations). `db generate` squashes the dev
- * migrations into a production migration with the same statements; a pending
- * production migration whose statements this journal holds is recorded as
- * applied instead of executed (it would fail with "duplicate column name" or
- * "already exists" against the schema the dev migrations already built).
+ * (production builds embed no dev migrations), each under the dev migration
+ * that ran it. It serves the two ways a dev storage meets statements it
+ * already ran (they would fail with "duplicate column name" or "already
+ * exists" against the schema the dev migrations built):
+ * - `db push` squashes from the production snapshot every time, so the next
+ *   dev migration repeats the previous one's statements: those are skipped;
+ * - `db generate` squashes the dev migrations into a production migration
+ *   with the same statements: it is recorded as applied instead of executed.
  */
 const DEV_STATEMENTS_TABLE = '__dev_migration_statements';
 
@@ -222,8 +225,9 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
   /**
    * The name `db` commands know this database by (its file name, prefixed by
-   * its mount for a mounted source), used in recovery hints. Derived from the
-   * class name (`<PascalCase(name)>DatabaseDO`) when not set.
+   * its mount for a mounted source), used in recovery hints. The generated
+   * Durable Object sets it; a hand-written subclass that does not gets a
+   * best-effort name derived from its class name (`<PascalCase(name)>DatabaseDO`).
    */
   protected databaseName?: string;
 
@@ -367,6 +371,9 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       return;
     }
 
+    // Dev only: what a new `db push` repeats of an earlier one is skipped.
+    const repeated = this.statementsRepeatedFromEarlierPushes(pending);
+
     if (pending.some((p) => p.name.startsWith(DEV_MIGRATION_PREFIX))) {
       this.sql.exec(`
         CREATE TABLE IF NOT EXISTS ${DEV_STATEMENTS_TABLE} (
@@ -416,7 +423,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     // WRITE 2: Apply migrations
     const startedAt = Date.now();
     try {
-      this.applyMigrations(pending);
+      this.applyMigrations(pending, repeated);
 
       // Success — reset the attempt counter
       this.sql.exec(`
@@ -569,6 +576,56 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
+   * The statements of pending dev migrations that an earlier dev migration of
+   * this storage already ran (normalized), by pending dev migration.
+   *
+   * `db push` always diffs from the production snapshot, so after a second
+   * schema change the new squashed dev migration holds the previous one's
+   * statements again — `ADD weight_grams` next to the new `ADD color_code` —
+   * and this storage applied them with the previous one. An earlier dev
+   * migration's statements are skipped only when the pending one contains
+   * every statement that migration ran: then it is the same change, squashed
+   * again. A statement the pending migration shares with an earlier one only
+   * in part (a table rebuilt differently) still runs, and a conflict is
+   * reported as one.
+   */
+  private statementsRepeatedFromEarlierPushes(pending: PendingChunk[]): Map<string, { statements: Set<string>; from: string[] }> {
+    const repeated = new Map<string, { statements: Set<string>; from: string[] }>();
+    const devChunks = pending.filter((chunk) => chunk.name.startsWith(DEV_MIGRATION_PREFIX));
+    if (devChunks.length === 0) return repeated;
+    const devStatements = this.readDevStatements();
+    if (!devStatements || devStatements.size === 0) return repeated;
+
+    // What each earlier dev migration ran.
+    const ranBy = new Map<string, Set<string>>();
+    for (const [statement, migration] of devStatements) {
+      const statements = ranBy.get(migration) ?? new Set<string>();
+      statements.add(statement);
+      ranBy.set(migration, statements);
+    }
+
+    for (const name of new Set(devChunks.map((chunk) => chunk.name))) {
+      const own = new Set(
+        devChunks
+          .filter((chunk) => chunk.name === name)
+          .flatMap((chunk) => chunk.statements)
+          .map(normalizeStatement)
+          .filter((statement) => statement.length > 0)
+      );
+      const statements = new Set<string>();
+      const from: string[] = [];
+      for (const [earlier, ran] of ranBy) {
+        if (earlier === name) continue;
+        if (![...ran].every((statement) => own.has(statement))) continue;
+        for (const statement of ran) statements.add(statement);
+        from.push(earlier);
+      }
+      if (statements.size > 0) repeated.set(name, { statements, from });
+    }
+    return repeated;
+  }
+
+  /**
    * The statements this storage's dev migrations applied (normalized →
    * the dev migration that ran it), or null when it never ran one.
    */
@@ -619,9 +676,15 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Apply a list of pending migration chunks.
+   * Apply a list of pending migration chunks, skipping the statements of a
+   * dev migration that earlier dev migrations already ran (`repeated`, see
+   * {@link statementsRepeatedFromEarlierPushes}).
    */
-  private applyMigrations(pending: PendingChunk[]): void {
+  private applyMigrations(
+    pending: PendingChunk[],
+    repeated: Map<string, { statements: Set<string>; from: string[] }> = new Map()
+  ): void {
+    const reported = new Set<string>();
     for (const { name, chunkIndex, statements } of pending) {
       // Track which statement is executing so the catch can report it.
       // A chunk may contain many statements and the raised error doesn't
@@ -629,11 +692,18 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       let currentIndex = -1;
       let currentStatement: string | null = null;
       const isDevMigration = name.startsWith(DEV_MIGRATION_PREFIX);
+      const skip = repeated.get(name);
+      let skipped = 0;
 
       const applyChunk = () => {
+        skipped = 0;
         for (let i = 0; i < statements.length; i++) {
           const statement = statements[i];
           if (!statement.trim()) continue;
+          if (skip?.statements.has(normalizeStatement(statement))) {
+            skipped++;
+            continue;
+          }
           currentIndex = i;
           currentStatement = statement;
           this.sql.exec(statement);
@@ -681,6 +751,14 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
         }
 
         debugMigrations('Migration chunk applied: %s[%d]', name, chunkIndex);
+        if (skip && skipped > 0 && !reported.has(name)) {
+          reported.add(name);
+          console.log(
+            `[database] Dev migration ${name}: skipped the statement(s) dev migration(s) ` +
+            `${skip.from.join(', ')} already applied to this storage (\`db push\` squashes every change ` +
+            `since the last \`db generate\` again).`
+          );
+        }
       } catch (error) {
         const location = currentStatement !== null
           ? ` stmt ${currentIndex}: ${formatStatementForLog(currentStatement)}`
@@ -725,7 +803,11 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     const database = this.databaseName ?? databaseNameFromClass(this.constructor.name);
     const reset = `db reset --database ${database ?? '<database>'}`;
 
-    const likelyCause = untrackedDev.length > 0
+    const likelyCause = untrackedDev.length > 0 && name.startsWith(DEV_MIGRATION_PREFIX)
+      ? `This storage applied an earlier dev migration (${untrackedDev.join(', ')}) whose change ` +
+        `"${name}" makes again in another form — a column or table changed once more since that ` +
+        `\`db push\` (or it was applied before durable-db journaled dev migration statements).`
+      : untrackedDev.length > 0
       ? `This storage applied dev migrations (${untrackedDev.join(', ')}) that \`db generate\` ` +
         `has since turned into production migrations, and their statements differ from ` +
         `"${name}" (or were applied before durable-db journaled dev migration statements).`

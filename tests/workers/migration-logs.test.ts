@@ -204,4 +204,25 @@ describe('dev → production migration handoff (real workerd)', () => {
       columns: ['id', 'weight_grams'],
     });
   });
+
+  it('applies a second db push that repeats the first, then hands both off', async () => {
+    const stub = raceEnv.TEST_DEV_HANDOFF_DO.get(raceEnv.TEST_DEV_HANDOFF_DO.idFromName(`d-${crypto.randomUUID()}`));
+    const addWeight = 'ALTER TABLE `products` ADD `weight_grams` integer;';
+    const addColor = 'ALTER TABLE `products` ADD `color_code` text;';
+
+    await stub.migrateWith({ ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight]] } });
+    // `db push` squashes from the production snapshot: dev_B repeats dev_A.
+    const second = await stub.migrateWith({ ...init, '_dev_dev_bbbb0002': { chunks: [[addWeight, addColor]] } });
+    expect(second).toEqual({
+      journal: ['20261104100000_init[0]', '_dev_dev_aaaa0001[0]', '_dev_dev_bbbb0002[0]'],
+      columns: ['id', 'weight_grams', 'color_code'],
+    });
+
+    const generated = await stub.migrateWith({
+      ...init,
+      '20261104120000_fields': { chunks: [[addWeight, addColor]] },
+    });
+    expect(generated).toMatchObject({ columns: ['id', 'weight_grams', 'color_code'] });
+    expect((generated as { journal: string[] }).journal).toContain('20261104120000_fields[0]');
+  });
 });

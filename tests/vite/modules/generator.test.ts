@@ -118,6 +118,23 @@ describe('generateDurableObjectsModule', () => {
     expect(code).toContain('migrations = {}');
   });
 
+  it('names the database the db commands know, for recovery hints', () => {
+    const code = generateDurableObjectsModule(
+      [{ ...mockDatabase, name: 'orderItems', className: 'OrderItemsDatabaseDO' }],
+      'durable-db/registry'
+    );
+    // Not `order-items`: the class name alone cannot tell the two apart.
+    expect(code).toMatch(/class OrderItemsDatabaseDO extends SqliteDurableObject \{[\s\S]*?databaseName = "orderItems";/);
+  });
+
+  it('names the database inside a Browsable() wrapper too', () => {
+    const code = generateDurableObjectsModule(
+      [{ ...mockDatabase, name: 'reviews-feedback', browsable: true }],
+      'durable-db/registry'
+    );
+    expect(code).toMatch(/Browsable\(\)\(class extends SqliteDurableObject \{[\s\S]*?databaseName = "reviews-feedback";/);
+  });
+
   it('generates rpc method', () => {
     const code = generateDurableObjectsModule([mockDatabase], 'durable-db/registry');
     expect(code).toContain('async rpc(method, args, rpcContext)');

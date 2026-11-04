@@ -318,6 +318,7 @@ function buildMigrationGuardMethod(
  * When not browsable:
  *   export class ClassName extends SqliteDurableObject {
  *     migrations = {...};
+ *     databaseName = "name";
  *     async rpc(...) { ... }
  *   }
  */
@@ -333,9 +334,12 @@ function buildDurableObjectStatements(
     t.identifier('migrations'),
     buildMigrationsObject(db.migrations)
   );
+  // The name `db` commands know the database by, for recovery hints (the
+  // class name cannot give it back: `orderItems` and `order-items` share one).
+  const databaseNameProperty = t.classProperty(t.identifier('databaseName'), t.stringLiteral(db.name));
   const dataProperties = hasSchema(db)
-    ? [migrationsProperty, buildSchemaProperty(db)]
-    : [migrationsProperty];
+    ? [migrationsProperty, databaseNameProperty, buildSchemaProperty(db)]
+    : [migrationsProperty, databaseNameProperty];
 
   const sysMethod = buildSysMethod();
   const classMethods: t.ClassMethod[] = [rpcMethod, sysMethod];

@@ -1146,4 +1146,122 @@ describe('dev → production migration handoff', () => {
     expect(err!.message).toContain('db reset --database catalog');
     expect(err!.message).toContain('duplicate column name');
   });
+
+  it('names the database by its databaseName in the reset hint (the generated DO sets it)', async () => {
+    class OrderItemsDatabaseDO extends SqliteDurableObject {
+      migrations: Migrations = {};
+      protected databaseName = 'orderItems';
+    }
+    const { state, sqlite } = createSqliteState();
+    const dobj = new OrderItemsDatabaseDO(state, {});
+    dobj.migrations = init;
+    await dobj.fetch(new Request('http://test/'));
+    sqlite.exec('ALTER TABLE `products` ADD `weight_grams` integer');
+
+    const again = new OrderItemsDatabaseDO(state, {});
+    again.migrations = {
+      ...init,
+      '20261104111548_weight': { chunks: [['ALTER TABLE `products` ADD `weight_grams` integer;']] },
+    };
+    const err = await again.fetch(new Request('http://test/')).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+    // Not `order-items`, which is what the class name alone would give.
+    expect(err!.message).toContain('db reset --database orderItems');
+  });
+});
+
+describe('repeated `db push` in dev', () => {
+  // `db push` diffs the schema against the PRODUCTION snapshot, so every push
+  // until the next `db generate` repeats the earlier pushes' statements.
+  const init = {
+    '20261104100000_init': {
+      chunks: [['CREATE TABLE `products` (\n\t`id` text PRIMARY KEY NOT NULL\n);\n']],
+    },
+  };
+  const addWeight = 'ALTER TABLE `products` ADD `weight_grams` integer;';
+  const addColor = 'ALTER TABLE `products` ADD `color_code` text;';
+  const addSku = 'ALTER TABLE `products` ADD `sku` text;';
+
+  async function boot(state: unknown, migrations: Migrations) {
+    const dobj = new CatalogDatabaseDO(state, {});
+    dobj.migrations = migrations;
+    await dobj.fetch(new Request('http://test/'));
+    return dobj;
+  }
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    return () => {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    };
+  });
+
+  it('skips what a second push repeats of the first, then hands both off to db generate', async () => {
+    const { state, journal, columns } = createSqliteState();
+
+    // Add weightGrams, restart dev: push writes dev_A.
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight]] } });
+    // Add colorCode, restart dev: push writes dev_B = dev_A's statement + the new one.
+    await boot(state, { ...init, '_dev_dev_bbbb0002': { chunks: [[addWeight, addColor]] } });
+
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code']);
+    expect(journal()).toEqual(['20261104100000_init[0]', '_dev_dev_aaaa0001[0]', '_dev_dev_bbbb0002[0]']);
+    expect(logSpy.mock.calls.map(([line]) => String(line)).join('\n')).toContain(
+      'Dev migration _dev_dev_bbbb0002: skipped the statement(s) dev migration(s) _dev_dev_aaaa0001 already applied'
+    );
+
+    // A third push repeats both.
+    await boot(state, { ...init, '_dev_dev_cccc0003': { chunks: [[addWeight, addColor, addSku]] } });
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code', 'sku']);
+
+    // `db generate`: the production migration holds all three.
+    await boot(state, { ...init, '20261105000000_product_fields': { chunks: [[addWeight, addColor, addSku]] } });
+    expect(journal()).toContain('20261105000000_product_fields[0]');
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code', 'sku']);
+  });
+
+  it('skips the repeated statements whatever their order in the new push', async () => {
+    const { state, columns } = createSqliteState();
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight]] } });
+
+    // A column added above weightGrams in the table: drizzle-kit lists it first.
+    await boot(state, { ...init, '_dev_dev_bbbb0002': { chunks: [[addColor, addWeight]] } });
+
+    expect(columns('products')).toEqual(['id', 'weight_grams', 'color_code']);
+  });
+
+  it('runs a statement an earlier push ran only when that push is not repeated whole — and explains the conflict', async () => {
+    const { state, journal } = createSqliteState();
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight, addColor]] } });
+
+    // colorCode changed type since: dev_A is not repeated whole.
+    const err = await boot(state, {
+      ...init,
+      '_dev_dev_bbbb0002': { chunks: [[addWeight, 'ALTER TABLE `products` ADD `color_code` integer;']] },
+    }).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+    expect(err!.message).toContain('duplicate column name: weight_grams');
+    expect(err!.message).toContain('earlier dev migration (_dev_dev_aaaa0001)');
+    expect(err!.message).toContain('db reset --database catalog');
+    expect(journal()).not.toContain('_dev_dev_bbbb0002[0]');
+  });
+
+  it('never skips anything in a production migration', async () => {
+    const { state } = createSqliteState();
+    await boot(state, { ...init, '_dev_dev_aaaa0001': { chunks: [[addWeight]] } });
+
+    // A production migration that is not dev_A squashed (it has more) still runs whole.
+    const err = await boot(state, {
+      ...init,
+      '20261105000000_fields': { chunks: [[addWeight, addColor]] },
+    }).then(() => null, (e: Error) => e);
+
+    expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+  });
 });

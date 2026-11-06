@@ -940,8 +940,8 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    * before delegating to super.fetch().
    */
   /**
-   * Several actions in one RPC — the calls a worker started to this object in
-   * the same turn (`batchedRpc` in the registry). Each runs through `rpc` (the
+   * Several actions in one RPC — the calls a worker started to this object
+   * before it waited on I/O (`batchedRpc` in the registry). Each runs through `rpc` (the
    * generated method: migrations, validation, context), one after another in
    * the order they were made, its result or error in its place: one call's
    * error does not stop the next.

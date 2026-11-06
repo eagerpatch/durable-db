@@ -204,6 +204,24 @@ export class TestKyselyDO extends SqliteDurableObject {
     return rows.length;
   }
 
+  /** What a write reports back: Kysely's affected rows and insert id, from one follow-up statement. */
+  async writeResults(): Promise<{ inserted: string; insertId: string; updated: string; deleted: string }> {
+    await this.ensureMigrations();
+    const db = this.appDb();
+    const insert = await db
+      .insertInto('items')
+      .values([1, 2, 3].map((day) => ({ id: `w-${day}`, day, active: false, createdAt: new Date('2026-12-01T00:00:00Z') })))
+      .executeTakeFirst();
+    const update = await db.updateTable('items').set({ active: true }).where('day', '<=', 2).executeTakeFirst();
+    const remove = await db.deleteFrom('items').where('day', '=', 3).executeTakeFirst();
+    return {
+      inserted: String(insert.numInsertedOrUpdatedRows),
+      insertId: String(insert.insertId),
+      updated: String(update.numUpdatedRows),
+      deleted: String(remove.numDeletedRows),
+    };
+  }
+
   /**
    * The exact shape of the insert that silently failed in the field: 24 rows ×
    * 7 columns (168 bound params) in one .values([...]) call. Returns persisted

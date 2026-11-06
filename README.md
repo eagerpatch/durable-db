@@ -297,7 +297,7 @@ The resolver is called at the moment a database operation needs the tenant ID �
 
 Behind the scenes, each action call is an RPC call to the correct Durable Object instance. The Vite plugin generates stubs that handle instance routing, argument validation, and DO communication transparently.
 
-Calls to the **same** Durable Object instance that start in the same turn share one round trip: `Promise.all([countProducts({}), listProducts({ featuredOnly: true })])` (or sibling server components fetching at once) sends both in a single RPC, and the object runs them one after another, in the order they were made — each result or error goes back to its own caller. A lone call, or calls made one after another, are plain RPCs as before. Each action's args schema is compiled on its first call and reused.
+Calls to the **same** Durable Object instance that start before the code waits on I/O share one round trip: `Promise.all([countProducts({}), listProducts({ featuredOnly: true })])` (or sibling server components fetching at once, or two RPC procedures whose middleware awaits a different number of times before their action calls) sends both in a single RPC, and the object runs them one after another, in the order they were made — each result or error goes back to its own caller. A lone call, or calls made one after another, are plain RPCs as before. Each action's args schema is compiled on its first call and reused.
 
 ---
 

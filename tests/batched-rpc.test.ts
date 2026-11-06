@@ -5,8 +5,8 @@ vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }));
 const { SqliteDurableObject } = await import('../src/db/SqliteDurableObject');
 
 // The worker → Durable Object path: every action call used to be its own RPC.
-// Calls to the same object started in the same turn now share one (rpcBatch);
-// a lone call stays a plain rpc.
+// Calls to the same object started before the code waits on I/O now share one
+// (rpcBatch); a lone call stays a plain rpc.
 function namespace(options: { batch?: (calls: Array<{ action: string; args: unknown }>) => BatchedResult[] | Promise<BatchedResult[]> } = {}) {
   const rpc = vi.fn(async (action: string, args: unknown) => {
     const value = { action, args };
@@ -56,6 +56,23 @@ describe('batchedRpc', () => {
     );
     expect(results.map((r) => (r as { action: string }).action)).toEqual(['count', 'list', 'get']);
     expect(ids).toEqual(['acme']);
+  });
+
+  it('batches calls that reach it a different number of awaits apart (procedures through middleware)', async () => {
+    const { ns, rpc, rpcBatch } = namespace();
+    // What oRPC does to a Promise.all of two procedures: each passes its own
+    // middleware and input validation before its action call.
+    const through = async (awaits: number, call: () => Promise<unknown>) => {
+      for (let i = 0; i < awaits; i++) await Promise.resolve();
+      return call();
+    };
+    await Promise.all([
+      through(1, () => batchedRpc(ns, 'acme', 'count', {})),
+      through(12, () => batchedRpc(ns, 'acme', 'list', { featuredOnly: true })),
+    ]);
+    expect(rpc).not.toHaveBeenCalled();
+    expect(rpcBatch).toHaveBeenCalledOnce();
+    expect(rpcBatch.mock.calls[0]?.[0].map((call) => call.action)).toEqual(['count', 'list']);
   });
 
   it('rejects only the call that failed in a batch, with its name and message', async () => {

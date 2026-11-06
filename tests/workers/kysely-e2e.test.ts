@@ -19,6 +19,7 @@ interface TestEnv {
     idFromName: (name: string) => DurableObjectId;
     get: (id: DurableObjectId) => DurableObjectStub & {
       multiRowInsert: (count: number) => Promise<number>;
+      writeResults: () => Promise<{ inserted: string; insertId: string; updated: string; deleted: string }>;
       wideMultiRowInsert: (rows: number, cols: number) => Promise<number | string>;
       booleanRoundTrip: () => Promise<{
         storedType: string;
@@ -44,6 +45,10 @@ describe('Kysely E2E (real workerd SqlStorage)', () => {
   it('persists every row of a multi-row .values([...]) insert', async () => {
     const stub = newStub();
     expect(await stub.multiRowInsert(24)).toBe(24);
+  });
+
+  it('reports a write\'s affected rows and insert id', async () => {
+    expect(await newStub().writeResults()).toEqual({ inserted: '3', insertId: '3', updated: '2', deleted: '1' });
   });
 
   it('survives workerd\'s 100-bound-parameter limit (params are inlined)', async () => {

@@ -229,14 +229,18 @@ export function cachedArgsSchema<T>(key: string, make: () => T): T {
 }
 
 // Calls waiting for their object's RPC, by namespace and instance key. A
-// microtask flushes them: everything one turn of the event loop starts — that
-// is one request's code, never another's — before the RPC goes out.
+// timer flushes them, once the microtasks have run out: everything the code
+// running now starts before it waits on I/O goes out together. A microtask
+// was too early — two procedures started by one `Promise.all` reach their
+// action calls a different number of awaits later (oRPC's middleware, input
+// validation), so each flushed alone.
 const pending = new WeakMap<object, Map<string, PendingCall[]>>();
 
 /**
  * Call an action on the Durable Object `instanceKey` of `namespace`. Calls to
- * the same object started in the same turn — `Promise.all([a(), b()])`,
- * sibling server components awaiting at once — travel in ONE RPC
+ * the same object started before the code waits on I/O — `Promise.all([a(),
+ * b()])` however deep in middleware, sibling server components awaiting at
+ * once — travel in ONE RPC
  * (`rpcBatch`) and run there one after another, in the order they were made,
  * each result or error to its own caller; a lone call is a plain `rpc`, as
  * before. Results are plain values: the RPC's top-level `Symbol.dispose` is
@@ -250,7 +254,7 @@ export function batchedRpc(namespace: ActionNamespace, instanceKey: string, acti
     if (!calls) {
       byKey.set(instanceKey, (calls = []));
       const queued = byKey;
-      queueMicrotask(() => flushCalls(namespace, instanceKey, queued));
+      setTimeout(() => flushCalls(namespace, instanceKey, queued), 0);
     }
     calls.push({ action, args, resolve, reject });
   });

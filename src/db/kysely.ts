@@ -249,13 +249,11 @@ class CloudflareSqliteConnection implements DatabaseConnection {
         };
       } else {
         this.sql.exec(queryStr, ...parameters as any[]);
-        // For INSERT/UPDATE/DELETE, try to get affected rows
-        const changesResult = this.sql.exec('SELECT changes() as changes').toArray();
-        const changes = changesResult[0]?.changes as number ?? 0;
-
-        // For INSERT, try to get last insert rowid
-        const lastIdResult = this.sql.exec('SELECT last_insert_rowid() as id').toArray();
-        const lastId = lastIdResult[0]?.id;
+        // The affected rows and the last insert rowid, in one statement (it was
+        // two, each a storage operation of every write).
+        const [result] = this.sql.exec('SELECT changes() AS changes, last_insert_rowid() AS id').toArray();
+        const changes = (result?.changes as number | undefined) ?? 0;
+        const lastId = result?.id;
 
         return {
           rows: [] as R[],

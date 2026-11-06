@@ -1059,8 +1059,8 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
     ...commonStatements,
     // return __ddRpc(env.BINDING, instanceKey, "action", validatedArgs);
     //
-    // batchedRpc: the calls to the same object started in the same turn go in
-    // ONE RPC (rpcBatch), a lone call is a plain rpc; results are plain values
+    // batchedRpc: the calls to the same object started before the code waits
+    // on I/O go in ONE RPC (rpcBatch), a lone call is a plain rpc; results are plain values
     // (the RPC's top-level Symbol.dispose dropped — React Server Components
     // refuse symbol-keyed props).
     t.returnStatement(

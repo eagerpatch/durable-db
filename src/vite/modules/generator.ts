@@ -33,6 +33,9 @@ export const DEV_EPOCH_IMPORT = 'virtual:durable-db/__devEpoch';
 // been declared". The injected import still routes to durable-db's inlined arktype
 // instance (see the comment at the injection site).
 const ARKTYPE_LOCAL = '__ddType';
+/** The registry's cachedArgsSchema and batchedRpc, imported under aliases that never collide with the app's own names. */
+const SCHEMA_LOCAL = '__ddSchema';
+const RPC_LOCAL = '__ddRpc';
 
 // ============================================================================
 // Types
@@ -979,11 +982,18 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
   const instanceKeyExpr = buildInstanceKeyExpr(database);
 
   const commonStatements: t.Statement[] = [
-    // const argsSchema = __ddType({...});
+    // const argsSchema = __ddSchema("db/action", () => __ddType({...}));
+    // Compiled on the first call in the isolate and kept, not on every call.
     t.variableDeclaration('const', [
       t.variableDeclarator(
         t.identifier('argsSchema'),
-        t.callExpression(t.identifier(ARKTYPE_LOCAL), [parseExpression(action.argsSchemaSource)])
+        t.callExpression(t.identifier(SCHEMA_LOCAL), [
+          t.stringLiteral(`${database.name}/${action.exportName}`),
+          t.arrowFunctionExpression(
+            [],
+            t.callExpression(t.identifier(ARKTYPE_LOCAL), [parseExpression(action.argsSchemaSource)])
+          ),
+        ])
       ),
     ]),
 
@@ -1005,33 +1015,25 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
     t.variableDeclaration('const', [
       t.variableDeclarator(t.identifier('instanceKey'), instanceKeyExpr),
     ]),
-
-    // const id = env.BINDING.idFromName(instanceKey);
-    t.variableDeclaration('const', [
-      t.variableDeclarator(
-        t.identifier('id'),
-        t.callExpression(
-          t.memberExpression(bindingExpr, t.identifier('idFromName')),
-          [t.identifier('instanceKey')]
-        )
-      ),
-    ]),
-
-    // const stub = env.BINDING.get(id);
-    t.variableDeclaration('const', [
-      t.variableDeclarator(
-        t.identifier('stub'),
-        t.callExpression(
-          t.memberExpression(bindingExpr, t.identifier('get')),
-          [t.identifier('id')]
-        )
-      ),
-    ]),
   ];
 
   if (database.transport === 'websocket') {
     return [
       ...commonStatements,
+      // const id = env.BINDING.idFromName(instanceKey);
+      t.variableDeclaration('const', [
+        t.variableDeclarator(
+          t.identifier('id'),
+          t.callExpression(t.memberExpression(bindingExpr, t.identifier('idFromName')), [t.identifier('instanceKey')])
+        ),
+      ]),
+      // const stub = env.BINDING.get(id);
+      t.variableDeclaration('const', [
+        t.variableDeclarator(
+          t.identifier('stub'),
+          t.callExpression(t.memberExpression(bindingExpr, t.identifier('get')), [t.identifier('id')])
+        ),
+      ]),
       // const wsTransport = new WebSocketTransport(stub);
       t.variableDeclaration('const', [
         t.variableDeclarator(
@@ -1055,21 +1057,19 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
 
   return [
     ...commonStatements,
-    // return stub.rpc(...).then(structuredClone)
+    // return __ddRpc(env.BINDING, instanceKey, "action", validatedArgs);
     //
-    // Cloudflare's Durable Object RPC attaches a top-level `Symbol.dispose` to
-    // the returned object (explicit resource management for the RPC call). React
-    // Server Components refuse to serialize symbol-keyed props ("Objects with
-    // symbol properties like Symbol.dispose are not supported"), so an action
-    // result returned from a "use server" function — or passed straight to a
-    // client component as a prop — throws. structuredClone yields a plain clone
-    // with all symbol keys dropped (and, unlike a JSON round-trip, preserves
-    // Date/Map/Set). `.then(structuredClone)` keeps this path non-async.
+    // batchedRpc: the calls to the same object started in the same turn go in
+    // ONE RPC (rpcBatch), a lone call is a plain rpc; results are plain values
+    // (the RPC's top-level Symbol.dispose dropped — React Server Components
+    // refuse symbol-keyed props).
     t.returnStatement(
-      t.callExpression(
-        t.memberExpression(buildRpcCall(action), t.identifier('then')),
-        [t.identifier('structuredClone')]
-      )
+      t.callExpression(t.identifier(RPC_LOCAL), [
+        bindingExpr,
+        t.identifier('instanceKey'),
+        t.stringLiteral(action.exportName),
+        t.identifier('validatedArgs'),
+      ])
     ),
   ];
 }
@@ -1102,13 +1102,16 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
   // NOT bare `arktype`: the latter isn't hoisted to a pnpm app's root, so the
   // injected import fails to resolve in the cloudflare plugin's worker-entry
   // evaluation. registryImport always resolves there (it's already injected),
-  // and routes to durable-db's single inlined arktype instance. Imported under an
-  // alias (ARKTYPE_LOCAL) so it never collides with the app's own `type` import.
+  // and routes to the arktype durable-db depends on — the app's own, version
+  // permitting. Imported under aliases (ARKTYPE_LOCAL, SCHEMA_LOCAL,
+  // RPC_LOCAL) so they never collide with the app's own names.
   ensureNamedImports(body, registryImport, [
     'registerAction',
     'getDoContext',
     'callAction',
     { imported: 'type', local: ARKTYPE_LOCAL },
+    { imported: 'cachedArgsSchema', local: SCHEMA_LOCAL },
+    { imported: 'batchedRpc', local: RPC_LOCAL },
   ]);
   ensureNamedImports(body, DEV_EPOCH_IMPORT, ['applyDevEpoch']);
 

@@ -939,6 +939,33 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    * Subclasses (e.g. Browsable-wrapped DOs) should call ensureMigrations()
    * before delegating to super.fetch().
    */
+  /**
+   * Several actions in one RPC — the calls a worker started to this object in
+   * the same turn (`batchedRpc` in the registry). Each runs through `rpc` (the
+   * generated method: migrations, validation, context), one after another in
+   * the order they were made, its result or error in its place: one call's
+   * error does not stop the next.
+   */
+  async rpcBatch(
+    calls: Array<{ action: string; args: unknown }>,
+    options: { instanceKey: string }
+  ): Promise<Array<{ ok: true; value: unknown } | { ok: false; error: { name: string; message: string } }>> {
+    const rpc = (this as unknown as { rpc?: (action: string, args: unknown, options: { instanceKey: string }) => Promise<unknown> }).rpc;
+    if (typeof rpc !== 'function') throw new Error('[db] rpcBatch: this Durable Object has no generated rpc method');
+    const results: Array<{ ok: true; value: unknown } | { ok: false; error: { name: string; message: string } }> = [];
+    for (const call of calls) {
+      try {
+        results.push({ ok: true, value: await rpc.call(this, call.action, call.args, options) });
+      } catch (error) {
+        results.push({
+          ok: false,
+          error: { name: error instanceof Error ? error.name : 'Error', message: error instanceof Error ? error.message : String(error) },
+        });
+      }
+    }
+    return results;
+  }
+
   async fetch(request: Request): Promise<Response> {
     await this.ensureMigrations();
 

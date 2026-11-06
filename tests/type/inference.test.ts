@@ -1,5 +1,6 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import { type, ArkErrors } from '../../src/type';
+import type { ActionConfig } from '../../src/db/types';
 
 // The types are ArkType's own (`type.validate` / `type.infer`); these hold
 // when `tsc -p tests/type/tsconfig.json` passes, and the runtime half here.
@@ -22,6 +23,14 @@ describe('durable-db/type: inferred types', () => {
     expectTypeOf<typeof Query.inferIn>().toEqualTypeOf<{ page: string; size?: number }>();
     expectTypeOf<typeof Query.infer>().toEqualTypeOf<{ page: number; size: number }>();
     expect(Query({ page: '2' })).toEqual({ page: 2, size: 20 });
+  });
+
+  it('types a Type written inline where a definition is expected (an action\'s args)', () => {
+    // Without ArkType's `r extends infer _` signature the inline call inferred its def from the
+    // expected `type.validate<Def>`, and the handler's args collapsed to never.
+    const action = <const Def, TResult>(config: ActionConfig<Def, TResult, {}, unknown>) => config;
+    const inline = action({ args: type({ name: 'string' }), handler: async (_db, args) => args.name.toLowerCase() });
+    expectTypeOf(inline.handler).parameter(1).toEqualTypeOf<{ name: string }>();
   });
 
   it('narrows a result to its errors', () => {

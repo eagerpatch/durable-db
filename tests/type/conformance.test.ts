@@ -77,6 +77,11 @@ const DEFINITION_BUILDERS: Array<[string, (t: typeof type | typeof ark) => unkno
   ['default()', (t) => (t as typeof ark)({ a: (t as typeof ark)('number').default(1) })],
   ['nested Type', (t) => (t as typeof ark)({ inner: (t as typeof ark)({ y: 'string' }), list: (t as typeof ark)({ q: 'number' }).array() })],
   ['onUndeclaredKey', (t) => (t as typeof ark)({ a: 'string' }).onUndeclaredKey('reject')],
+  ['array.atLeastLength', (t) => (t as typeof ark)('string').array().atLeastLength(1)],
+  ['string.atMostLength', (t) => (t as typeof ark)('string').atMostLength(3)],
+  ['number.atLeast.lessThan', (t) => (t as typeof ark)('number').atLeast(1).lessThan(10)],
+  ['number.divisibleBy', (t) => (t as typeof ark)('number').divisibleBy(5)],
+  ['string.matching', (t) => (t as typeof ark)('string').matching(/^a/)],
   ['unit', (t) => (t as typeof ark).unit('x')],
   ['enumerated', (t) => (t as typeof ark).enumerated('x', 1)],
 ];

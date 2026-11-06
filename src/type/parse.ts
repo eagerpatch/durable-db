@@ -299,7 +299,7 @@ export function describe(node: Node, description: string | undefined): Node {
 
 // ── Strings ─────────────────────────────────────────────────────────────
 
-type Comparator = '<' | '<=' | '>' | '>=' | '==';
+export type Comparator = '<' | '<=' | '>' | '>=' | '==';
 
 class StringParser {
   private i = 0;
@@ -518,7 +518,7 @@ function measureOf(node: Node): Measure | null {
   return null;
 }
 
-function withRule(node: Node, need: Measure | null, rule: Refinement, src: string): Node {
+export function withRule(node: Node, need: Measure | null, rule: Refinement, src: string): Node {
   const measure = measureOf(node);
   if (!measure || (need && measure !== need)) {
     throw new ParseError(`${need === 'value' ? 'A divisor' : 'A bound'} needs ${need === 'value' ? 'a number' : 'a number, string, array or Date'} (was ${node.expression}) in '${src}'`);
@@ -526,7 +526,7 @@ function withRule(node: Node, need: Measure | null, rule: Refinement, src: strin
   return refine(node, rule);
 }
 
-function bound(node: Node, comparator: Comparator, limit: number, src: string): Node {
+export function bound(node: Node, comparator: Comparator, limit: number, src: string): Node {
   const measure = measureOf(node);
   if (!measure) throw new ParseError(`A bound needs a number, string, array or Date (was ${node.expression}) in '${src}'`);
   if (comparator === '==') {

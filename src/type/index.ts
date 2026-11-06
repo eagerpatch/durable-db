@@ -29,11 +29,14 @@ import {
   type Prop as PropNode,
   type TraversalContext,
   type TypeConfig,
+  RefinedNode,
   UnitNode,
+  divisorRefinement,
   expectedOf,
+  patternRefinement,
   predicateRefinement,
 } from './nodes';
-import { ParseError, describe, intersect, keyofNode, mergeProps, parseDefinition, refine, union, type ParseContext } from './parse';
+import { ParseError, bound, describe, intersect, keyofNode, mergeProps, parseDefinition, refine, union, withRule, type Comparator, type ParseContext } from './parse';
 
 export { ArkError, ArkErrors, TraversalError, ParseError };
 export { ToJsonSchemaError } from './nodes';
@@ -93,9 +96,9 @@ export interface Type<t = unknown> extends ark.cast<t> {
   allows(data: unknown): data is distill.In<t>;
   from(data: distill.In<t>): distill.Out<t>;
   array(): Type<t[]>;
-  or<const def>(def: ark.validate<def>): Type<t | ark.infer<def>>;
-  and<const def>(def: ark.validate<def>): Type<t & ark.infer<def>>;
-  merge<const def>(def: ark.validate<def>): Type<merged<t, ark.infer<def>>>;
+  or<const def, r = Type<t | ark.infer<def>>>(def: ark.validate<def>): r extends infer _ ? _ : never;
+  and<const def, r = Type<t & ark.infer<def>>>(def: ark.validate<def>): r extends infer _ ? _ : never;
+  merge<const def, r = Type<merged<t, ark.infer<def>>>>(def: ark.validate<def>): r extends infer _ ? _ : never;
   pick<const k extends keyof t & string>(...keys: k[]): Type<Pick<t, k>>;
   omit<const k extends keyof t & string>(...keys: k[]): Type<Omit<t, k>>;
   partial(): Type<Partial<t>>;
@@ -108,18 +111,39 @@ export interface Type<t = unknown> extends ark.cast<t> {
   default<const v extends distill.Out<t> | (() => distill.Out<t>)>(value: v): [this, '=', v];
   narrow(predicate: (data: distill.Out<t>, ctx: TraversalContext) => boolean): Type<t>;
   pipe<r>(morph: (data: distill.Out<t>, ctx: TraversalContext) => r): Type<(In: distill.In<t>) => Out<Exclude<r, ArkError | ArkErrors>>>;
-  to<const def>(def: ark.validate<def>): Type<(In: distill.In<t>) => Out<ark.infer.Out<def>>>;
+  to<const def, r = Type<(In: distill.In<t>) => Out<ark.infer.Out<def>>>>(def: ark.validate<def>): r extends infer _ ? _ : never;
   describe(description: string): Type<t>;
   configure(meta: TypeMeta): Type<t>;
   brand<const id extends string>(id: id): Type<ark.brand<t, id>>;
   onUndeclaredKey(behavior: 'ignore' | 'reject' | 'delete'): Type<t>;
+  // Bounds, as ArkType's number, string, array and Date Types have them.
+  atLeast(limit: number): Type<t>;
+  atMost(limit: number): Type<t>;
+  moreThan(limit: number): Type<t>;
+  lessThan(limit: number): Type<t>;
+  divisibleBy(divisor: number): Type<t>;
+  atLeastLength(length: number): Type<t>;
+  atMostLength(length: number): Type<t>;
+  moreThanLength(length: number): Type<t>;
+  lessThanLength(length: number): Type<t>;
+  exactlyLength(length: number): Type<t>;
+  matching(regex: RegExp | string): Type<t>;
+  laterThan(date: Date | number | string): Type<t>;
+  earlierThan(date: Date | number | string): Type<t>;
+  atOrAfter(date: Date | number | string): Type<t>;
+  atOrBefore(date: Date | number | string): Type<t>;
   readonly props: readonly Prop[];
   readonly '~standard': StandardProps<distill.In<t>, distill.Out<t>>;
 }
 
 export interface TypeParser {
-  /** A Type from a definition: `type({ name: 'string', 'age?': 'number.integer >= 0' })`. */
-  <const def>(def: ark.validate<def>): Type<ark.infer<def>>;
+  /**
+   * A Type from a definition: `type({ name: 'string', 'age?': 'number.integer >= 0' })`.
+   * (`r … extends infer _`, as ArkType's own signature has it: a call written
+   * where a definition is expected — `action({ args: type({…}) })` — would
+   * otherwise infer its `def` from that context, and its type collapse to never.)
+   */
+  <const def, r = Type<ark.infer<def>>>(def: ark.validate<def>): r extends infer _ ? _ : never;
   /** The class of what an invalid value gives back: `if (out instanceof type.errors)`. */
   readonly errors: typeof ArkErrors;
   /** A Type from a definition, with no type-level checking or inference. */
@@ -128,8 +152,8 @@ export interface TypeParser {
   unit<const t>(value: t): Type<t>;
   /** Exactly one of `values` (===). */
   enumerated<const values extends readonly unknown[]>(...values: values): Type<values[number]>;
-  or<const a, const b>(a: ark.validate<a>, b: ark.validate<b>): Type<ark.infer<a> | ark.infer<b>>;
-  and<const a, const b>(a: ark.validate<a>, b: ark.validate<b>): Type<ark.infer<a> & ark.infer<b>>;
+  or<const a, const b, r = Type<ark.infer<a> | ark.infer<b>>>(a: ark.validate<a>, b: ark.validate<b>): r extends infer _ ? _ : never;
+  and<const a, const b, r = Type<ark.infer<a> & ark.infer<b>>>(a: ark.validate<a>, b: ark.validate<b>): r extends infer _ ? _ : never;
 }
 
 // ── Runtime ─────────────────────────────────────────────────────────────
@@ -179,6 +203,16 @@ function jsonSchema(node: Node, config: TypeConfig, side: JsonContext['side'], o
   const schema = node.json({ side, target, config });
   if (node.description && schema.description === undefined) schema.description = node.description;
   return options.dialect === null ? schema : { $schema: DIALECTS[target], ...schema };
+}
+
+/** A bound on what the node measures — a number's value, a length, a Date's time — or a TypeError when it measures something else. */
+function bounded(t: Internals, comparator: Comparator, limit: number, measure: 'value' | 'length' | 'time'): Type<any> {
+  const node = t[NODE];
+  const out = bound(node, comparator, limit, node.expression);
+  const kinds = { value: ['min', 'max'], length: ['minLength', 'maxLength', 'exactLength'], time: ['after', 'before'] }[measure];
+  const added = out instanceof RefinedNode ? out.refinements.filter((r) => !(node instanceof RefinedNode && node.refinements.includes(r))) : [];
+  if (!added.every((r) => kinds.includes(r.kind))) throw new TypeError(`This bound needs ${measure === 'value' ? 'a number' : measure === 'length' ? 'a string or an array' : 'a Date'} (was ${node.expression})`);
+  return makeType(out, t[CONFIG]);
 }
 
 function objectNode(t: Internals, method: string): ObjectNode {
@@ -279,6 +313,51 @@ const prototype: ThisType<Internals> & Record<string, unknown> = {
   onUndeclaredKey(behavior: 'ignore' | 'reject' | 'delete') {
     const node = objectNode(this, 'onUndeclaredKey');
     return makeType(new ObjectNode(node.props, node.index, behavior), this[CONFIG]);
+  },
+  atLeast(limit: number) {
+    return bounded(this, '>=', limit, 'value');
+  },
+  atMost(limit: number) {
+    return bounded(this, '<=', limit, 'value');
+  },
+  moreThan(limit: number) {
+    return bounded(this, '>', limit, 'value');
+  },
+  lessThan(limit: number) {
+    return bounded(this, '<', limit, 'value');
+  },
+  divisibleBy(divisor: number) {
+    return makeType(withRule(this[NODE], 'value', divisorRefinement(divisor), this[NODE].expression), this[CONFIG]);
+  },
+  atLeastLength(length: number) {
+    return bounded(this, '>=', length, 'length');
+  },
+  atMostLength(length: number) {
+    return bounded(this, '<=', length, 'length');
+  },
+  moreThanLength(length: number) {
+    return bounded(this, '>', length, 'length');
+  },
+  lessThanLength(length: number) {
+    return bounded(this, '<', length, 'length');
+  },
+  exactlyLength(length: number) {
+    return bounded(this, '==', length, 'length');
+  },
+  matching(regex: RegExp | string) {
+    return makeType(refine(this[NODE], patternRefinement(typeof regex === 'string' ? new RegExp(regex) : regex)), this[CONFIG]);
+  },
+  laterThan(date: Date | number | string) {
+    return bounded(this, '>', new Date(date).valueOf(), 'time');
+  },
+  earlierThan(date: Date | number | string) {
+    return bounded(this, '<', new Date(date).valueOf(), 'time');
+  },
+  atOrAfter(date: Date | number | string) {
+    return bounded(this, '>=', new Date(date).valueOf(), 'time');
+  },
+  atOrBefore(date: Date | number | string) {
+    return bounded(this, '<=', new Date(date).valueOf(), 'time');
   },
   get props() {
     return objectNode(this, 'props').props.map((p) => ({ key: p.key, kind: p.kind, value: makeType(p.value, this[CONFIG]) }));

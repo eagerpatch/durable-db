@@ -9,7 +9,7 @@ import { discoverDatabaseFiles, discoverActionFiles, readFile } from './modules/
 import { parseDatabaseFile } from './modules/parser';
 import { checkWranglerConfig, describeWranglerCheck, tombstoneClasses, type RenameConflict } from './modules/wrangler';
 import { databaseSources, type DatabaseSource } from './modules/discovery';
-import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile } from './modules/generator';
+import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile, type OutboxOption } from './modules/generator';
 import { reconcileWranglerConfig, syncWranglerConfig } from './modules/syncWrangler';
 import { loadMigrationFiles } from '../migrations/generator';
 import {
@@ -47,6 +47,15 @@ export interface DurableDbOptions {
    * start. A change is logged (`durable-db updated wrangler.jsonc (…)`).
    */
   patchWranglerConfig?: boolean;
+  /**
+   * Where `ctx.outbox.push(message)` delivers, after the action succeeds:
+   * `{ queue: 'MY_QUEUE' }` sends each message to that Queue binding as it is;
+   * `{ module: './src/outbox.ts' }` imports a module (a path from the project
+   * root, or a package specifier) whose default export delivers them — a
+   * function `(envelopes, { env }) => …`, or an object with `deliver`. Without
+   * it, `ctx.outbox.push()` throws naming this option.
+   */
+  outbox?: OutboxOption;
 }
 
 interface ResolvedOptions {
@@ -55,6 +64,7 @@ interface ResolvedOptions {
   databasesDir: string | DatabaseSource[];
   migrationsDir: string;
   patchWranglerConfig: boolean;
+  outbox: OutboxOption | null;
 }
 
 // ============================================================================
@@ -422,6 +432,12 @@ async function findImportedDatabase(
 // Plugin
 // ============================================================================
 
+/** A relative sink module resolves from the project root; a package specifier or an absolute path stays as it is. */
+function resolveOutbox(outbox: OutboxOption | null, projectRoot: string): OutboxOption | null {
+  if (!outbox || 'queue' in outbox) return outbox;
+  return outbox.module.startsWith('.') ? { module: path.resolve(projectRoot, outbox.module).split(path.sep).join('/') } : outbox;
+}
+
 export function durableDb(options: DurableDbOptions = {}): Plugin {
   const state = new PluginState({
     contextImport: options.contextImport ?? 'durable-db/context',
@@ -429,6 +445,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
     databasesDir: options.databasesDir ?? 'src/databases',
     migrationsDir: options.migrationsDir ?? 'migrations',
     patchWranglerConfig: options.patchWranglerConfig ?? false,
+    outbox: options.outbox ?? null,
   });
 
   return {
@@ -581,7 +598,8 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         actionFiles,
         // Classes of removed databases the wrangler migrations still declare
         // (read after the `config` hook reconciled the file).
-        tombstoneClasses(state.projectRoot, databases)
+        tombstoneClasses(state.projectRoot, databases),
+        resolveOutbox(state.options.outbox, state.projectRoot)
       );
 
       return { code };
@@ -703,6 +721,7 @@ export const databasePlugin = durableDb;
 
 export { syncWranglerConfig };
 export type { SyncWranglerConfigOptions, SyncWranglerConfigResult } from './modules/syncWrangler';
+export type { OutboxOption } from './modules/generator';
 
 /** @deprecated Renamed to {@link DurableDbOptions}. */
 export type DatabasePluginOptions = DurableDbOptions;

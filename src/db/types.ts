@@ -1,3 +1,4 @@
+import type { Outbox } from './outbox';
 import type { Kysely } from 'kysely';
 import type { Kyselify } from 'drizzle-orm/kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
@@ -61,6 +62,13 @@ export interface ActionContext<TEnv = unknown> {
    * For global databases, this is 'global'.
    */
   instanceKey: string;
+  /**
+   * Messages for something outside the Durable Object — a queue, an email, a
+   * webhook — delivered after the action succeeds (`durableDb({ outbox })`
+   * names where): `ctx.outbox.push(message)`. Written with the action's
+   * writes, at least once; a handler that throws records none.
+   */
+  outbox: Outbox;
 }
 
 /**

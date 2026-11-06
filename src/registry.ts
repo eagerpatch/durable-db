@@ -189,3 +189,101 @@ export async function callAction(
   const result = await stub.rpc(actionName, validated, { instanceKey: ctx.instanceKey });
   return structuredClone(result);
 }
+
+// ============================================================================
+// Worker → Durable Object calls: one compiled schema, one RPC per object
+// ============================================================================
+
+/** What a Durable Object's `rpcBatch` returns for each call, in order. */
+export type BatchedResult =
+  | { ok: true; value: unknown }
+  | { ok: false; error: { name: string; message: string } };
+
+interface ActionStub {
+  rpc(action: string, args: unknown, options: { instanceKey: string }): Promise<unknown>;
+  rpcBatch(calls: Array<{ action: string; args: unknown }>, options: { instanceKey: string }): Promise<BatchedResult[]>;
+}
+
+interface ActionNamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): ActionStub;
+}
+
+interface PendingCall {
+  action: string;
+  args: unknown;
+  resolve(value: unknown): void;
+  reject(error: unknown): void;
+}
+
+const argsSchemas = new Map<string, unknown>();
+
+/**
+ * The args schema of an action, compiled on its first call in this isolate
+ * and kept — the compiled call site used to build it on every call.
+ */
+export function cachedArgsSchema<T>(key: string, make: () => T): T {
+  let schema = argsSchemas.get(key) as T | undefined;
+  if (!schema) argsSchemas.set(key, (schema = make()));
+  return schema;
+}
+
+// Calls waiting for their object's RPC, by namespace and instance key. A
+// microtask flushes them: everything one turn of the event loop starts — that
+// is one request's code, never another's — before the RPC goes out.
+const pending = new WeakMap<object, Map<string, PendingCall[]>>();
+
+/**
+ * Call an action on the Durable Object `instanceKey` of `namespace`. Calls to
+ * the same object started in the same turn — `Promise.all([a(), b()])`,
+ * sibling server components awaiting at once — travel in ONE RPC
+ * (`rpcBatch`) and run there one after another, in the order they were made,
+ * each result or error to its own caller; a lone call is a plain `rpc`, as
+ * before. Results are plain values: the RPC's top-level `Symbol.dispose` is
+ * dropped (React Server Components refuse symbol-keyed props).
+ */
+export function batchedRpc(namespace: ActionNamespace, instanceKey: string, action: string, args: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let byKey = pending.get(namespace);
+    if (!byKey) pending.set(namespace, (byKey = new Map()));
+    let calls = byKey.get(instanceKey);
+    if (!calls) {
+      byKey.set(instanceKey, (calls = []));
+      const queued = byKey;
+      queueMicrotask(() => flushCalls(namespace, instanceKey, queued));
+    }
+    calls.push({ action, args, resolve, reject });
+  });
+}
+
+function flushCalls(namespace: ActionNamespace, instanceKey: string, byKey: Map<string, PendingCall[]>): void {
+  const calls = byKey.get(instanceKey) ?? [];
+  byKey.delete(instanceKey);
+  if (calls.length === 0) return;
+  let stub: ActionStub;
+  try {
+    stub = namespace.get(namespace.idFromName(instanceKey));
+  } catch (error) {
+    for (const call of calls) call.reject(error);
+    return;
+  }
+  const options = { instanceKey };
+  if (calls.length === 1) {
+    const [call] = calls as [PendingCall];
+    stub.rpc(call.action, call.args, options).then((value) => call.resolve(structuredClone(value)), call.reject);
+    return;
+  }
+  stub.rpcBatch(calls.map(({ action, args }) => ({ action, args })), options).then(
+    (results) => {
+      calls.forEach((call, index) => {
+        const result = results[index];
+        if (!result) call.reject(new Error(`[db] ${call.action}: no result in the batch from the Durable Object`));
+        else if (result.ok) call.resolve(result.value);
+        else call.reject(Object.assign(new Error(result.error.message), { name: result.error.name }));
+      });
+    },
+    (error) => {
+      for (const call of calls) call.reject(error);
+    },
+  );
+}

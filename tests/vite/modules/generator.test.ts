@@ -304,7 +304,7 @@ export const createUser = action({
     expect(result!.code).toContain('export async function createUser');
   });
 
-  it('structuredClones the RPC result so it is RSC-serializable (strips Symbol.dispose)', () => {
+  it('calls the Durable Object through the registry\'s batchedRpc (one RPC per object per turn, plain results)', () => {
     const code = `
 import { action } from './main';
 
@@ -319,12 +319,13 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    // The page→DO path RPCs to the Durable Object; Cloudflare's RPC attaches a
-    // top-level Symbol.dispose that React Server Components refuse to serialize,
-    // so the stub result is structuredClone'd (drops symbol keys, preserves
-    // Date/Map/Set) before being returned.
-    expect(result!.code).toContain('stub.rpc(');
-    expect(result!.code).toContain('.then(structuredClone)');
+    // The page→DO path goes through batchedRpc (tests/registry.test.ts): calls
+    // to one object in the same turn share an RPC, and the result is
+    // structuredClone'd there — Cloudflare's RPC attaches a top-level
+    // Symbol.dispose that React Server Components refuse to serialize.
+    expect(result!.code).toContain('__ddRpc(env.MAIN_DATABASE_DO, instanceKey, "createUser", validatedArgs)');
+    expect(result!.code).toMatch(/batchedRpc as __ddRpc/);
+    expect(result!.code).not.toContain('stub.rpc(');
   });
 
   it('imports arktype `type` from the registry subpath (not bare arktype)', () => {
@@ -742,8 +743,10 @@ export const createUser = action({
       expect(result).not.toBeNull();
       expect(result!.code).toContain('export async function createUser(args)');
       expect(result!.code).toContain('registerAction("main", "createUser"');
-      expect(result!.code).toContain('env.MAIN_DATABASE_DO.idFromName(instanceKey)');
-      expect(result!.code).toContain('stub.rpc("createUser", validatedArgs');
+      // One RPC per object per turn: the call goes through the registry's batchedRpc.
+      expect(result!.code).toContain('__ddRpc(env.MAIN_DATABASE_DO, instanceKey, "createUser", validatedArgs)');
+      // The args schema is compiled once per isolate, not per call.
+      expect(result!.code).toContain('__ddSchema("main/createUser", () => __ddType(');
       // The original placeholder call-site must be gone
       expect(result!.code).not.toContain('createUser = action(');
     });

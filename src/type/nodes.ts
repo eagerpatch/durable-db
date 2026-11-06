@@ -184,6 +184,14 @@ export abstract class Node {
   /** A description set with `.describe()` / `.configure()`. */
   description?: string;
 
+  /**
+   * What a missing key's value must be, as ArkType says it: the basis — the
+   * domain or constructor — not the rules on it (`'string > 0'` → `a string`).
+   */
+  get basis(): string {
+    return expectedOf(this);
+  }
+
   /** The value (or what it becomes), or FAIL with the errors in `ctx`. */
   abstract run(value: unknown, ctx: Ctx): unknown;
 
@@ -239,6 +247,9 @@ function valueKey(node: Node): string {
 
 export class DomainNode extends Node {
   readonly kind = 'domain';
+  override get basis(): string {
+    return DOMAIN_DESCRIPTIONS[this.name];
+  }
   sortKey(): string {
     return this.name === 'boolean' ? '3{"unit":false}' : `0{"domain":"${this.name}"}`;
   }
@@ -286,6 +297,9 @@ function unitJson(value: unknown, js: JsonContext): JsonSchema {
 
 export class UnitNode extends Node {
   readonly kind = 'unit';
+  override get basis(): string {
+    return (this.meta?.description as string | undefined) ?? printValue(this.value);
+  }
   sortKey(): string {
     return `3{"unit":${unitKey(this.value)}}`;
   }
@@ -312,6 +326,9 @@ export class UnitNode extends Node {
 
 export class UnknownNode extends Node {
   readonly kind = 'unknown';
+  override get basis(): string {
+    return 'present';
+  }
   sortKey(): string {
     return '0{}';
   }
@@ -333,7 +350,8 @@ export class NeverNode extends Node {
   readonly expression = 'never';
   readonly expected = 'never';
   run(value: unknown, ctx: Ctx): unknown {
-    return ctx.fail({ code: 'union', expected: 'never', problem: 'never', data: value });
+    // ArkType's message for never has no path: just `never`.
+    return ctx.fail({ code: 'union', expected: 'never', problem: 'never', message: 'never', data: value });
   }
   jsonOf(): JsonSchema {
     return { enum: [] };
@@ -343,6 +361,9 @@ export class NeverNode extends Node {
 /** `instanceof` a constructor: `Date` (a valid one), `Array`, any class. */
 export class ProtoNode extends Node {
   readonly kind = 'proto';
+  override get basis(): string {
+    return this.expected;
+  }
   sortKey(): string {
     return `2{"proto":"${this.expression}"}`;
   }
@@ -543,6 +564,11 @@ function errorInput(input: Partial<ArkErrorInput> | string): ArkErrorInput {
 }
 
 export function traversalContext(ctx: Ctx, sink: ArkError[], value: unknown): TraversalContext {
+  // `path` in an error a predicate or morph writes is relative to the value it was given.
+  const own = (input: Partial<ArkErrorInput> | string) => {
+    const resolved = errorInput(input);
+    return new ArkError({ actual: printValue(value), data: value, ...resolved, path: [...ctx.path, ...(resolved.path ?? [])] });
+  };
   return {
     path: ctx.path,
     mustBe(expected) {
@@ -550,11 +576,11 @@ export function traversalContext(ctx: Ctx, sink: ArkError[], value: unknown): Tr
       return false;
     },
     reject(input) {
-      sink.push(new ArkError({ actual: printValue(value), ...errorInput(input), path: ctx.path, data: value }));
+      sink.push(own(input));
       return false;
     },
     error(input) {
-      return new ArkError({ actual: printValue(value), ...errorInput(input), path: ctx.path, data: value });
+      return own(input);
     },
   };
 }
@@ -565,6 +591,9 @@ const RULE_ORDER: Refinement['kind'][] = ['pattern', 'divisor', 'exactLength', '
 /** A base (a domain, `Date`, an array) and the rules its values also follow. */
 export class RefinedNode extends Node {
   readonly kind = 'refined';
+  override get basis(): string {
+    return this.base.basis;
+  }
   readonly refinements: readonly Refinement[];
   sortKey(): string {
     const base = this.base.sortKey().slice(2, -1);
@@ -671,6 +700,9 @@ class Writer<T extends object> {
 
 export class ArrayNode extends Node {
   readonly kind = 'array';
+  override get basis(): string {
+    return 'an array';
+  }
   sortKey(): string {
     return this.element instanceof UnknownNode ? '2{"proto":"Array"}' : `1{"sequence":${valueKey(this.element)},"proto":"Array"}`;
   }
@@ -707,6 +739,9 @@ export class ArrayNode extends Node {
 /** `[string, number]`, `[string, number?]`, `[string, ...number[]]`. */
 export class TupleNode extends Node {
   readonly kind = 'tuple';
+  override get basis(): string {
+    return 'an array';
+  }
   sortKey(): string {
     return `1{"sequence":{"prefix":[${[...this.required, ...this.optional].map(valueKey).join(',')}]},"proto":"Array"}`;
   }
@@ -780,6 +815,9 @@ const byKey = (a: Prop, b: Prop) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)
 
 export class ObjectNode extends Node {
   readonly kind = 'object';
+  override get basis(): string {
+    return 'an object';
+  }
   sortKey(): string {
     const entries = (props: readonly Prop[]) => props.map((p) => `{"key":${JSON.stringify(p.key)},"value":${valueKey(p.value)}}`).join(',');
     const required = this.props.filter((p) => p.kind === 'required');
@@ -851,7 +889,7 @@ export class ObjectNode extends Node {
           const fallback = prop.default.value;
           (writer ??= new Writer(source)).set(prop.key, typeof fallback === 'function' ? (fallback as () => unknown)() : fallback);
         } else if (prop.kind === 'required') {
-          ctx.fail({ code: 'required', expected: expectedOf(prop.value), actual: 'missing' });
+          ctx.fail({ code: 'required', expected: prop.value.basis, actual: 'missing' });
           failed = true;
         }
       } else {
@@ -918,6 +956,9 @@ export class ObjectNode extends Node {
 /** `boolean`: `false | true`, printed as `boolean` on its own (in a larger union it is its two units). */
 export class BooleanNode extends Node {
   readonly kind = 'boolean';
+  override get basis(): string {
+    return 'boolean';
+  }
   readonly expression = 'boolean';
   readonly expected = 'boolean';
   readonly units = [new UnitNode(false), new UnitNode(true)];
@@ -938,6 +979,9 @@ export class BooleanNode extends Node {
 
 export class UnionNode extends Node {
   readonly kind = 'union';
+  override get basis(): string {
+    return joinOr(this.shown.map((b) => b.basis));
+  }
   sortKey(): string {
     return `4${this.shown.map((b) => b.sortKey()).join('|')}`;
   }
@@ -1008,10 +1052,12 @@ export class UnionNode extends Node {
     if (sameDomain.length === 1) return push(ctx, sameDomain[0]!.ctx);
     if (sameDomain.length > 1) {
       const order = (n: Node) => this.shown.indexOf(n);
-      const problems = [...sameDomain]
+      // Each branch's errors with their own paths (`to.email must be … or to must be non-empty`), as ArkType writes them.
+      const messages = [...sameDomain]
         .sort((a, b) => order(a.branch) - order(b.branch))
-        .map(({ ctx: attempt }) => attempt.errors.map((e) => new ArkError({ ...e, path: e.path.slice(ctx.path.length) }).message).join(' and '));
-      return ctx.fail({ code: 'union', expected: this.expected, problem: problems.join(' or '), data: value });
+        .map(({ ctx: attempt }) => attempt.errors.map((e) => e.message).join(' and '))
+        .join(' or ');
+      return ctx.fail({ code: 'union', expected: this.expected, problem: messages, message: messages, data: value });
     }
     const allUnits = this.branches.every((b) => b instanceof UnitNode);
     // Branches of one domain read as that domain's check (`(was NaN)`); of several, as a list of domains (`(was a number)`).
@@ -1115,6 +1161,9 @@ export type Morph = (value: never, ctx: TraversalContext) => unknown;
 /** A value that passes `input` becomes what `morph` returns, checked against `output` when there is one. */
 export class MorphNode extends Node {
   readonly kind = 'morph';
+  override get basis(): string {
+    return this.input.basis;
+  }
   sortKey(): string {
     return `5${this.input.sortKey()}`;
   }
@@ -1213,6 +1262,9 @@ export function isStandardSchema(value: unknown): value is StandardSchemaLike {
 /** A Type made with other rules, nested in this one: it validates as it would on its own. */
 export class ConfiguredNode extends Node {
   readonly kind = 'configured';
+  override get basis(): string {
+    return this.inner.basis;
+  }
   constructor(
     readonly inner: Node,
     readonly config: TypeConfig,

@@ -12,6 +12,8 @@ export interface ArkErrorInput {
   actual?: string | null;
   /** The whole problem, when it is not "must be <expected> (was <actual>)". */
   problem?: string;
+  /** The whole message, path included, when it is not "<path> <problem>" (ArkType's `ctx.reject({ message })`). */
+  message?: string;
   data?: unknown;
 }
 
@@ -36,6 +38,7 @@ export class ArkError {
   readonly actual: string;
   readonly problem: string;
   readonly data: unknown;
+  private readonly ownMessage?: string;
 
   constructor(input: ArkErrorInput) {
     this.code = input.code;
@@ -44,6 +47,7 @@ export class ArkError {
     this.actual = input.actual ?? '';
     this.data = input.data;
     this.problem = input.problem ?? `must be ${this.expected}${input.actual == null ? '' : ` (was ${input.actual})`}`;
+    if (input.message !== undefined) this.ownMessage = input.message;
   }
 
   /** The path as ArkType prints it: `lines[0].price`. */
@@ -53,6 +57,7 @@ export class ArkError {
 
   /** The problem with its path: `name must be a string (was a number)`, `value at [1] must be …` at an array's root. */
   get message(): string {
+    if (this.ownMessage !== undefined) return this.ownMessage;
     const at = this.propString;
     if (at === '') return this.problem;
     return at.startsWith('[') ? `value at ${at} ${this.problem}` : `${at} ${this.problem}`;

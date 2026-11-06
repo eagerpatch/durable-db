@@ -87,7 +87,7 @@ const DEFINITION_BUILDERS: Array<[string, (t: typeof type | typeof ark) => unkno
 ];
 
 /** Where durable-db/type differs from ArkType on purpose, and why. */
-const KNOWN: Array<{ name: RegExp; value?: string; kind: 'decision' | 'output' | 'message' | 'json'; reason: string }> = [
+const KNOWN: Array<{ name: RegExp; value?: RegExp; kind: 'decision' | 'output' | 'message' | 'json'; reason: string }> = [
   {
     name: /^\["===","a",1,null\]$/,
     kind: 'message',
@@ -95,38 +95,45 @@ const KNOWN: Array<{ name: RegExp; value?: string; kind: 'decision' | 'output' |
   },
   {
     name: /.*/,
-    value: 'fn',
+    value: /^fn$|"fn"/,
     kind: 'message',
     reason: 'ArkType names a function by a counter in its global registry (`Function(fn11)`); we print its own name',
   },
   {
     name: /number/,
-    value: 'NaN',
+    value: /^NaN$|"NaN"/,
     kind: 'decision',
     reason: "ArkType's `number` rejects NaN, but a union with another domain (`number | string`, `number | null`) lets it through; NaN stays rejected everywhere here",
   },
 ];
 
 const known = (name: string, kind: string, value?: string) =>
-  KNOWN.some((k) => k.kind === kind && k.name.test(name) && (k.value === undefined || k.value === value));
+  KNOWN.some((k) => k.kind === kind && k.name.test(name) && (k.value === undefined || (value !== undefined && k.value.test(value))));
 
-const label = (v: unknown) => {
+const label = (v: unknown): string => {
   if (typeof v === 'bigint') return `${v}n`;
   if (typeof v === 'symbol') return String(v);
   if (typeof v === 'function') return 'fn';
   if (v instanceof Date) return Number.isNaN(v.valueOf()) ? 'InvalidDate' : `Date(${v.toISOString()})`;
   if (typeof v === 'number' && !Number.isFinite(v)) return String(v);
-  return JSON.stringify(v);
+  return JSON.stringify(v, (_key, item) =>
+    typeof item === 'bigint' ? `${item}n` : typeof item === 'symbol' ? String(item) : typeof item === 'function' ? 'fn' : item === undefined ? 'undefined' : item instanceof Date ? label(item) : typeof item === 'number' && !Number.isFinite(item) ? String(item) : item,
+  );
 };
 
-const clone = (v: unknown): unknown => (typeof v === 'object' && v !== null && !(v instanceof Date) ? structuredClone(v) : v);
+/** A fresh copy for each side (neither may see what the other did), keeping what structuredClone cannot copy. */
+const clone = (v: unknown): unknown => {
+  if (Array.isArray(v)) return v.map(clone);
+  if (typeof v === 'object' && v !== null && !(v instanceof Date)) return Object.fromEntries(Object.entries(v).map(([k, item]) => [k, clone(item)]));
+  return v;
+};
 
 const ONLY = process.env.CONFORMANCE_ONLY?.split(',');
 
-function compare(name: string, a: any, l: any) {
+function compare(name: string, a: any, l: any, values: readonly unknown[] = VALUES) {
   const problems: string[] = [];
   const want = (kind: string) => !ONLY || ONLY.includes(kind);
-  for (const value of VALUES) {
+  for (const value of values) {
     const expected = a(clone(value));
     const actual = l(clone(value));
     const expectedOk = !(expected instanceof ark.errors);
@@ -172,6 +179,14 @@ describe('durable-db/type against ArkType', () => {
     const name = typeof def === 'string' ? def : label(def).replace(/"fn"|null/g, (m) => m) + (Array.isArray(def) && def.includes(Date) ? ' (Date)' : '');
     it(name, () => {
       const problems = compare(name, ark(def as never), type(def as never));
+      expect(problems, `\n  ${problems.join('\n  ')}`).toEqual([]);
+    });
+  }
+  // Each string definition as an object's value: a missing key, and every value under the key.
+  const AS_VALUE = [{}, ...VALUES.map((value) => ({ k: value }))];
+  for (const def of DEFINITIONS.filter((d): d is string => typeof d === 'string')) {
+    it(`{ k: ${def} }`, () => {
+      const problems = compare(`{ k: ${def} }`, ark({ k: def } as never), type({ k: def } as never), AS_VALUE);
       expect(problems, `\n  ${problems.join('\n  ')}`).toEqual([]);
     });
   }

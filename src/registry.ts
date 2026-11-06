@@ -39,6 +39,8 @@ export interface RpcContext {
   dbBindingNames: Record<string, string>;
   dbTransports?: Record<string, 'rpc' | 'websocket'>;
   instanceKey: string;
+  /** The action run's outbox (`runWithOutbox`); an action called from another of the same database shares it. */
+  outbox?: import('./db/outbox').Outbox;
 }
 
 // ============================================================================

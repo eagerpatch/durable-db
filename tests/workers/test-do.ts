@@ -332,3 +332,57 @@ export class TestRemovedDatabaseDO extends RemovedDatabaseDurableObject {
   removedClassName = 'TestRemovedDatabaseDO';
   deleteMigration = { tag: 'v2', deleted_classes: ['TestRemovedDatabaseDO'] };
 }
+
+/**
+ * The outbox against a real workerd: an action's messages written with it,
+ * delivered by the alarm to a sink that logs them in KV (and fails while the
+ * `fail` key is set there).
+ */
+export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace }> {
+  migrations: Migrations = {
+    '20240101_notes': { chunks: [['CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL)']] },
+  };
+  protected outboxSink = {
+    deliver: async (envelopes: Array<{ message: unknown; tenantId: string | null }>, { env }: { env: { OUTBOX_LOG: KVNamespace } }) => {
+      if (await env.OUTBOX_LOG.get('fail')) throw new Error('sink is down');
+      const log = JSON.parse((await env.OUTBOX_LOG.get('delivered')) ?? '[]') as unknown[];
+      log.push(...envelopes.map((e) => ({ message: e.message, tenantId: e.tenantId })));
+      await env.OUTBOX_LOG.put('delivered', JSON.stringify(log));
+    },
+  };
+
+  /**
+   * An action writing a note and pushing `messages`; with `fail` it throws
+   * after both, and the error comes back as a string (a rejection across RPC
+   * is reported as unhandled by the test pool).
+   */
+  async record(instanceKey: string, messages: unknown[], fail = false): Promise<number | string> {
+    await this.ensureMigrations();
+    const ctx: { instanceKey: string; outbox?: { push(message: unknown): void } } = { instanceKey };
+    try {
+      return await this.runWithOutbox(ctx, async () => {
+        this.sql.exec('INSERT INTO notes (text) VALUES (?)', 'note');
+        for (const message of messages) ctx.outbox!.push(message);
+        if (fail) throw new Error('the action failed');
+        return messages.length;
+      });
+    } catch (error) {
+      return (error as Error).message;
+    }
+  }
+
+  async outboxRows(): Promise<Array<{ message: string; attempts: number; last_error: string | null }>> {
+    const exists = this.sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox'`).toArray().length > 0;
+    if (!exists) return [];
+    return this.sql.exec('SELECT message, attempts, last_error FROM __outbox ORDER BY id').toArray() as never;
+  }
+
+  async notes(): Promise<number> {
+    await this.ensureMigrations();
+    return (this.sql.exec('SELECT count(*) AS n FROM notes').toArray()[0] as { n: number }).n;
+  }
+
+  async alarmAt(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
+}

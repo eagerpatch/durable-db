@@ -224,6 +224,11 @@ function generateWithMap(ast: t.File, sourceFileName?: string) {
   return generate(ast, { sourceMaps: true, sourceFileName, comments: true });
 }
 
+/** Where the outbox delivers: a Queue binding, or a module whose default export is the sink. */
+export type OutboxOption = { queue: string } | { module: string };
+
+const OUTBOX_LOCAL = '__ddOutbox';
+
 // ============================================================================
 // Durable Objects Module Generation
 // ============================================================================
@@ -238,7 +243,8 @@ export function generateDurableObjectsModule(
   registryImport: string,
   isDev: boolean = false,
   actionFiles: string[] = [],
-  tombstones: TombstoneClass[] = []
+  tombstones: TombstoneClass[] = [],
+  outbox: OutboxOption | null = null
 ): string {
   const bindingNamesExpr = buildBindingNamesObject(databases);
   const dbTransportsExpr = buildDbTransportsObject(databases);
@@ -273,9 +279,32 @@ export function generateDurableObjectsModule(
     );
   }
 
-  const statements: t.Statement[] = [...imports];
+  // The outbox's sink (`durableDb({ outbox })`), one for every class:
+  //   const __ddOutbox = queueOutboxSink("QUEUE");   or
+  //   import __ddOutboxModule from "<module>"; const __ddOutbox = outboxSink(__ddOutboxModule);
+  const outboxStatements: t.Statement[] = [];
+  if (outbox) {
+    if ('queue' in outbox) {
+      imports.push(createNamedImport(['queueOutboxSink'], 'durable-db/db'));
+      outboxStatements.push(
+        t.variableDeclaration('const', [
+          t.variableDeclarator(t.identifier(OUTBOX_LOCAL), t.callExpression(t.identifier('queueOutboxSink'), [t.stringLiteral(outbox.queue)])),
+        ])
+      );
+    } else {
+      imports.push(createNamedImport(['outboxSink'], 'durable-db/db'));
+      imports.push(t.importDeclaration([t.importDefaultSpecifier(t.identifier(`${OUTBOX_LOCAL}Module`))], t.stringLiteral(outbox.module)));
+      outboxStatements.push(
+        t.variableDeclaration('const', [
+          t.variableDeclarator(t.identifier(OUTBOX_LOCAL), t.callExpression(t.identifier('outboxSink'), [t.identifier(`${OUTBOX_LOCAL}Module`)])),
+        ])
+      );
+    }
+  }
+
+  const statements: t.Statement[] = [...imports, ...outboxStatements];
   for (const db of databases) {
-    statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, dbTransportsExpr, isDev));
+    statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, dbTransportsExpr, isDev, outbox !== null));
   }
   for (const tombstone of tombstones) {
     statements.push(buildTombstoneStatement(tombstone));
@@ -360,7 +389,8 @@ function buildDurableObjectStatements(
   db: DatabaseInfo,
   bindingNamesExpr: t.ObjectExpression,
   dbTransportsExpr: t.ObjectExpression,
-  isDev: boolean
+  isDev: boolean,
+  hasOutbox: boolean = false
 ): t.Statement[] {
   const isBrowsable = db.browsable === true || (db.browsable === 'development' && isDev);
   const rpcMethod = buildRpcMethod(db, bindingNamesExpr, dbTransportsExpr);
@@ -374,6 +404,7 @@ function buildDurableObjectStatements(
   const dataProperties = hasSchema(db)
     ? [migrationsProperty, databaseNameProperty, buildSchemaProperty(db)]
     : [migrationsProperty, databaseNameProperty];
+  if (hasOutbox) dataProperties.push(t.classProperty(t.identifier('outboxSink'), t.identifier(OUTBOX_LOCAL)));
 
   const sysMethod = buildSysMethod();
   const classMethods: t.ClassMethod[] = [rpcMethod, sysMethod];
@@ -517,6 +548,25 @@ function buildSysMethod(): t.ClassMethod {
   );
 }
 
+/**
+ * `this.runWithOutbox(ctx, async () => entry.handler(this.db, validated, ctx))`:
+ * the handler with `ctx.outbox`, its messages written when it resolves.
+ */
+function buildOutboxHandlerCall(): t.CallExpression {
+  return t.callExpression(t.memberExpression(t.thisExpression(), t.identifier('runWithOutbox')), [
+    t.identifier('ctx'),
+    t.arrowFunctionExpression(
+      [],
+      t.callExpression(t.memberExpression(t.identifier('entry'), t.identifier('handler')), [
+        t.memberExpression(t.thisExpression(), t.identifier('db')),
+        t.identifier('validated'),
+        t.identifier('ctx'),
+      ]),
+      true
+    ),
+  ]);
+}
+
 function buildRpcMethod(
   db: DatabaseInfo,
   bindingNamesExpr: t.ObjectExpression,
@@ -637,14 +687,7 @@ function buildRpcMethod(
         ]),
         t.arrowFunctionExpression(
           [],
-          t.callExpression(
-            t.memberExpression(t.identifier('entry'), t.identifier('handler')),
-            [
-              t.memberExpression(t.thisExpression(), t.identifier('db')),
-              t.identifier('validated'),
-              t.identifier('ctx'),
-            ]
-          ),
+          buildOutboxHandlerCall(),
           true // async
         ),
       ])
@@ -852,14 +895,7 @@ function buildWebSocketMessageMethod(
                 ]),
                 t.arrowFunctionExpression(
                   [],
-                  t.callExpression(
-                    t.memberExpression(t.identifier('entry'), t.identifier('handler')),
-                    [
-                      t.memberExpression(t.thisExpression(), t.identifier('db')),
-                      t.identifier('validated'),
-                      t.identifier('ctx'),
-                    ]
-                  ),
+                  buildOutboxHandlerCall(),
                   true
                 ),
               ])

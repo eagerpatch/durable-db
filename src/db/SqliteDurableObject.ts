@@ -1,3 +1,15 @@
+import {
+  OUTBOX_DDL,
+  OUTBOX_DELIVERY_SIZE,
+  OUTBOX_TABLE,
+  createActionOutbox,
+  outboxRetryDelay,
+  tenantOfInstanceKey,
+  type Outbox,
+  type OutboxEnvelope,
+  type OutboxMessage,
+  type OutboxSink,
+} from './outbox';
 import { DurableObject } from 'cloudflare:workers';
 import { Kysely } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
@@ -260,6 +272,81 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+  }
+
+  /**
+   * Where the outbox delivers (`./outbox`): the generated class sets it from
+   * `durableDb({ outbox })`. Null: `ctx.outbox.push()` refuses, naming the option.
+   */
+  protected outboxSink: OutboxSink | null = null;
+
+  private outboxReady = false;
+
+  private ensureOutboxTable(): void {
+    if (this.outboxReady) return;
+    this.sql.exec(OUTBOX_DDL);
+    this.outboxReady = true;
+  }
+
+  /**
+   * Runs an action with `ctx.outbox`. The messages it pushed are written when
+   * it resolves — in the same synchronous block as its last writes, which the
+   * Durable Object commits together — and the alarm that delivers them is set
+   * with them. A handler that throws records nothing. An action called from
+   * another action of this database runs on the caller's context, and so on
+   * its outbox.
+   */
+  protected async runWithOutbox<T>(ctx: { instanceKey: string; outbox?: Outbox }, run: () => Promise<T>): Promise<T> {
+    if (ctx.outbox) return run();
+    const outbox = createActionOutbox(this.outboxSink !== null);
+    ctx.outbox = outbox;
+    const result = await run();
+    const messages = outbox.take();
+    if (messages.length > 0) {
+      this.ensureOutboxTable();
+      const now = Date.now();
+      for (const message of messages) {
+        this.sql.exec(`INSERT INTO ${OUTBOX_TABLE} (instance_key, message, recorded_at) VALUES (?, ?, ?)`, ctx.instanceKey, message, now);
+      }
+      await this.ctx.storage.setAlarm(now);
+    }
+    return result;
+  }
+
+  /**
+   * Delivers the outbox: up to OUTBOX_DELIVERY_SIZE messages, oldest first, to
+   * the sink; what was delivered is deleted, and the alarm comes back while
+   * more are waiting. A delivery that throws stays in the table and is retried
+   * with backoff (5 s, doubling, at most 5 minutes), so a message arrives at
+   * least once. A subclass with an alarm of its own calls `super.alarm()`.
+   */
+  async alarm(): Promise<void> {
+    if (!this.outboxSink) return;
+    this.ensureOutboxTable();
+    const rows = this.sql
+      .exec(`SELECT id, instance_key, message, recorded_at, attempts FROM ${OUTBOX_TABLE} ORDER BY id LIMIT ?`, OUTBOX_DELIVERY_SIZE)
+      .toArray() as Array<{ id: number; instance_key: string; message: string; recorded_at: number; attempts: number }>;
+    if (rows.length === 0) return;
+    const lastId = rows[rows.length - 1]!.id;
+    const envelopes: OutboxEnvelope[] = rows.map((row) => ({
+      message: JSON.parse(row.message) as OutboxMessage,
+      instanceKey: row.instance_key,
+      tenantId: tenantOfInstanceKey(row.instance_key),
+      recordedAt: row.recorded_at,
+    }));
+    try {
+      await this.outboxSink.deliver(envelopes, { env: this.env });
+    } catch (error) {
+      const attempts = Math.max(...rows.map((row) => row.attempts)) + 1;
+      const delay = outboxRetryDelay(attempts);
+      this.sql.exec(`UPDATE ${OUTBOX_TABLE} SET attempts = attempts + 1, last_error = ? WHERE id <= ?`, String(error), lastId);
+      console.error(`[db] Outbox delivery failed (attempt ${attempts}, ${rows.length} message(s)); retrying in ${delay / 1000}s:`, error);
+      await this.ctx.storage.setAlarm(Date.now() + delay);
+      return;
+    }
+    this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id <= ?`, lastId);
+    // Pushed while this delivery ran, or beyond this batch: another round.
+    if (this.sql.exec(`SELECT 1 FROM ${OUTBOX_TABLE} LIMIT 1`).toArray().length > 0) await this.ctx.storage.setAlarm(Date.now());
   }
 
   /**

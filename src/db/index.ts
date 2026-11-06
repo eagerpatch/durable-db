@@ -1,5 +1,7 @@
 export { defineDatabase } from './defineDatabase';
 export { SqliteDurableObject, createKyselyFromSql, MigrationSchemaConflictError } from './SqliteDurableObject';
+export { outboxSink, queueOutboxSink, tenantOfInstanceKey } from './outbox';
+export type { Outbox, OutboxEnvelope, OutboxMessage, OutboxSink, OutboxSinkContext, OutboxSinkModule } from './outbox';
 export {
   RemovedDatabaseDurableObject,
   RemovedDatabaseError,

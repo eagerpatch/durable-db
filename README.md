@@ -30,6 +30,7 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
 - [Outerbase Studio Integration](#outerbase-studio-integration)
 - [Instance Strategies](#instance-strategies)
 - [Action-to-Action Calls](#action-to-action-calls)
+- [The Outbox](#the-outbox)
 - [PITR Safety](#pitr-safety)
 - [Recovery Workflows](#recovery-workflows)
 - [Architecture](#architecture)
@@ -1017,6 +1018,45 @@ defineDatabase({
 ```
 
 ---
+
+## The Outbox
+
+An action runs inside its Durable Object, in the middle of its writes: it should not send an email, call a webhook or enqueue a job itself — that would happen even if the action then failed, and its code would have to be in the object. It records a message instead, and something outside acts on it after the action has succeeded:
+
+```ts
+export const signUp = action({
+  args: { email: 'string.email' },
+  handler: async (db, { email }, ctx) => {
+    const user = await db.insertInto('users').values({ id: crypto.randomUUID(), email }).returningAll().executeTakeFirstOrThrow();
+    ctx.outbox.push({ type: 'welcome-email', userId: user.id });
+    return user;
+  },
+});
+```
+
+Where the messages go is configured once, in the plugin:
+
+```ts
+durableDb({ outbox: { queue: 'EVENTS' } })            // each message to the Queue binding EVENTS, as it is
+durableDb({ outbox: { module: './src/outbox.ts' } })  // a module whose default export delivers them
+```
+
+```ts
+// src/outbox.ts — a function, or an object with `deliver`
+import type { OutboxEnvelope } from 'durable-db/db';
+
+export default async function deliver(envelopes: OutboxEnvelope[], { env }: { env: Env }) {
+  for (const { message, tenantId } of envelopes) await env.WEBHOOKS.send({ ...message, tenant: tenantId });
+}
+```
+
+- **With the action's writes.** The messages are written to the object's `__outbox` table when the handler resolves, in the same synchronous block as its last writes — the Durable Object commits them together — and the alarm that delivers them is set with them. A handler that throws records none. An action called from another action of the same database shares its outbox.
+- **At least once.** The alarm hands the oldest messages (up to 100 per delivery) to the sink and deletes what was delivered; a delivery that throws stays in the table, with its error, and is retried with backoff (5 s, doubling, at most 5 minutes). A message may arrive twice — make what consumes it idempotent.
+- **Envelopes.** The sink gets `{ message, instanceKey, tenantId, recordedAt }`: `tenantId` is a per-tenant instance's tenant (null for a global database).
+- **JSON.** A message is a JSON value, checked when it is pushed.
+- **Typed.** `push()` takes any JSON value until you declare the message: `declare global { interface DurableDbOutbox { message: { type: 'welcome-email'; userId: string } } }`.
+- **Without a sink** `ctx.outbox.push()` throws, naming the option. The generated classes use the alarm for the outbox; a hand-written subclass with an alarm of its own calls `super.alarm()`.
+- **Tests.** `createTestDatabase()` keeps what successful actions pushed in `t.outbox`, and its `outbox` option delivers them as the sink would.
 
 ## Action-to-Action Calls
 

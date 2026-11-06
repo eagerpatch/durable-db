@@ -232,3 +232,36 @@ describe('direct action calls under test', () => {
     expect(await t.run(listShipments, {})).toHaveLength(0);
   });
 });
+
+describe('createTestDatabase: the outbox', () => {
+  const notes = table('notes', { id: text().primaryKey(), text: text().notNull() });
+  const { action: noteAction } = defineDatabase({ schema: { notes } });
+  const addNote = noteAction({
+    args: { id: 'string', text: 'string', 'fail?': 'boolean' },
+    handler: async (db, args, ctx) => {
+      await db.insertInto('notes').values({ id: args.id, text: args.text }).execute();
+      ctx.outbox.push({ job: 'note-added', args: { id: args.id } });
+      if (args.fail) throw new Error('failed after the push');
+      return args.id;
+    },
+  });
+
+  it("keeps a successful action's messages and hands them to the deliver option", async () => {
+    const deliveries: unknown[] = [];
+    const t = await createTestDatabase({ schema: { notes }, tenantId: 'acme', outbox: (envelopes) => void deliveries.push(...envelopes) });
+    await t.run(addNote, { id: 'n1', text: 'hello' });
+    expect(t.outbox).toMatchObject([{ message: { job: 'note-added', args: { id: 'n1' } }, instanceKey: 'acme', tenantId: 'acme' }]);
+    expect(deliveries).toEqual(t.outbox);
+    // Called directly, as app code does, the action runs here too.
+    await addNote({ id: 'n2', text: 'again' });
+    expect(t.outbox.map((e) => (e.message as { args: { id: string } }).args.id)).toEqual(['n1', 'n2']);
+    t.destroy();
+  });
+
+  it('records nothing for an action that throws', async () => {
+    const t = await createTestDatabase({ schema: { notes } });
+    await expect(t.run(addNote, { id: 'n1', text: 'x', fail: true })).rejects.toThrow('failed after the push');
+    expect(t.outbox).toEqual([]);
+    t.destroy();
+  });
+});

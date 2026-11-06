@@ -11,6 +11,7 @@ import {
   type LiveTestDatabase,
 } from '../db/defineDatabase';
 import { setTenantIdResolver } from '../context';
+import { createActionOutbox, tenantOfInstanceKey, type OutboxEnvelope, type OutboxMessage, type OutboxSink } from '../db/outbox';
 import {
   createEmptySnapshot,
   generateSnapshotFromSchema,
@@ -67,6 +68,14 @@ export interface CreateTestDatabaseOptions {
    * that reads the tenant id.
    */
   tenantId?: string;
+  /**
+   * Delivers what an action pushed to `ctx.outbox`, after the action
+   * succeeds, as the Durable Object's sink would (awaited before `run()`
+   * returns). Every envelope is also kept in {@link TestDatabase.outbox}.
+   */
+  outbox?: OutboxSink['deliver'];
+  /** The `ctx.env` handlers see. Defaults to `{}`. */
+  env?: Record<string, unknown>;
 }
 
 export interface TestDatabase<TSchema = any> {
@@ -84,6 +93,8 @@ export interface TestDatabase<TSchema = any> {
   run<TArgs, TResult>(action: (args: TArgs) => Promise<TResult>, args: TArgs): Promise<TResult>;
   /** The raw `node:sqlite` handle, for escape-hatch SQL. */
   sqlite: DatabaseSync;
+  /** Every message the actions run here pushed to `ctx.outbox` (successful ones only), oldest first. */
+  outbox: OutboxEnvelope[];
   /**
    * Close the database, stop routing direct action calls to it and clear the
    * tenant resolver.
@@ -138,7 +149,8 @@ async function deriveStatements(schema: Schema): Promise<string[]> {
 export async function createTestDatabase<TSchema = any>(
   options: CreateTestDatabaseOptions
 ): Promise<TestDatabase<TSchema>> {
-  const { schema, statements, tenantId = 'test' } = options;
+  const { schema, statements, tenantId = 'test', env = {} } = options;
+  const recorded: OutboxEnvelope[] = [];
 
   const { DatabaseSync } = loadSqlite();
   const sqlite = new DatabaseSync(':memory:');
@@ -164,7 +176,24 @@ export async function createTestDatabase<TSchema = any>(
     if (validated instanceof type.errors) {
       throw new Error(`Invalid args for action: ${validated.summary}`);
     }
-    return (await meta.handler(db, validated)) as TResult;
+    // The handler's context, its outbox as the Durable Object's: messages of a successful run only.
+    const outbox = createActionOutbox(true);
+    const result = (await (meta.handler as (db: unknown, args: unknown, ctx: unknown) => Promise<unknown>)(db, validated, {
+      env,
+      instanceKey: tenantId,
+      outbox,
+    })) as TResult;
+    const envelopes: OutboxEnvelope[] = outbox.take().map((message) => ({
+      message: JSON.parse(message) as OutboxMessage,
+      instanceKey: tenantId,
+      tenantId: tenantOfInstanceKey(tenantId),
+      recordedAt: Date.now(),
+    }));
+    if (envelopes.length > 0) {
+      recorded.push(...envelopes);
+      await options.outbox?.(envelopes, { env });
+    }
+    return result;
   }
 
   const live: LiveTestDatabase = {
@@ -192,6 +221,7 @@ export async function createTestDatabase<TSchema = any>(
     db,
     run,
     sqlite,
+    outbox: recorded,
     destroy() {
       const registry = liveTestDatabases();
       const index = registry.indexOf(live);

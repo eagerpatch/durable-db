@@ -1,9 +1,8 @@
-import { scope, type as ambientType } from 'arktype';
+import { createTypeParser } from '../type';
 
 /**
- * ArkType's `type`, for an action's `args` schema: jitless like
- * `../arktypeConfig` (eval-free for Workers), and with an optional key
- * accepting `undefined`.
+ * `type` (durable-db/type: ArkType's definitions and types), for an
+ * action's `args` schema, with an optional key accepting `undefined`.
  *
  * ArkType checks an optional key as TypeScript's `exactOptionalPropertyTypes`
  * would by default: `'photoKey?': 'string'` rejects `{ photoKey: undefined }`,
@@ -24,19 +23,11 @@ import { scope, type as ambientType } from 'arktype';
  * `durable-db/registry` exports), for the RPC stub and the Durable Object
  * alike; the untransformed `action()` and the test harness use it too.
  */
-export const actionArgsType = scope(
-  {},
-  {
-    jitless: true,
-    exactOptionalPropertyTypes: false,
-    toJsonSchema: {
-      fallback: {
-        // Other units (a symbol, a bigint) fail as they do by default.
-        unit: (ctx) => {
-          if (ctx.unit === undefined) return { not: {} };
-          throw new Error(`${String(ctx.unit)} is not convertible to JSON Schema`);
-        },
-      },
-    },
-  }
-).type as typeof ambientType;
+export const actionArgsType = createTypeParser({
+  exactOptionalPropertyTypes: false,
+  // Other units (a symbol, a bigint) fail as they do by default.
+  jsonSchemaUnit: (unit) => {
+    if (unit === undefined) return { not: {} };
+    throw new Error(`${String(unit)} is not convertible to JSON Schema`);
+  },
+});

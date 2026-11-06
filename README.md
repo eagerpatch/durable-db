@@ -2,13 +2,14 @@
 
 Zero-configuration database abstraction for Cloudflare Durable Objects with SQLite.
 
-Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely](https://kysely.dev/), validate with [ArkType](https://arktype.io/) -- and let the Vite plugin handle the rest: Durable Object class generation, RPC stubs, migration embedding, and wrangler config verification (with opt-in auto-patching).
+Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely](https://kysely.dev/), validate with [ArkType](https://arktype.io/)'s syntax ([`durable-db/type`](#durable-dbtype)) -- and let the Vite plugin handle the rest: Durable Object class generation, RPC stubs, migration embedding, and wrangler config verification (with opt-in auto-patching).
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
 - [Defining a Database](#defining-a-database)
 - [Writing Actions](#writing-actions)
+  - [`durable-db/type`](#durable-dbtype)
 - [Calling Actions from Your Worker](#calling-actions-from-your-worker)
 - [CLI](#cli)
   - [push](#db-push)
@@ -222,7 +223,26 @@ args: { name: 'string', 'age?': 'number' }  // Optional key
 args: { role: "'admin' | 'user'" }           // Literal union
 ```
 
-An optional key accepts `undefined`, as its inferred TypeScript type (`{ photoKey?: string }`) does: `addReview({ productId, photoKey: maybeKey })` validates whether or not there is a key, at any depth. A required key stays required, also when its type admits `undefined` (`note: 'string | undefined'` must be passed). Args compile with the `type` of `durable-db/registry`, an ArkType scope with `exactOptionalPropertyTypes: false`; the `type` exported from `durable-db` keeps ArkType's default.
+An optional key accepts `undefined`, as its inferred TypeScript type (`{ photoKey?: string }`) does: `addReview({ productId, photoKey: maybeKey })` validates whether or not there is a key, at any depth. A required key stays required, also when its type admits `undefined` (`note: 'string | undefined'` must be passed). Args compile with the `type` of `durable-db/registry` (`exactOptionalPropertyTypes: false`); the `type` exported from `durable-db` keeps ArkType's default. `args` may also be a ready `type(…)`, or any [Standard Schema](https://standardschema.dev) — a real ArkType Type, Zod, Valibot — which validates by its own rules.
+
+### `durable-db/type`
+
+`type` (from `durable-db`, `durable-db/db` or `durable-db/type`) is ArkType's `type()`: the same definitions, the same inferred types and editor errors — ArkType's own type-level parser, imported as types only — and the same error messages and JSON Schema, on a runtime of its own. ArkType builds its whole scope of keywords when it is imported, ~40 ms of CPU at every cold start of a worker and of every Durable Object; this one builds nothing until a definition is parsed (~2 ms to import, about ArkType's speed per validation without its JIT, which Workers refuse anyway).
+
+```ts
+import { type } from 'durable-db/type';
+
+const Line = type({ qty: 'number.integer > 0', price: 'number' });
+const Invoice = type({ customer: 'string', 'note?': 'string', lines: Line.array() });
+
+const out = Invoice(data);          // the value, or ArkErrors
+if (out instanceof type.errors) console.log(out.summary); // "lines[0].qty must be positive (was 0)"
+typeof Invoice.infer;               // { customer: string; note?: string; lines: { qty: number; price: number }[] }
+Invoice.toJsonSchema();             // JSON Schema (2020-12 or draft-07)
+Invoice['~standard'];               // a Standard Schema, with its JSON Schema converter
+```
+
+It has ArkType's keywords (`string.email`, `string.uuid`, `number.integer`, `string.numeric.parse`, `string.date.iso.parse`, …), bounds (`'string > 0'`, `'0 < number <= 10'`, `'number % 2'`), unions, intersections, literals, regexes, arrays, tuples (`['string', 'number?']`, `['string', '...', 'number[]']`), `Record<K, V>`, object keys (`'key?'`, `'[string]'`, `'+'`, `'...'`), defaults (`'number = 0'`), tuple expressions (`'[]'`, `'|'`, `'&'`, `'=>'`, `':'`, `'|>'`, `'@'`, `'==='`, `'instanceof'`, `'keyof'`) and a Type's methods (`array`, `or`, `and`, `merge`, `pick`, `omit`, `partial`, `required`, `keyof`, `get`, `optional`, `default`, `narrow`, `pipe`, `to`, `describe`, `configure`, `brand`, `onUndeclaredKey`, `props`, `assert`, `allows`, `from`, `toJsonSchema`). ArkType's scopes, generics, `match` and `fn` are not there: a definition it does not know fails with a `ParseError` naming it, never a validator that checks something else. `tests/type/conformance.test.ts` runs every supported definition through both against the same values. A Type of `durable-db/type` nests in ArkType's own definitions and the other way round.
 
 ### The `handler` function
 
@@ -231,7 +251,7 @@ Receives three arguments:
 | Argument | Type | Description |
 |----------|------|-------------|
 | `db` | `Kysely<Schema>` | Type-safe Kysely query builder bound to your Drizzle schema |
-| `args` | inferred from `args` | Validated arguments (ArkType ensures correctness at runtime) |
+| `args` | inferred from `args` | Validated arguments |
 | `ctx` | `ActionContext` | Context with `env` (Cloudflare bindings) and `instanceKey` |
 
 ### File organization

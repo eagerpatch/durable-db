@@ -8,9 +8,10 @@ import { actionArgsType } from './db/actionArgs';
 // It is exported from HERE (a durable-db subpath that always resolves in the
 // consumer's worker) instead of bare `arktype` — which a pnpm app never hoists
 // to its root, and which the cloudflare vite plugin's
-// getWorkerEntryExportTypes then fails to resolve. With arktype inlined into
-// this dist (tsdown noExternal), this is the SAME single instance durable-db
-// validates with — no second scope registry. It is arktype's `type` from a
+// getWorkerEntryExportTypes then fails to resolve. arktype is this package's
+// dependency (external in the dist, resolved from here), so this is the SAME
+// instance durable-db validates with and the app's own arktype, version
+// permitting — no second scope registry. It is arktype's `type` from a
 // scope whose optional keys admit `undefined` (see ./db/actionArgs): an
 // optional key passed as `undefined` validates, as the inferred TypeScript
 // type says it does.

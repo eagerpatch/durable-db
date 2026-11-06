@@ -1,5 +1,15 @@
 # durable-db
 
+## 0.7.0
+
+### Minor Changes
+
+- 86c2b65: `durable-db/type`: ArkType's `type()` — the same definitions, inferred types, error messages and JSON Schema — on a runtime of its own that builds nothing at import. ArkType initialised its whole scope of keywords when imported, ~40 ms of CPU at every cold start of a worker and of every Durable Object; importing this takes ~2 ms, and a validation is about as fast as ArkType's without its JIT. `type` from `durable-db` and `durable-db/db` and every action's `args` use it; arktype is now only a source of types (no runtime import). A ready ArkType Type, or any Standard Schema, still works as `args`. ArkType's scopes, generics, `match` and `fn` are not supported: a definition the runtime does not know fails with a `ParseError` naming it.
+
+### Patch Changes
+
+- dc30475: Calls to one Durable Object batch across awaits: the batch is flushed by a timer once the microtasks have run out, not by the next microtask — two procedures of one `Promise.all` reach their action calls a different number of awaits later (an RPC framework's middleware, input validation), and each used to go out alone. A write asks SQLite for its affected rows and insert id in one follow-up statement instead of two.
+
 ## 0.6.0
 
 ### Minor Changes

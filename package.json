@@ -19,6 +19,10 @@
       "types": "./dist/db/index.d.ts",
       "import": "./dist/db/index.js"
     },
+    "./type": {
+      "types": "./dist/type/index.d.ts",
+      "import": "./dist/type/index.js"
+    },
     "./context": {
       "types": "./dist/context/index.d.ts",
       "import": "./dist/context/index.js"
@@ -73,6 +77,7 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
+    "type-check": "tsc --noEmit -p . && tsc -p tests/type/tsconfig.json",
     "test": "vitest",
     "test:run": "vitest run",
     "changeset": "changeset"

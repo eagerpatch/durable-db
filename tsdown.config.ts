@@ -3,6 +3,7 @@ import { defineConfig } from 'tsdown';
 const entry = [
   'src/index.ts',
   'src/db/index.ts',
+  'src/type/index.ts',
   'src/context/index.ts',
   'src/migrations/snapshot.ts',
   'src/migrations/generator.ts',

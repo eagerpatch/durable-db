@@ -2,6 +2,7 @@ import { type } from './arktypeConfig'; // jitless `type` — eval-free for Work
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { WebSocketTransport } from './transport/websocket';
 import { actionArgsType } from './db/actionArgs';
+import { ACTION_INFO, type ActionInfo } from './db/describeAction';
 
 // The `type` the action-file transform injects (as `__ddType`) to compile each
 // action's `args`, for the RPC stub and the Durable Object's validator alike.
@@ -24,6 +25,10 @@ export { actionArgsType as type };
 export interface ActionDefinition {
   validator: (args: unknown) => unknown;
   handler: (db: unknown, args: unknown, ctx: unknown) => Promise<unknown>;
+  /** The compiled args schema (a `type()`), for `describeAction()`. */
+  args?: unknown;
+  /** The call site the build compiled this action to: `describeAction()` reads the description from it. */
+  stub?: object;
 }
 
 export interface DoContext {
@@ -86,6 +91,15 @@ export function registerAction(dbName: string, actionName: string, def: ActionDe
     actionsByDb.set(dbName, dbMap);
   }
   dbMap.set(actionName, def);
+  // What the action is, on its call site (see ./db/describeAction): inert
+  // unless a library asks, non-enumerable like the untransformed action's meta.
+  if (def.stub) {
+    Object.defineProperty(def.stub, ACTION_INFO, {
+      value: { database: dbName, name: actionName, args: def.args } satisfies ActionInfo,
+      enumerable: false,
+      configurable: true,
+    });
+  }
 }
 
 export function getAction(dbName: string, actionName: string): ActionDefinition | undefined {

@@ -390,6 +390,17 @@ export const createUser = action({
     expect(result!.code).toContain('registerAction("main", "createUser"');
   });
 
+  it('registers the compiled args schema and the call site, for describeAction()', () => {
+    const code = `export const createUser = action({ args: { name: 'string' }, handler: async () => {} });`;
+    const result = transformActionFile({
+      ...defaultOptions,
+      code,
+      actionsInFile: [createUserAction],
+    });
+
+    expect(result!.code).toMatch(/registerAction\("main", "createUser", \{[^}]*args: __validator_createUser,\s*stub: createUser\s*\}\)/);
+  });
+
   it('generates DO short path check', () => {
     const code = `export const createUser = action({ args: {}, handler: async () => {} });`;
     const result = transformActionFile({

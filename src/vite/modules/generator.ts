@@ -1228,7 +1228,7 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
         ])
       );
 
-      // registerAction(dbName, "X", { validator, handler })
+      // registerAction(dbName, "X", { validator, handler, args, stub })
       replaced.push(
         t.expressionStatement(
           t.callExpression(t.identifier('registerAction'), [
@@ -1243,6 +1243,9 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
                 )
               ),
               t.objectProperty(t.identifier('handler'), handlerId),
+              // For describeAction(): the compiled schema, and the stub below (hoisted) to describe.
+              t.objectProperty(t.identifier('args'), validatorId),
+              t.objectProperty(t.identifier('stub'), t.identifier(exportName)),
             ]),
           ])
         )

@@ -1109,6 +1109,16 @@ registerSharedAction('export:rows', {
 
 `virtual:durable-db/__databases` lists what the plugin discovered — `databases: [{ name, bindingName, className, instance, schema }]`, the tables being the schema module's own objects — for a library that needs to know which database a table belongs to. It is generated only when something imports it.
 
+`describeAction(action)` (from `durable-db`) answers what an action is, given the function an app exports: `{ database, name, args }`, `args` being its compiled schema — `.toJsonSchema()` for a library that maps actions to an API of its own. It reads what the build registered for the call site (in tests, where nothing is compiled, `database` and `name` are `null`), and `undefined` for anything that is not an action.
+
+```ts
+import { describeAction } from 'durable-db';
+import { createInvoice } from './databases/billing.actions';
+
+describeAction(createInvoice)?.args?.toJsonSchema();
+// { type: 'object', properties: { customerId: { type: 'string' }, … }, required: [ … ] }
+```
+
 ---
 
 ## PITR Safety

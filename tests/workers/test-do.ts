@@ -1,6 +1,6 @@
 import { SqliteDurableObject, type Migrations } from '../../src/db/SqliteDurableObject';
 import { RemovedDatabaseDurableObject } from '../../src/db/RemovedDatabaseDurableObject';
-import { type as actionArgsType, registerAction, callAction } from '../../src/registry';
+import { type as actionArgsType, registerAction, registerSharedAction, callAction } from '../../src/registry';
 import { createKyselyFromSql } from '../../src/db/kysely';
 import { integer, table, text } from '../../src/schema';
 
@@ -384,5 +384,47 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
 
   async alarmAt(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared actions — registered once, an action of every database.
+// ---------------------------------------------------------------------------
+
+const things = table('things', { id: text().primaryKey() });
+
+// At module scope, the way a library registers one: loaded with the worker's
+// entry, so it is there in every Durable Object's isolate.
+registerSharedAction('lib:ids', {
+  validator: (args) => args,
+  handler: async (db, args, ctx) => {
+    const { table: from } = args as { table: string };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = await (db as any).selectFrom(from).select('id').orderBy('id').execute();
+    return { database: (ctx as { dbName: string }).dbName, ids: rows.map((row: { id: string }) => row.id) };
+  },
+});
+
+// A database's own action of the same name.
+registerAction('shared-own', 'lib:ids', {
+  validator: (args) => args,
+  handler: async () => 'own',
+});
+
+/**
+ * A shared action against a real workerd: called as an action of whichever
+ * database the object is (`asDatabase`), it reads that object's own SQLite.
+ */
+export class TestSharedDO extends SqliteDurableObject {
+  migrations: Migrations = {
+    '20240101_things': { chunks: [['CREATE TABLE things (id TEXT PRIMARY KEY)']] },
+  };
+
+  async ids(asDatabase: string, add: string[]): Promise<unknown> {
+    await this.ensureMigrations();
+    for (const id of add) this.sql.exec('INSERT INTO things (id) VALUES (?)', id);
+    const db = createKyselyFromSql<any>(this.sql, { schema: { things } });
+    const ctx = { env: {}, dbName: asDatabase, dbBindingNames: {}, instanceKey: 'global' };
+    return callAction(db, asDatabase, 'lib:ids', { table: 'things' }, ctx);
   }
 }

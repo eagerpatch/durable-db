@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   parseExpression,
+  generateDatabasesModule,
   generateDurableObjectsModule,
   transformActionFile,
   transformDatabaseFile,
@@ -791,5 +792,51 @@ export const createUser = action({
       expect(result!.code).toContain('export async function createUser(args)');
       expect(result!.code).toContain('stub.sys("destroyDatabase")');
     });
+  });
+});
+
+// ============================================================================
+// generateDatabasesModule
+// ============================================================================
+
+describe('generateDatabasesModule', () => {
+  it('lists each database with its binding, class and instance', () => {
+    const code = generateDatabasesModule([mockDatabase, globalDatabase]);
+
+    expect(code).toContain('export const databases = [');
+    expect(code).toContain(`name: "${mockDatabase.name}"`);
+    expect(code).toContain(`bindingName: "${mockDatabase.bindingName}"`);
+    expect(code).toContain(`className: "${mockDatabase.className}"`);
+    expect(code).toContain('instance: "per-tenant"');
+    expect(code).toContain('instance: "global"');
+  });
+
+  it('imports the tables from the schema module, as the Durable Object classes do', () => {
+    const database: DatabaseInfo = {
+      ...mockDatabase,
+      filePath: '/app/src/databases/main.ts',
+      schemaImport: './schema',
+      schemaTableNames: ['users', 'posts'],
+    };
+    const code = generateDatabasesModule([database]);
+
+    expect(code).toContain('import { users as __schema_main_users, posts as __schema_main_posts } from "/app/src/databases/schema"');
+    expect(code).toContain('users: __schema_main_users');
+    expect(code).toContain('posts: __schema_main_posts');
+    // The same import the classes' module carries.
+    expect(generateDurableObjectsModule([database], 'durable-db/registry')).toContain(
+      'import { users as __schema_main_users, posts as __schema_main_posts } from "/app/src/databases/schema"'
+    );
+  });
+
+  it('gives a database without schema tables an empty schema', () => {
+    const code = generateDatabasesModule([{ ...mockDatabase, schemaImport: null, schemaTableNames: [] }]);
+
+    expect(code).toContain('schema: {}');
+    expect(code).not.toContain('import ');
+  });
+
+  it('is an empty list without databases', () => {
+    expect(generateDatabasesModule([])).toContain('export const databases = []');
   });
 });

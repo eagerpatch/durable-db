@@ -315,6 +315,37 @@ export function generateDurableObjectsModule(
 }
 
 /**
+ * `virtual:durable-db/__databases`: what the plugin discovered, for a library
+ * that needs to know which database a table belongs to —
+ *
+ *   export const databases = [{ name, bindingName, className, instance, schema: { <table>: <the table> } }];
+ *
+ * The tables are imported from the schema module, as the Durable Object
+ * classes import them: the same objects the app's own code holds.
+ */
+export function generateDatabasesModule(databases: DatabaseInfo[]): string {
+  const entries = databases.map((db) =>
+    t.objectExpression([
+      t.objectProperty(t.identifier('name'), t.stringLiteral(db.name)),
+      t.objectProperty(t.identifier('bindingName'), t.stringLiteral(db.bindingName)),
+      t.objectProperty(t.identifier('className'), t.stringLiteral(db.className)),
+      t.objectProperty(t.identifier('instance'), t.stringLiteral(db.instance)),
+      t.objectProperty(
+        t.identifier('schema'),
+        hasSchema(db) ? (buildSchemaProperty(db).value as t.ObjectExpression) : t.objectExpression([])
+      ),
+    ])
+  );
+  const program = t.program([
+    ...databases.filter(hasSchema).map(buildSchemaImport),
+    t.exportNamedDeclaration(
+      t.variableDeclaration('const', [t.variableDeclarator(t.identifier('databases'), t.arrayExpression(entries))])
+    ),
+  ]);
+  return generateCode(t.file(program));
+}
+
+/**
  * `export class <Old>DatabaseDO extends RemovedDatabaseDurableObject { … }`:
  * the class of a removed database, kept so the worker still exports every
  * class its migrations declare — its storage untouched, every call refused.

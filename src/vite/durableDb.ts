@@ -9,7 +9,7 @@ import { discoverDatabaseFiles, discoverActionFiles, readFile } from './modules/
 import { parseDatabaseFile } from './modules/parser';
 import { checkWranglerConfig, describeWranglerCheck, tombstoneClasses, type RenameConflict } from './modules/wrangler';
 import { databaseSources, type DatabaseSource } from './modules/discovery';
-import { generateDurableObjectsModule, transformActionFile, transformDatabaseFile, type OutboxOption } from './modules/generator';
+import { generateDatabasesModule, generateDurableObjectsModule, transformActionFile, transformDatabaseFile, type OutboxOption } from './modules/generator';
 import { reconcileWranglerConfig, syncWranglerConfig } from './modules/syncWrangler';
 import { loadMigrationFiles } from '../migrations/generator';
 import {
@@ -76,6 +76,10 @@ const VIRTUAL_DO_MODULE_ID = '\0virtual:durable-db/__durableObjects.js';
 
 const DEV_EPOCH_ID = 'durable-db/__devEpoch';
 const VIRTUAL_DEV_EPOCH_MODULE_ID = '\0virtual:durable-db/__devEpoch.js';
+
+/** The discovered databases, for whoever imports it (nothing of durable-db's does). */
+const DATABASES_ID = 'durable-db/__databases';
+const VIRTUAL_DATABASES_MODULE_ID = '\0virtual:durable-db/__databases.js';
 
 /** Old org-prefixed spelling, still resolved for compatibility. */
 const LEGACY_ID_PREFIX = 'eagerpatch/';
@@ -342,6 +346,8 @@ class PluginState {
 
   invalidateDOModule(): void {
     this.invalidateVirtualModule(VIRTUAL_DO_MODULE_ID);
+    // The same discovery feeds it; a no-op when nothing imported it.
+    this.invalidateVirtualModule(VIRTUAL_DATABASES_MODULE_ID);
   }
 
   invalidateDevEpochModule(): void {
@@ -552,6 +558,9 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
       if (matchesVirtualId(id, DEV_EPOCH_ID)) {
         return VIRTUAL_DEV_EPOCH_MODULE_ID;
       }
+      if (matchesVirtualId(id, DATABASES_ID)) {
+        return VIRTUAL_DATABASES_MODULE_ID;
+      }
       return null;
     },
 
@@ -577,6 +586,11 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
           databaseEpochs = getDatabaseEpochs(devState);
         }
         return { code: generateDevEpochModule(epoch, databaseEpochs) };
+      }
+
+      if (id === VIRTUAL_DATABASES_MODULE_ID) {
+        await state.initialize();
+        return { code: generateDatabasesModule(Array.from(state.databases.values())) };
       }
 
       if (id !== VIRTUAL_DO_MODULE_ID) return null;

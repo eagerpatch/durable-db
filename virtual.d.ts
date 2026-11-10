@@ -13,5 +13,17 @@ declare module "virtual:durable-db/__devEpoch" {
   export function applyDevEpoch(key: string, dbName?: string): string;
 }
 
+// The databases the plugin discovered, each with its tables (the schema
+// module's own objects) — for a library that maps a table to its database.
+declare module "virtual:durable-db/__databases" {
+  export const databases: ReadonlyArray<{
+    name: string;
+    bindingName: string;
+    className: string;
+    instance: 'per-tenant' | 'global';
+    schema: Record<string, unknown>;
+  }>;
+}
+
 /** @deprecated Use "virtual:durable-db/__durableObjects" instead. */
 declare module "virtual:eagerpatch/durable-db/__durableObjects";

@@ -1,0 +1,7 @@
+---
+'durable-db': minor
+---
+
+`defineDatabase({ schema })` takes a schema the schema module exports whole: `export const schema = { users, posts }` there, `import { schema } from './schema'` in the database file. Until now the build read the tables only from an object written in the call (`schema: { users, posts }`); anything else gave the database no schema, without a word — and code that needs the same object elsewhere (a test database, a library that reads the relations) had to list the tables a second time. The const is read as it is exported: its keys are the table names, a default export works, `as const` and `satisfies` are seen through, and a `const` of listed tables in the database file is read like the object in the call. The generated Durable Object class and `virtual:durable-db/__databases` import that export and use the object itself; `db push`, `generate`, `status` and `validate` read the tables off it, and say so when the export is missing or is not an object of tables.
+
+A `schema` the build cannot read (a function call, a namespace import, a value built at runtime) now warns, naming the file, instead of silently yielding a database without tables. For tooling on `durable-db/cli`: `DatabaseInfo` has `schemaExport` (the export's name, `null` for listed tables — `schemaTableNames` is then empty for a database that has a schema), `declaresSchema(db)` answers whether it has one in either form, and `loadSchemaTables(db, schemaPath)` loads its tables. Nothing changes for a database that lists its tables.

@@ -123,6 +123,32 @@ export const getUser = action({
       expect(wranglerConfig.durable_objects!.bindings![0].class_name).toBe('MainDatabaseDO');
     });
 
+    it('gives the object the schema const a schema module exports, the object itself', () => {
+      fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'schema.ts'), `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
+
+export const users = sqliteTable('users', { id: text('id').primaryKey() });
+export const schema = { users };
+`);
+      const file = path.join(tempDir, 'src', 'databases', 'main.ts');
+      fs.writeFileSync(file, `
+import { defineDatabase } from 'durable-db/db';
+import { schema } from './schema';
+
+export const { action } = defineDatabase({ schema });
+`);
+
+      const parsed = parseDatabaseFile(file, readFile(file));
+      expect(parsed.database).toMatchObject({ schemaImport: './schema', schemaExport: 'schema', schemaTableNames: [] });
+
+      // One import of the const, handed on as it is: what the module's own code
+      // builds from it (relations, a graph's nodes) is about the same object.
+      const doModule = generateDurableObjectsModule([parsed.database!], 'durable-db/registry');
+      expect(doModule).toMatch(/import { schema as __schema_main } from/);
+      expect(doModule).toContain(path.join('src', 'databases', 'schema'));
+      expect(doModule).toMatch(/schema = __schema_main\b/);
+    });
+
     it('handles multiple databases', () => {
       // Main database
       const mainCode = `

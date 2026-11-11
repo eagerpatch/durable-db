@@ -821,4 +821,60 @@ export const { action } = defineDatabase({ schema: { reviews } });
       expect(text).toContain('products.currency is added NOT NULL without a default');
     });
   });
+
+  describe('a schema the schema module exports whole', () => {
+    /** One database, given the const the schema module exports: no table is named in shop.ts. */
+    function writeShop(productColumns: string) {
+      fs.writeFileSync(path.join(databasesDir, 'schema.ts'), `
+import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+export const products = sqliteTable('products', {
+  id: text().primaryKey(),
+${productColumns}
+});
+export const reviews = sqliteTable('reviews', {
+  id: text().primaryKey(),
+  productId: text().notNull().references(() => products.id),
+  rating: integer(),
+});
+export const schema = { products, reviews };
+`);
+      fs.writeFileSync(path.join(databasesDir, 'shop.ts'), `
+import { defineDatabase } from 'durable-db/db';
+import { schema } from './schema';
+export const { action } = defineDatabase({ schema });
+`);
+    }
+
+    it('generate, status and validate read the tables from the const', async () => {
+      writeShop('  name: text().notNull(),');
+
+      const [created] = await generate(ctx(), { name: 'init', interactive: false });
+      expect(created.database).toBe('shop');
+      expect(created.hasChanges).toBe(true);
+      const sql = created.statements.join('\n');
+      expect(sql).toContain('CREATE TABLE `products`');
+      expect(sql).toContain('CREATE TABLE `reviews`');
+
+      expect((await status(ctx())).databases.map((db) => db.hasUncommittedChanges)).toEqual([false]);
+      const [valid] = await validate(ctx());
+      expect(valid.migrationsValid).toBe(true);
+      expect(valid.schemaMatches).toBe(true);
+    });
+
+    it('sees a table change through the const', async () => {
+      writeShop('  name: text().notNull(),');
+      await generate(ctx(), { name: 'init', interactive: false });
+
+      writeShop('  name: text().notNull(),\n  sku: text(),');
+
+      expect((await status(ctx())).databases[0].hasUncommittedChanges).toBe(true);
+      const [drifted] = await validate(ctx());
+      expect(drifted.schemaMatches).toBe(false);
+
+      const [added] = await generate(ctx(), { name: 'sku', interactive: false });
+      expect(added.statements.join('\n')).toContain('ALTER TABLE `products` ADD `sku` text');
+      const [valid] = await validate(ctx());
+      expect(valid.schemaMatches).toBe(true);
+    });
+  });
 });

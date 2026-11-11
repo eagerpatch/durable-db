@@ -67,7 +67,11 @@ Column names are derived from JS property keys and auto-converted to snake_case 
 
 **Date columns**: use `integer({ mode: 'timestamp' })` and pass `Date` values — they round-trip as `Date` objects automatically. Plain `text()` columns always round-trip verbatim: if you store an ISO string (`new Date().toISOString()`), you get the exact same string back, never a `Date`.
 
-> ⚠️ All tables referenced in `defineDatabase({ schema })` must be **exported from the schema module** and imported into the database file. Tables defined inline in the database file (or not exported) cannot be loaded by the migration CLI — `db push`/`db generate` will fail with an explicit error rather than silently generating empty migrations.
+**JSON columns**: `text({ mode: 'json' })` (or `blob({ mode: 'json' })`) takes the value itself — an object, an array, a string, a number — and gives it back parsed. Don't `JSON.stringify()` it yourself: a string is stored as a JSON string and comes back as that string. Dates inside it are ISO strings, as in any JSON. That holds for values written with `values()` / `set()` and for columns a query reads by name (`select`, `selectAll`, `returning`, through an alias or a join). An expression — `INSERT … SELECT`, `excluded.meta` in an upsert, a `sql` fragment, a `where` against the column — works on the stored text, and its encoding is yours.
+
+**Blob columns**: pass an `ArrayBuffer` or a typed array (`Uint8Array`). A Durable Object answers a blob as an `ArrayBuffer`.
+
+> ⚠️ `schema` is read at build time. All tables referenced in `defineDatabase({ schema })` must be **exported from the schema module** and imported into the database file — listed one by one (`schema: { users }`), or as one object the schema module exports (see below). Tables defined inline in the database file (or not exported) cannot be loaded by the migration CLI — `db push`/`db generate` will fail with an explicit error rather than silently generating empty migrations. Anything else passed as `schema` (a function call, a namespace import, a value built at runtime) is not read: the build warns and the database gets no schema.
 
 ### 3. Define your database
 
@@ -80,6 +84,20 @@ export const { action } = defineDatabase({
   schema: { users },
 });
 ```
+
+The schema module can also hand its tables over as one object — the way to go when something else wants the very same object (a test database, a library that reads the relations):
+
+```ts
+// src/databases/schema.ts
+export const schema = { users, posts };
+
+// src/databases/main.ts
+import { schema } from './schema';
+
+export const { action } = defineDatabase({ schema });
+```
+
+The keys of that object are the table names actions use (`selectFrom('users')`), exactly as in the listed form; the CLI and the generated Durable Object class read the tables from that export. `as const` and `satisfies` are seen through, a default export works (`import schema from './schema'`), and so does a `const` of listed tables in the database file itself.
 
 ### 4. Write actions
 
@@ -187,7 +205,7 @@ The destructured `action` function is your factory for creating database actions
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `schema` | `object` | `{}` | Drizzle schema tables |
+| `schema` | `object` | `{}` | Drizzle schema tables: listed (`{ users, posts }`), or one object the schema module exports (`import { schema } from './schema'`). Read at build time |
 | `instance` | `'per-tenant' \| 'global'` | `'per-tenant'` | Instance strategy (see [Instance Strategies](#instance-strategies)) |
 | `transport` | `'rpc' \| 'websocket'` | `'rpc'` | Transport for action stubs. WebSocket uses Cloudflare's 20:1 message billing ratio for cheaper high-volume calls |
 | `browsable` | `boolean \| 'development'` | `false` | Enable Outerbase SQL browsing (see [Outerbase Studio](#outerbase-studio-integration)) |
@@ -1164,11 +1182,15 @@ export const invoiceLines = table(
   },
   (t) => [index('invoice_lines_invoice').on(t.invoiceId)],
 );
+
+export const schema = { customers, invoices, invoiceLines };
 ```
 
 `defineDatabase()` hands out `related` next to `action`. It is a selection: put it in a `select()` (or a `returning()`) and the row gets the related rows under the relation's name, typed.
 
 ```ts
+import { schema } from './schema';
+
 export const { action, related, relations } = defineDatabase({ schema });
 
 export const listInvoices = action({
@@ -1202,9 +1224,27 @@ related('customers', 'invoices', {
 });
 ```
 
-Each relation is a correlated subquery that SQLite answers as JSON (`json_object`, `json_group_array`); dates and booleans inside come back as the columns say, like in any row. Index the foreign key column a `many` is read through (`invoice_lines_invoice` above): without one SQLite scans the child table once per parent row — 200 invoices over 10 000 lines took 80 ms without it and 1.4 ms with it.
+**Another name.** `.as()` answers a relation under a name of your choosing, at the top of a query and inside `with`, and the type follows. The same relation can then be read twice in one query:
+
+```ts
+related('invoices', 'customer', ['name']).as('buyer');
+// { buyer: { name: string } }
+
+related('customers', 'invoices', { columns: ['number'], orderBy: { number: 'desc' }, limit: 1 }).as('latest');
+```
+
+Each relation is a correlated subquery that SQLite answers as JSON (`json_object`, `json_group_array`); dates, booleans and JSON columns inside come back as the columns say, like in any row. A blob column cannot be read through a relation (JSON holds none): read it in a query of its own. Index the foreign key column a `many` is read through (`invoice_lines_invoice` above): without one SQLite scans the child table once per parent row — 200 invoices over 10 000 lines took 80 ms without it and 1.4 ms with it.
 
 **The registry.** `relations` (and `relationsOf(schema)` from `durable-db`) is the same information at runtime — `relations.invoices.customer` is `{ kind: 'one', name: 'customer', table: 'invoices', target: 'customers', local: 'customerId', foreign: 'id', nullable: false }` (tables as schema keys, columns as their properties) — for a library that maps a schema to an API. `Relations<typeof schema>` is its type.
+
+**Outside `defineDatabase()`.** `createRelated(schema)` (from `durable-db`) is the same builder for code that is handed a schema and not the database file — that library, again. For a schema whose tables TypeScript knows it is typed like `related`; for one known only at runtime (`AnySchema`) it takes strings (`AnyRelated`) and checks them when called: the table, the relation, its columns, the order. Give it the schema object the database is defined with — a nested relation built for another object is refused. `RelatedSpec` is what a `RelatedExpression` is made from.
+
+```ts
+import { createRelated } from 'durable-db';
+
+const related = createRelated(schema);
+related('invoices', 'customer', ['name']);
+```
 
 What it does not do yet:
 
@@ -1343,9 +1383,11 @@ The library includes plugins for transparent data mapping between JavaScript and
 
 - **DrizzleDefaultsPlugin**: Auto-populates columns with Drizzle's `$defaultFn()` on INSERT (e.g. auto-generated IDs, `createdAt` timestamps) and `$onUpdateFn()` on UPDATE (e.g. `updatedAt` timestamps). Columns that are explicitly provided in the query are not overridden.
 - **SchemaPlugin**: Schema-aware extension of Kysely's `CamelCasePlugin`. Maps camelCase JS property names to snake_case SQL names for both tables and columns using Drizzle schema metadata. Falls back to standard CamelCasePlugin behavior for names not in the schema.
-- **DateSerializePlugin**: Converts `Date` objects to `YYYY-MM-DD HH:MM:SS` strings for SQLite storage, and parses them back into `Date` objects on read. The read path is deliberately conservative: only values in exactly the format the write path produces (also what SQLite's `CURRENT_TIMESTAMP` emits) are converted, and — when constructed with a schema — only for columns Drizzle declares as date-typed (e.g. `integer({ mode: 'timestamp' })`). User-stored strings in `text()` columns (ISO strings with a `T` separator, timezone, or milliseconds) round-trip verbatim.
+- **DateSerializePlugin**: Converts `Date` objects to `YYYY-MM-DD HH:MM:SS` strings for SQLite storage, and parses them back into `Date` objects on read. The read path is deliberately conservative: only values in exactly the format the write path produces (also what SQLite's `CURRENT_TIMESTAMP` emits) are converted, and — when constructed with a schema — only for columns Drizzle declares as date-typed (e.g. `integer({ mode: 'timestamp' })`). User-stored strings in `text()` columns (ISO strings with a `T` separator, timezone, or milliseconds) round-trip verbatim. Binary values (`ArrayBuffer`, typed arrays) pass through untouched and are bound as blobs.
+- **BooleanDeserializePlugin**: answers `integer({ mode: 'boolean' })` columns as `true`/`false`.
+- **The JSON plugins** (`createJsonPlugins(schema)`, only for a schema with a JSON-mode column): one serialises the values an INSERT or UPDATE writes to a `text({ mode: 'json' })` / `blob({ mode: 'json' })` column, the other parses those columns in the rows a query answers — resolved per selection (table, alias, `selectAll`, joins, `returning`), by column name across the schema for a raw `sql` query. Text that is no JSON is answered as it is.
 
-All three plugins are automatically configured when using `createDrizzlePlugins(schema)`.
+All of them are configured by `createDrizzlePlugins(schema)`.
 
 ---
 

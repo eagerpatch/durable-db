@@ -14,6 +14,10 @@
 // rewrites the query), the last parses their JSON and revives dates and
 // booleans the way the columns of the row itself are.
 //
+// A relation is answered under its name; `.as('name')` answers it under
+// another, so one relation can be read twice (`.as('latest')` with a limit,
+// next to the whole list).
+//
 // Opt in: a query without `related()` passes both plugins untouched.
 import {
   AliasNode,
@@ -30,7 +34,7 @@ import {
   type UnknownRow,
 } from 'kysely';
 import { getTableColumns } from 'drizzle-orm';
-import { dateSerializers } from './plugins';
+import { dateSerializers, parseJsonValue } from './plugins';
 import { relationOf, type AnySchema, type Relation, type Relations } from './relations';
 import type { DrizzleToKysely } from './types';
 
@@ -91,12 +95,28 @@ export interface Related<S extends AnySchema> {
   >;
 }
 
+/**
+ * `related` for a schema whose tables are known only when the code runs (a
+ * library that is handed one): the names are strings, checked against the
+ * schema when it is called, and what it answers is typed by the caller.
+ */
+export interface AnyRelated {
+  (table: string, relation: string, columns: readonly string[]): RelatedExpression<string, string, unknown>;
+  (
+    table: string,
+    relation: string,
+    options: RelatedOptions<string, readonly RelatedExpression<string, string, unknown>[]>,
+  ): RelatedExpression<string, string, unknown>;
+}
+
 // ── The expression ─────────────────────────────────────────────────────
 
-/** A relation to read, checked against the schema. Internal: what `related()` builds. */
+/** A relation to read, checked against the schema: what `related()` builds. */
 export interface RelatedSpec {
   schema: AnySchema;
   relation: Relation;
+  /** The key it is answered under: the relation's name, or what `.as()` said. */
+  alias: string;
   columns: string[];
   with: RelatedSpec[];
   orderBy: [column: string, direction: 'asc' | 'desc'][];
@@ -116,7 +136,7 @@ type Marked = AliasNode & { readonly [RELATED]?: Meta };
 const specs = new WeakMap<object, RelatedSpec>();
 
 function metaOf(spec: RelatedSpec): Meta {
-  return { target: spec.relation.target, with: new Map(spec.with.map((nested) => [nested.relation.name, metaOf(nested)])) };
+  return { target: spec.relation.target, with: new Map(spec.with.map((nested) => [nested.alias, metaOf(nested)])) };
 }
 
 // `outer` is what the parent row goes by where this is selected: its table at
@@ -130,7 +150,7 @@ function render(spec: RelatedSpec, outer: string, depth: number): RawBuilder<unk
   const pairs = spec.columns.map((column) => sql`${sql.lit(column)}, ${sql.ref(`${row}.${column}`)}`);
   for (const nested of spec.with) {
     // A subquery's text is text again: json() makes it the value it holds (and null of null).
-    pairs.push(sql`${sql.lit(nested.relation.name)}, json(${render(nested, row, depth + 1)})`);
+    pairs.push(sql`${sql.lit(nested.alias)}, json(${render(nested, row, depth + 1)})`);
   }
   const object = sql`json_object(${sql.join(pairs)})`;
   const target = sql.table(relation.target);
@@ -155,7 +175,8 @@ function render(spec: RelatedSpec, outer: string, depth: number): RawBuilder<unk
 /**
  * A relation as a selection: what `related()` returns. `table` is the table
  * it is a relation of (so `with` takes only the related table's own), `alias`
- * the relation's name — the key it is answered under.
+ * the key it is answered under — the relation's name, until `.as()` says
+ * another.
  */
 export class RelatedExpression<TK extends string, A extends string, V> implements AliasedExpression<V, A> {
   readonly table: TK;
@@ -163,8 +184,21 @@ export class RelatedExpression<TK extends string, A extends string, V> implement
 
   constructor(spec: RelatedSpec) {
     this.table = spec.relation.table as TK;
-    this.alias = spec.relation.name as A;
+    this.alias = spec.alias as A;
     specs.set(this, spec);
+  }
+
+  /**
+   * The same relation, answered under `name` instead of its own:
+   * `related('customers', 'invoices', { columns: ['id'], limit: 1 }).as('latest')`.
+   * A new expression — this one keeps its name.
+   */
+  as<N extends string>(name: N): RelatedExpression<TK, N, V> {
+    const spec = specs.get(this)!;
+    if (typeof name !== 'string' || name === '') {
+      throw new TypeError(`[durable-db] related('${spec.relation.table}', '${spec.relation.name}').as() takes the name to answer it under.`);
+    }
+    return new RelatedExpression<TK, N, V>({ ...spec, alias: name });
   }
 
   get expression(): Expression<V> {
@@ -222,10 +256,11 @@ function specOf(schema: AnySchema, table: string, name: string, arg: unknown): R
         `${where}: with takes relations of "${relation.target}", and "${spec.relation.name}" is one of "${spec.relation.table}"${other}.`,
       );
     }
-    if (names.has(spec.relation.name)) {
-      throw new TypeError(`${where}: "${spec.relation.name}" is there twice — as a column and a relation, or the relation twice.`);
+    // By the key each is answered under: a relation may be there twice under two names (`.as()`).
+    if (names.has(spec.alias)) {
+      throw new TypeError(`${where}: "${spec.alias}" is there twice — as a column and a relation, or two relations under one name.`);
     }
-    names.add(spec.relation.name);
+    names.add(spec.alias);
     inner.push(spec);
   }
   if (names.size === 0) throw new TypeError(`${where} reads nothing: name the columns to read.`);
@@ -242,13 +277,17 @@ function specOf(schema: AnySchema, table: string, name: string, arg: unknown): R
     throw new TypeError(`${where} leads to one row: orderBy and limit are for a relation that leads to many.`);
   }
 
-  return { schema, relation, columns, with: inner, orderBy, limit };
+  return { schema, relation, alias: relation.name, columns, with: inner, orderBy, limit };
 }
 
-/** `related` for a schema: what `defineDatabase()` hands out. */
-export function createRelated<S extends AnySchema>(schema: S): Related<S> {
+/**
+ * `related` for a schema: what `defineDatabase()` hands out, and the way to
+ * it for code that is handed a schema — typed by the schema's tables, or by
+ * strings (`AnyRelated`) when its type names none.
+ */
+export function createRelated<S extends AnySchema>(schema: S): string extends keyof S ? AnyRelated : Related<S> {
   const related = (table: string, relation: string, arg: unknown) => new RelatedExpression(specOf(schema, table, relation, arg));
-  return related as unknown as Related<S>;
+  return related as unknown as string extends keyof S ? AnyRelated : Related<S>;
 }
 
 // ── The plugins ────────────────────────────────────────────────────────
@@ -283,19 +322,30 @@ function toBoolean(value: unknown): unknown {
  * query as the builder made it, marks and all — and `results` last, when the
  * row's keys are the schema's again.
  */
-export function createRelatedPlugins(schema: AnySchema): { capture: KyselyPlugin; results: KyselyPlugin } {
+export function createRelatedPlugins(
+  schema: AnySchema,
+  options: {
+    /**
+     * The key a result row has for a name a query writes: SchemaPlugin's
+     * `resultKey` when the names are camelCased. Default: the name itself.
+     */
+    resultKey?: (name: string) => string;
+  } = {},
+): { capture: KyselyPlugin; results: KyselyPlugin } {
+  const resultKey = options.resultKey ?? ((name: string) => name);
   const selected = new WeakMap<QueryId, Map<string, Meta>>();
-  const kinds = new Map<string, { dates: Set<string>; booleans: Set<string> }>();
+  const kinds = new Map<string, { dates: Set<string>; booleans: Set<string>; jsons: Set<string> }>();
 
   const kindsOf = (table: string) => {
     let kind = kinds.get(table);
     if (!kind) {
-      kind = { dates: new Set(), booleans: new Set() };
+      kind = { dates: new Set(), booleans: new Set(), jsons: new Set() };
       const target = schema[table];
       const columns: Record<string, { dataType: string }> = target ? getTableColumns(target) : {};
       for (const [key, column] of Object.entries(columns)) {
         if (column.dataType === 'date') kind.dates.add(key);
         else if (column.dataType === 'boolean') kind.booleans.add(key);
+        else if (column.dataType === 'json') kind.jsons.add(key);
       }
       kinds.set(table, kind);
     }
@@ -305,7 +355,7 @@ export function createRelatedPlugins(schema: AnySchema): { capture: KyselyPlugin
   const revive = (value: unknown, meta: Meta): unknown => {
     if (Array.isArray(value)) return value.map((item) => revive(item, meta));
     if (typeof value !== 'object' || value === null) return value;
-    const { dates, booleans } = kindsOf(meta.target);
+    const { dates, booleans, jsons } = kindsOf(meta.target);
     const row = value as Record<string, unknown>;
     for (const [key, item] of Object.entries(row)) {
       const nested = meta.with.get(key);
@@ -313,6 +363,8 @@ export function createRelatedPlugins(schema: AnySchema): { capture: KyselyPlugin
       else if (dates.has(key)) {
         if (typeof item === 'string' && dateSerializers.isSerializedDateString(item)) row[key] = dateSerializers.deserialize(item);
       } else if (booleans.has(key)) row[key] = toBoolean(item);
+      // A JSON-mode column is text to SQLite: inside the relation's JSON it is a string of JSON.
+      else if (jsons.has(key)) row[key] = parseJsonValue(item);
     }
     return row;
   };
@@ -337,10 +389,17 @@ export function createRelatedPlugins(schema: AnySchema): { capture: KyselyPlugin
       if (!relations) return result;
       const rows = result.rows.map((row): UnknownRow => {
         const out: UnknownRow = { ...row };
-        for (const [key, meta] of relations) {
-          const raw = out[key];
+        for (const [alias, meta] of relations) {
+          // Answered under the name as written, whatever the other plugins made of it
+          // (`line_items` comes back from the camelCasing as `lineItems`).
+          const key = resultKey(alias);
+          if (key !== alias && Object.hasOwn(out, key)) {
+            out[alias] = out[key];
+            delete out[key];
+          }
+          const raw = out[alias];
           // Null is a `one` that leads nowhere; anything else is the subquery's JSON.
-          if (typeof raw === 'string') out[key] = revive(JSON.parse(raw), meta);
+          if (typeof raw === 'string') out[alias] = revive(JSON.parse(raw), meta);
         }
         return out;
       });

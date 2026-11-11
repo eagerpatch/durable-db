@@ -1,10 +1,10 @@
 import type { DatabaseSource } from '../vite/modules/discovery';
 import { resolveImportPath } from '../vite/modules/discovery';
 import { loadViteAliases } from '../vite/modules/aliasResolver';
+import { declaresSchema } from '../vite/modules/parser';
 import {
   loadMigrationFiles,
   loadSnapshot,
-  buildAndLoadSchema,
   generateCreateTableSQL,
 } from '../migrations/generator';
 import {
@@ -16,7 +16,7 @@ import {
   snapshotsEqual,
 } from '../migrations/snapshot';
 import { loadDevMigrations } from './state';
-import { selectDatabases } from './shared';
+import { loadSchemaTables, selectDatabases } from './shared';
 import { debugCli } from '../utils/debug';
 
 // ============================================================================
@@ -467,13 +467,13 @@ async function validateDatabase(
     }
 
     // ---- Path B: Schema from scratch (dual-path comparison) ----
-    if (db.schemaImport && db.schemaTableNames.length > 0) {
+    if (db.schemaImport && declaresSchema(db)) {
       const aliases = await loadViteAliases(projectRoot);
       const schemaPath = resolveImportPath(db.filePath, db.schemaImport, aliases);
 
       if (schemaPath) {
         try {
-          const schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
+          const schema = await loadSchemaTables(db, schemaPath);
 
           if (Object.keys(schema).length > 0) {
             result.pendingWarnings = await pendingChangeWarnings(db.migrationsDir, schema);

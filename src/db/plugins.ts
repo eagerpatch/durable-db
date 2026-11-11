@@ -1,9 +1,15 @@
 import {
+  AliasNode,
   CamelCasePlugin,
   ColumnNode,
   ColumnUpdateNode,
+  DeleteQueryNode,
+  IdentifierNode,
   InsertQueryNode,
   PrimitiveValueListNode,
+  ReferenceNode,
+  SelectAllNode,
+  SelectQueryNode,
   TableNode,
   UpdateQueryNode,
   ValueListNode,
@@ -14,6 +20,7 @@ import {
   type OperationNode,
   type PluginTransformQueryArgs,
   type PluginTransformResultArgs,
+  type QueryId,
   type QueryResult,
   type RootOperationNode,
   type UnknownRow
@@ -76,6 +83,14 @@ export class SchemaPlugin extends CamelCasePlugin {
   protected override camelCase(str: string): string {
     return this.sqlToJs.get(str) ?? super.camelCase(str);
   }
+
+  /**
+   * The key a result row has for an identifier a query writes as `name`: it
+   * is snake_cased on the way in and camelCased on the way out.
+   */
+  resultKey(name: string): string {
+    return this.camelCase(this.snakeCase(name));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +102,11 @@ function getKyselyTableName(node: OperationNode | undefined): string | null {
     return node.table.identifier.name;
   }
   return null;
+}
+
+/** A binary value: an ArrayBuffer or a view of one (a Uint8Array, a Buffer). */
+function isBinary(value: unknown): value is ArrayBuffer | ArrayBufferView {
+  return value instanceof ArrayBuffer || ArrayBuffer.isView(value);
 }
 
 function getKyselyColumnName(node: OperationNode | undefined): string | null {
@@ -374,6 +394,12 @@ export class DateSerializePlugin implements KyselyPlugin {
       return dateSerializers.serialize(node);
     }
 
+    // A blob parameter is bound as it is: rebuilt like the objects below, a
+    // Uint8Array would reach the driver as a plain object of its bytes.
+    if (isBinary(node)) {
+      return node;
+    }
+
     if (Array.isArray(node)) {
       return node.map(item => this.transformNode(item));
     }
@@ -491,6 +517,390 @@ export class BooleanDeserializePlugin implements KyselyPlugin {
   }
 }
 
+// ---------------------------------------------------------------------------
+// JSON-mode columns
+// ---------------------------------------------------------------------------
+
+/** How a JSON-mode column is stored: `text({ mode: 'json' })` or `blob({ mode: 'json' })`. */
+type JsonStorage = 'text' | 'blob';
+
+interface JsonTable {
+  /** The table's JSON-mode columns, under every name a query or a result knows them by. */
+  json: Map<string, JsonStorage>;
+  /** Its other columns, under the same names. */
+  plain: Set<string>;
+}
+
+/**
+ * The JSON-mode columns of a schema, table by table. A table is found under
+ * its schema key and its SQL name; a column under its property name, its name
+ * and its snake_cased property name, like collectDateColumnNames — so a
+ * lookup works on either side of the CamelCasePlugin.
+ */
+function collectJsonTables(schema: Record<string, Table>): Map<string, JsonTable> {
+  const tables = new Map<string, JsonTable>();
+
+  for (const [schemaKey, table] of Object.entries(schema)) {
+    const facts: JsonTable = { json: new Map(), plain: new Set() };
+    for (const [propertyName, column] of Object.entries(getTableColumns(table))) {
+      const names = [propertyName, column.name, toSnakeCase(propertyName)];
+      if (column.dataType === 'json') {
+        const storage: JsonStorage = column.getSQLType() === 'blob' ? 'blob' : 'text';
+        for (const name of names) facts.json.set(name, storage);
+      } else {
+        for (const name of names) facts.plain.add(name);
+      }
+    }
+    const tableName = getTableName(table);
+    for (const name of [schemaKey, tableName, toCamelCase(tableName)]) {
+      if (!tables.has(name)) tables.set(name, facts);
+    }
+  }
+
+  return tables;
+}
+
+function hasJsonColumn(schema: Record<string, Table>): boolean {
+  return Object.values(schema).some((table) =>
+    Object.values(getTableColumns(table)).some((column) => column.dataType === 'json'),
+  );
+}
+
+/**
+ * What a JSON-mode column stores for a value: its JSON text, as UTF-8 bytes
+ * in a blob column. A string is JSON too (`"text"`), so it reads back as the
+ * string it was.
+ */
+function serializeJsonValue(value: unknown, storage: JsonStorage): unknown {
+  if (value === null || value === undefined) return value;
+  const json = JSON.stringify(value);
+  // Nothing JSON can say (a function, a symbol): the driver's to refuse.
+  if (json === undefined) return value;
+  return storage === 'blob' ? new TextEncoder().encode(json) : json;
+}
+
+/**
+ * What a JSON-mode column holds, from what SQLite answered: text is parsed,
+ * bytes (a blob column) are read as UTF-8 first. What is no JSON — a row
+ * written before these columns were serialized — is answered as it is.
+ */
+export function parseJsonValue(value: unknown): unknown {
+  let text: unknown = value;
+  if (isBinary(value)) {
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(value);
+    } catch {
+      return value;
+    }
+  }
+  if (typeof text !== 'string') return value;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return value;
+  }
+}
+
+/** The table a node names: `invoices`, or the one behind `invoices as i`. */
+function tableNameOf(node: OperationNode | undefined): string | null {
+  if (!node) return null;
+  if (TableNode.is(node)) return node.table.identifier.name;
+  if (AliasNode.is(node) && TableNode.is(node.node)) return node.node.table.identifier.name;
+  return null;
+}
+
+/** The column a node names: `meta`, or the one in `i.meta`. */
+function columnNameOf(node: OperationNode | undefined): string | null {
+  if (!node) return null;
+  if (ColumnNode.is(node)) return node.column.name;
+  if (ReferenceNode.is(node) && ColumnNode.is(node.column)) return node.column.column.name;
+  return null;
+}
+
+/** Every table a query names, however deep — never walking the values it carries. */
+function walkTables(node: unknown, visit: (name: string) => void): void {
+  if (Array.isArray(node)) {
+    for (const item of node) walkTables(item, visit);
+    return;
+  }
+  if (typeof node !== 'object' || node === null) return;
+  const kind = (node as { kind?: unknown }).kind;
+  // Operation nodes only, and none that holds a caller's values.
+  if (typeof kind !== 'string' || kind === 'ValueNode' || kind === 'PrimitiveValueListNode') return;
+  if (TableNode.is(node as OperationNode)) {
+    visit((node as TableNode).table.identifier.name);
+    return;
+  }
+  for (const value of Object.values(node)) walkTables(value, visit);
+}
+
+/** The names that are a JSON-mode column in one of `tables` and another kind of column in none. */
+function jsonNamesAmong(tables: Iterable<JsonTable>): Set<string> {
+  const json = new Set<string>();
+  const plain = new Set<string>();
+  for (const facts of new Set(tables)) {
+    for (const name of facts.json.keys()) json.add(name);
+    for (const name of facts.plain) plain.add(name);
+  }
+  for (const name of plain) json.delete(name);
+  return json;
+}
+
+/** What a query reads from: its tables by the name it refers to them. */
+interface JsonScope {
+  /** The table's facts, or null for what is no table of the schema (a subquery, a CTE). */
+  sources: Map<string, JsonTable | null>;
+  /** A source with no name to refer to it by. */
+  opaque: boolean;
+  /** The JSON names to go by where a source says nothing. */
+  fallback(): Set<string>;
+}
+
+export interface JsonPluginOptions {
+  /**
+   * The key a result row has for an identifier as a query writes it —
+   * SchemaPlugin's `resultKey` when the names are camelCased. Default: the
+   * identifier itself.
+   */
+  resultKey?: (name: string) => string;
+}
+
+/**
+ * The two plugins behind JSON-mode columns (`text({ mode: 'json' })`,
+ * `blob({ mode: 'json' })`): a value written to one is stored as its JSON, and
+ * one that is read comes back as the value.
+ *
+ * `write` goes before the plugin that renames identifiers and before
+ * DateSerializePlugin; `read` after them. In between they share which keys of
+ * a query's rows are JSON columns, worked out from what the query selects:
+ *
+ * - a column (`meta`, `i.meta`, `i.meta as m`) is resolved against the tables
+ *   the query reads from — the same name in a table where it is another kind
+ *   of column is left alone;
+ * - `selectAll()` / `returningAll()` are every JSON column of those tables;
+ * - where the source is no table of the schema (a subquery, a CTE, a raw
+ *   query), a name goes for a JSON column when it is one in a table the query
+ *   names (in any table, for a query that names none) and another kind of
+ *   column in none of them.
+ *
+ * An expression (a JSON path, a function call, `related()`) is the caller's:
+ * it is neither serialized nor parsed. So is a value compared with a JSON
+ * column in a `where`.
+ */
+export function createJsonPlugins(
+  schema: Record<string, Table>,
+  options: JsonPluginOptions = {},
+): { write: KyselyPlugin; read: KyselyPlugin } {
+  const tables = collectJsonTables(schema);
+  const resultKey = options.resultKey ?? ((name: string) => name);
+  const selected = new WeakMap<QueryId, Set<string>>();
+  let everywhere: Set<string> | undefined;
+
+  // -- writing ---------------------------------------------------------------
+
+  const writeValue = (facts: JsonTable, column: string | null, node: OperationNode): OperationNode => {
+    const storage = column === null ? undefined : facts.json.get(column);
+    if (!storage || !ValueNode.is(node)) return node;
+    return Object.freeze({ ...node, value: serializeJsonValue(node.value, storage) });
+  };
+
+  const writeUpdates = (facts: JsonTable, updates: ReadonlyArray<ColumnUpdateNode>): ReadonlyArray<ColumnUpdateNode> =>
+    updates.map((update) => {
+      const value = writeValue(facts, columnNameOf(update.column), update.value);
+      return value === update.value ? update : Object.freeze({ ...update, value });
+    });
+
+  const writeInsert = (node: InsertQueryNode): InsertQueryNode => {
+    const facts = tables.get(tableNameOf(node.into) ?? '');
+    if (!facts || facts.json.size === 0) return node;
+    let out = node;
+
+    if (node.columns && node.values && ValuesNode.is(node.values)) {
+      const storages = node.columns.map((column) => facts.json.get(column.column.name));
+      if (storages.some((storage) => storage !== undefined)) {
+        const rows = node.values.values.map((row) => {
+          if (PrimitiveValueListNode.is(row)) {
+            return PrimitiveValueListNode.create(
+              row.values.map((value, i) => (storages[i] ? serializeJsonValue(value, storages[i]) : value)),
+            );
+          }
+          if (ValueListNode.is(row)) {
+            return ValueListNode.create(
+              row.values.map((value, i) => {
+                const storage = storages[i];
+                if (!storage || !ValueNode.is(value)) return value;
+                return Object.freeze({ ...value, value: serializeJsonValue(value.value, storage) });
+              }),
+            );
+          }
+          return row;
+        });
+        out = InsertQueryNode.cloneWith(out, { values: ValuesNode.create(rows) });
+      }
+    }
+
+    // `on conflict … do update set`: the same table's columns.
+    if (node.onConflict?.updates) {
+      out = InsertQueryNode.cloneWith(out, {
+        onConflict: Object.freeze({ ...node.onConflict, updates: writeUpdates(facts, node.onConflict.updates) }),
+      });
+    }
+
+    return out;
+  };
+
+  const writeUpdate = (node: UpdateQueryNode): UpdateQueryNode => {
+    const facts = tables.get(tableNameOf(node.table) ?? '');
+    if (!facts || facts.json.size === 0 || !node.updates) return node;
+    return Object.freeze({ ...node, updates: writeUpdates(facts, node.updates) });
+  };
+
+  // -- reading ---------------------------------------------------------------
+
+  const fallbackFor = (root: RootOperationNode): Set<string> => {
+    const named = new Set<JsonTable>();
+    let any = false;
+    walkTables(root, (name) => {
+      any = true;
+      const facts = tables.get(name);
+      if (facts) named.add(facts);
+    });
+    if (any) return jsonNamesAmong(named);
+    return (everywhere ??= jsonNamesAmong(tables.values()));
+  };
+
+  const scopeOf = (root: RootOperationNode, sources: ReadonlyArray<OperationNode | undefined>): JsonScope => {
+    let fallback: Set<string> | undefined;
+    const scope: JsonScope = { sources: new Map(), opaque: false, fallback: () => (fallback ??= fallbackFor(root)) };
+    for (const node of sources) {
+      if (!node) continue;
+      if (TableNode.is(node)) {
+        const name = node.table.identifier.name;
+        scope.sources.set(name, tables.get(name) ?? null);
+      } else if (AliasNode.is(node) && IdentifierNode.is(node.alias)) {
+        const table = TableNode.is(node.node) ? tables.get(node.node.table.identifier.name) : undefined;
+        scope.sources.set(node.alias.name, table ?? null);
+      } else {
+        scope.opaque = true;
+      }
+    }
+    return scope;
+  };
+
+  const isJson = (scope: JsonScope, qualifier: string | null, column: string): boolean => {
+    if (qualifier !== null) {
+      const facts = scope.sources.get(qualifier);
+      return facts ? facts.json.has(column) : scope.fallback().has(column);
+    }
+    let json = false;
+    for (const facts of scope.sources.values()) {
+      if (!facts) continue;
+      if (facts.plain.has(column)) return false;
+      if (facts.json.has(column)) json = true;
+    }
+    return json || scope.fallback().has(column);
+  };
+
+  const keysOf = (root: RootOperationNode): Set<string> | undefined => {
+    const keys = new Set<string>();
+    // A name a result may carry as it is or renamed: `select *` answers the SQL names.
+    const addAll = (names: Iterable<string>) => {
+      for (const name of names) {
+        keys.add(name);
+        keys.add(resultKey(name));
+      }
+    };
+
+    let scope: JsonScope;
+    let selections: ReadonlyArray<{ selection: OperationNode }> | undefined;
+    if (SelectQueryNode.is(root)) {
+      scope = scopeOf(root, [...(root.from?.froms ?? []), ...(root.joins ?? []).map((join) => join.table)]);
+      selections = root.selections;
+    } else if (InsertQueryNode.is(root)) {
+      scope = scopeOf(root, [root.into]);
+      selections = root.returning?.selections;
+    } else if (UpdateQueryNode.is(root)) {
+      scope = scopeOf(root, [root.table, ...(root.from?.froms ?? []), ...(root.joins ?? []).map((join) => join.table)]);
+      selections = root.returning?.selections;
+    } else if (DeleteQueryNode.is(root)) {
+      scope = scopeOf(root, [
+        ...root.from.froms,
+        ...(root.joins ?? []).map((join) => join.table),
+        ...(root.using?.tables ?? []),
+      ]);
+      selections = root.returning?.selections;
+    } else if (root.kind === 'RawNode') {
+      // Nothing says what a raw query selects: its rows are read by name.
+      addAll(fallbackFor(root));
+      return keys.size > 0 ? keys : undefined;
+    } else {
+      return undefined;
+    }
+    if (!selections) return undefined;
+
+    const unknown = scope.opaque || [...scope.sources.values()].some((facts) => facts === null);
+    for (const { selection } of selections) {
+      if (SelectAllNode.is(selection)) {
+        const known = [...scope.sources.values()].filter((facts): facts is JsonTable => facts !== null);
+        addAll(jsonNamesAmong(known));
+        if (unknown) addAll(scope.fallback());
+      } else if (ReferenceNode.is(selection)) {
+        const qualifier = tableNameOf(selection.table);
+        if (SelectAllNode.is(selection.column)) {
+          const facts = qualifier === null ? undefined : scope.sources.get(qualifier);
+          addAll(facts ? facts.json.keys() : scope.fallback());
+        } else if (isJson(scope, qualifier, selection.column.column.name)) {
+          keys.add(resultKey(selection.column.column.name));
+        }
+      } else if (ColumnNode.is(selection)) {
+        if (isJson(scope, null, selection.column.name)) keys.add(resultKey(selection.column.name));
+      } else if (AliasNode.is(selection) && IdentifierNode.is(selection.alias)) {
+        const aliased = selection.node;
+        const column = ReferenceNode.is(aliased) || ColumnNode.is(aliased) ? columnNameOf(aliased) : null;
+        const qualifier = ReferenceNode.is(aliased) ? tableNameOf(aliased.table) : null;
+        if (column !== null && isJson(scope, qualifier, column)) keys.add(resultKey(selection.alias.name));
+      }
+    }
+    return keys.size > 0 ? keys : undefined;
+  };
+
+  const write: KyselyPlugin = {
+    transformQuery({ node, queryId }) {
+      const keys = keysOf(node);
+      if (keys) selected.set(queryId, keys);
+      if (InsertQueryNode.is(node)) return writeInsert(node);
+      if (UpdateQueryNode.is(node)) return writeUpdate(node);
+      return node;
+    },
+    async transformResult({ result }) {
+      return result;
+    },
+  };
+
+  const read: KyselyPlugin = {
+    transformQuery({ node }) {
+      return node;
+    },
+    async transformResult({ result, queryId }) {
+      const keys = selected.get(queryId);
+      if (!keys || result.rows.length === 0) return result;
+      const rows = result.rows.map((row): UnknownRow => {
+        let out: UnknownRow | undefined;
+        for (const key of keys) {
+          const value = row[key];
+          if (value === undefined || value === null) continue;
+          const parsed = parseJsonValue(value);
+          if (parsed !== value) (out ??= { ...row })[key] = parsed;
+        }
+        return out ?? row;
+      });
+      return { ...result, rows };
+    },
+  };
+
+  return { write, read };
+}
+
 /**
  * Validate that a schema object is shaped like a record of Drizzle tables.
  *
@@ -532,6 +942,8 @@ export function assertValidSchema(
  * - SchemaPlugin (extends CamelCasePlugin): schema-aware camelCase ↔ snake_case
  * - DateSerializePlugin: Date ↔ SQLite text serialization
  * - BooleanDeserializePlugin: boolean-mode columns read back as booleans
+ * - createJsonPlugins' two: JSON-mode columns written as JSON and read back
+ *   as their value — only for a schema that has such a column
  *
  * When camelCase is false, SchemaPlugin is omitted.
  */
@@ -541,15 +953,34 @@ export function createDrizzlePlugins(
 ): KyselyPlugin[] {
   assertValidSchema(schema);
 
+  const tables = schema as unknown as Record<string, Table>;
+  const schemaPlugin = camelCase ? new SchemaPlugin(schema) : undefined;
+  const json = hasJsonColumn(tables)
+    ? createJsonPlugins(tables, schemaPlugin ? { resultKey: (name) => schemaPlugin.resultKey(name) } : {})
+    : undefined;
+
   const plugins: KyselyPlugin[] = [];
 
-  plugins.push(new DrizzleDefaultsPlugin(schema as unknown as Record<string, Table>));
+  plugins.push(new DrizzleDefaultsPlugin(tables));
 
-  if (camelCase) {
-    plugins.push(new SchemaPlugin(schema));
+  // After the defaults (a `$defaultFn` value is serialized too), before the
+  // names are snake_cased and before a Date inside a value is rewritten.
+  if (json) {
+    plugins.push(json.write);
   }
 
-  plugins.push(new DateSerializePlugin(schema as unknown as Record<string, Table>));
-  plugins.push(new BooleanDeserializePlugin(schema as unknown as Record<string, Table>));
+  if (schemaPlugin) {
+    plugins.push(schemaPlugin);
+  }
+
+  plugins.push(new DateSerializePlugin(tables));
+  plugins.push(new BooleanDeserializePlugin(tables));
+
+  // Last: the rows' keys are the caller's by now, and what is parsed here is
+  // never taken for a row whose keys are to be camelCased.
+  if (json) {
+    plugins.push(json.read);
+  }
+
   return plugins;
 }

@@ -171,7 +171,13 @@ export interface DatabaseInfo {
   migrationsDir: string;
   /** Schema import source (relative path) */
   schemaImport: string | null;
-  /** Names of schema tables */
+  /**
+   * The export of the schema module that is the whole schema — a const shared
+   * with other code (`export const schema = { users, posts }`, passed as
+   * `defineDatabase({ schema })`). Null when the tables are listed in the call.
+   */
+  schemaExport: string | null;
+  /** Names of schema tables, when they are listed in the call (empty with `schemaExport`: the const says) */
   schemaTableNames: string[];
   /** Whether the DO should expose a browsable SQL endpoint */
   browsable: boolean | 'development';

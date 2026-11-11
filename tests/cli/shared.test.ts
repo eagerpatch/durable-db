@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { reportCliError, loadSchema } from '../../src/cli/shared';
+import { reportCliError, loadSchema, loadSchemaTables } from '../../src/cli/shared';
 import type { DatabaseInfo } from '../../src/db';
 
 describe('reportCliError', () => {
@@ -79,6 +79,7 @@ describe('loadSchema', () => {
       transport: 'rpc',
       migrationsDir: '',
       schemaImport: './schema',
+      schemaExport: null,
       schemaTableNames: ['users'],
       ...overrides,
     };
@@ -134,5 +135,98 @@ export const users = sqliteTable('users', { id: text('id').primaryKey() });
   it('throws with context when the schema module fails to build', async () => {
     writeSchemaFile(`import { missing } from './nope'; export const users = missing;`);
     await expect(loadSchema(makeDb({}))).rejects.toThrow(/Could not build schema/);
+  });
+
+  describe('a schema the module exports whole', () => {
+    const shared = (overrides: Partial<DatabaseInfo> = {}) =>
+      makeDb({ schemaExport: 'schema', schemaTableNames: [], ...overrides });
+
+    const twoTables = `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
+export const users = sqliteTable('users', { id: text('id').primaryKey() });
+const posts = sqliteTable('posts', { id: text('id').primaryKey() });
+`;
+
+    it('loads the tables of the exported const, under its keys', async () => {
+      // `posts` is not exported on its own, and `people` is not the table's name: the const says both.
+      writeSchemaFile(`${twoTables}export const schema = { people: users, posts };`);
+      const result = await loadSchema(shared());
+      expect(Object.keys(result!)).toEqual(['people', 'posts']);
+    });
+
+    it('loads a default export', async () => {
+      writeSchemaFile(`${twoTables}export default { users, posts };`);
+      const result = await loadSchema(shared({ schemaExport: 'default' }));
+      expect(Object.keys(result!)).toEqual(['users', 'posts']);
+    });
+
+    it('returns null for a const without tables, like schema: {}', async () => {
+      writeSchemaFile(`export const schema = {};`);
+      expect(await loadSchema(shared())).toBeNull();
+    });
+
+    it.each([
+      ['is not there', usersTable, /the export 'schema' of schema module .*schema\.ts is not an object of tables/],
+      ['is not an object', `export const schema = 42;`, /the export 'schema' of schema module/],
+      ['is a list', `${usersTable}export const schema = [users];`, /the export 'schema' of schema module/],
+    ])('throws when the export %s', async (_, content, message) => {
+      writeSchemaFile(content);
+      await expect(loadSchema(shared())).rejects.toThrow(message);
+    });
+
+    it('names a missing default export as one', async () => {
+      writeSchemaFile(usersTable);
+      await expect(loadSchema(shared({ schemaExport: 'default' }))).rejects.toThrow(
+        /the default export of schema module .* is not an object of tables/
+      );
+    });
+  });
+});
+
+describe('loadSchemaTables', () => {
+  let tempDir: string;
+  let schemaPath: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-loadtables-'));
+    schemaPath = path.join(tempDir, 'schema.ts');
+    fs.writeFileSync(
+      schemaPath,
+      `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
+export const users = sqliteTable('users', { id: text('id').primaryKey() });
+export const posts = sqliteTable('posts', { id: text('id').primaryKey() });
+export const schema = { users };
+`
+    );
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const db = (overrides: Partial<DatabaseInfo>): DatabaseInfo => ({
+    filePath: path.join(tempDir, 'main.ts'),
+    name: 'main',
+    className: 'MainDatabaseDO',
+    bindingName: 'MAIN_DATABASE_DO',
+    instance: 'per-tenant',
+    browsable: false,
+    transport: 'rpc',
+    migrationsDir: '',
+    schemaImport: './schema',
+    schemaExport: null,
+    schemaTableNames: [],
+    ...overrides,
+  });
+
+  it('answers the tables a database lists', async () => {
+    const tables = await loadSchemaTables(db({ schemaTableNames: ['users', 'posts'] }), schemaPath);
+    expect(Object.keys(tables)).toEqual(['users', 'posts']);
+  });
+
+  it('answers the tables of the const a database is given, and nothing else of the module', async () => {
+    const tables = await loadSchemaTables(db({ schemaExport: 'schema' }), schemaPath);
+    expect(Object.keys(tables)).toEqual(['users']);
   });
 });

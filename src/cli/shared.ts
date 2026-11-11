@@ -15,7 +15,7 @@ import { loadSnapshot, buildAndLoadSchema } from '../migrations/generator';
 import { discoverDatabaseFiles, readFile, resolveImportPath } from '../vite/modules/discovery';
 import type { DatabaseSource } from '../vite/modules/discovery';
 import { loadViteAliases } from '../vite/modules/aliasResolver';
-import { parseDatabaseFile } from '../vite/modules/parser';
+import { declaresSchema, parseDatabaseFile } from '../vite/modules/parser';
 import type { DatabaseInfo } from '../db';
 import { debugCli } from '../utils/debug';
 
@@ -132,6 +132,43 @@ export function discoverDatabases(opts: DiscoverOptions): DatabaseInfo[] {
 // Schema Loading
 // ============================================================================
 
+/** What to read from a database's schema module: the const that is the schema, or each listed table. */
+function schemaExportNames(db: DatabaseInfo): string[] {
+  return db.schemaExport ? [db.schemaExport] : db.schemaTableNames;
+}
+
+/** The tables in what the schema module answered for `schemaExportNames(db)`. */
+function schemaTablesFrom(
+  db: DatabaseInfo,
+  loaded: Record<string, unknown>,
+  schemaPath: string
+): Record<string, unknown> {
+  if (!db.schemaExport) return loaded;
+
+  const schema = loaded[db.schemaExport];
+  if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) {
+    const what = db.schemaExport === 'default' ? 'the default export' : `the export '${db.schemaExport}'`;
+    throw new Error(
+      `[db] Database '${db.name}': ${what} of schema module ${schemaPath} is not an object of ` +
+      `tables. defineDatabase({ schema }) is given that export, so it must be the tables by ` +
+      `name — e.g. export const schema = { users, posts }.`
+    );
+  }
+  return { ...(schema as Record<string, unknown>) };
+}
+
+/**
+ * The tables of a database's schema, built from the schema module at
+ * `schemaPath`: the tables `defineDatabase({ schema: { … } })` lists, or the
+ * const the module exports as the whole schema (`db.schemaExport`).
+ */
+export async function loadSchemaTables(
+  db: DatabaseInfo,
+  schemaPath: string
+): Promise<Record<string, unknown>> {
+  return schemaTablesFrom(db, await buildAndLoadSchema(schemaPath, schemaExportNames(db)), schemaPath);
+}
+
 /**
  * Load and validate schema for a database.
  *
@@ -150,7 +187,7 @@ export async function loadSchema(
   db: DatabaseInfo,
   projectRoot?: string
 ): Promise<Record<string, unknown> | null> {
-  if (db.schemaTableNames.length === 0) {
+  if (!declaresSchema(db)) {
     debugCli('Skipping %s: no schema defined', db.name);
     return null;
   }
@@ -177,9 +214,9 @@ export async function loadSchema(
     );
   }
 
-  let schema: Record<string, unknown>;
+  let loaded: Record<string, unknown>;
   try {
-    schema = await buildAndLoadSchema(schemaPath, db.schemaTableNames);
+    loaded = await buildAndLoadSchema(schemaPath, schemaExportNames(db));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     debugCli('Failed to load schema for %s: %O', db.name, error);
@@ -187,6 +224,16 @@ export async function loadSchema(
       `[db] Could not build schema for database '${db.name}' (${schemaPath}): ${message}`,
       { cause: error }
     );
+  }
+
+  const schema = schemaTablesFrom(db, loaded, schemaPath);
+  if (db.schemaExport) {
+    // The const says which tables there are: none is `schema: {}`.
+    if (Object.keys(schema).length === 0) {
+      debugCli('Skipping %s: its schema (%s) has no tables', db.name, db.schemaExport);
+      return null;
+    }
+    return schema;
   }
 
   const missing = db.schemaTableNames.filter((name) => !(name in schema));

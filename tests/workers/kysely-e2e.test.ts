@@ -29,6 +29,11 @@ interface TestEnv {
         falseReadValue: unknown;
       }>;
       legacyStringBooleanRead: () => Promise<{ t: unknown; f: unknown }>;
+      jsonAndBlobRoundTrip: () => Promise<{
+        stored: Record<string, unknown>[];
+        read: Record<string, unknown>[];
+        found: string[];
+      }>;
       missingColumn: () => Promise<{ select: string; where: string; update: string }>;
     };
   };
@@ -70,6 +75,29 @@ describe('Kysely E2E (real workerd SqlStorage)', () => {
     expect(result.readValue).toBe(true);
     expect(result.readType).toBe('boolean');
     expect(result.falseReadValue).toBe(false);
+  });
+
+  it('stores a JSON-mode column as JSON and binds a blob parameter as bytes', async () => {
+    const stub = newStub();
+    const result = await stub.jsonAndBlobRoundTrip();
+    // JSON as text, or as its UTF-8 bytes in a blob column; a Uint8Array and an ArrayBuffer both as a blob.
+    expect(result.stored).toEqual([
+      { id: 'buffer', meta: null, meta_data: '{"camel":true}', packed_kind: 'null', packed_json: null, raw_kind: 'blob', raw_hex: '0102FA' },
+      {
+        id: 'view',
+        meta: '{"v":1,"list":["a"]}',
+        meta_data: '"text"',
+        packed_kind: 'blob',
+        packed_json: '{"å":"ö"}',
+        raw_kind: 'blob',
+        raw_hex: '000102FAFF',
+      },
+    ]);
+    expect(result.read).toEqual([
+      { id: 'buffer', meta: null, metaData: { camel: true }, packed: null, rawIsBuffer: true, raw: [1, 2, 250] },
+      { id: 'view', meta: { v: 1, list: ['a'] }, metaData: 'text', packed: { å: 'ö' }, rawIsBuffer: true, raw: [0, 1, 2, 250, 255] },
+    ]);
+    expect(result.found).toEqual(['view']);
   });
 
   it("reads legacy TEXT 'true'/'false' rows (written by the old driver) as booleans", async () => {

@@ -2,8 +2,8 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { integer, table, text } from '../../src/schema';
 import { defineDatabase } from '../../src/db/defineDatabase';
-import type { RelatedExpression } from '../../src/db/related';
-import type { Relations } from '../../src/db/relations';
+import { createRelated, type AnyRelated, type RelatedExpression } from '../../src/db/related';
+import type { AnySchema, Relations } from '../../src/db/relations';
 
 // What the types say of a schema's relations, and of a query that reads along
 // them. These hold when `tsc -p tests/type/tsconfig.json` passes.
@@ -124,5 +124,51 @@ describe('related()', () => {
       related('categories', 'parent', ['id']);
     };
     expect(refused).toBeTypeOf('function');
+  });
+});
+
+describe('.as()', () => {
+  it('names the key a relation is answered under, in a row and under another relation', () => {
+    const latest = related('customers', 'invoicesAsCustomer', { columns: ['number'], orderBy: { number: 'desc' }, limit: 1 }).as('latest');
+    expectTypeOf(latest).toEqualTypeOf<RelatedExpression<'customers', 'latest', { number: number }[]>>();
+
+    const nested = related('invoiceLines', 'invoice', { columns: ['id'], with: [related('invoices', 'customer', ['name']).as('billedTo')] });
+    expectTypeOf(nested).toEqualTypeOf<RelatedExpression<'invoiceLines', 'invoice', { id: string; billedTo: { name: string } }>>();
+
+    const listCustomers = action({
+      args: {},
+      handler: async (db) => db.selectFrom('customers').select(['customers.id', latest, related('customers', 'invoicesAsCustomer', ['id'])]).execute(),
+    });
+    expectTypeOf<Awaited<ReturnType<typeof listCustomers>>>().toEqualTypeOf<
+      { id: string; latest: { number: number }[]; invoicesAsCustomer: { id: string }[] }[]
+    >();
+  });
+
+  it('still belongs to the table it was read from', () => {
+    const refused = () => {
+      // @ts-expect-error a relation of invoices under another name is no relation of customers
+      related('invoices', 'customer', { columns: ['id'], with: [related('invoices', 'referee', ['name']).as('invoicesAsCustomer')] });
+    };
+    expect(refused).toBeTypeOf('function');
+  });
+});
+
+describe('createRelated()', () => {
+  it('is typed like the related() of a database on that schema', () => {
+    const own = createRelated(schema);
+    expectTypeOf(own).toEqualTypeOf(related);
+    expectTypeOf(own('invoices', 'referee', ['name'])).toEqualTypeOf<RelatedExpression<'invoices', 'referee', { name: string } | null>>();
+  });
+
+  it('takes strings for a schema whose tables are known only when it runs', () => {
+    const loose = createRelated(schema as AnySchema);
+    expectTypeOf(loose).toEqualTypeOf<AnyRelated>();
+
+    const name: string = 'customer';
+    const one = loose('invoices', name, ['id']);
+    expectTypeOf(one).toEqualTypeOf<RelatedExpression<string, string, unknown>>();
+    // What it builds goes into another of its relations, renamed or not.
+    const many = loose('customers', 'invoicesAsCustomer', { columns: ['number'], orderBy: { number: 'desc' }, limit: 2, with: [one.as('who')] });
+    expectTypeOf(many).toEqualTypeOf<RelatedExpression<string, string, unknown>>();
   });
 });

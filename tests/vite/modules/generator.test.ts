@@ -22,6 +22,7 @@ const mockDatabase: DatabaseInfo = {
   transport: 'rpc',
   migrationsDir: '',
   schemaImport: './schema',
+  schemaExport: null,
   schemaTableNames: ['users'],
 };
 
@@ -874,6 +875,38 @@ describe('generateDatabasesModule', () => {
     expect(generateDurableObjectsModule([database], 'durable-db/registry')).toContain(
       'import { users as __schema_main_users, posts as __schema_main_posts } from "/app/src/databases/schema"'
     );
+  });
+
+  it('imports a schema the module exports whole, and hands that very object on', () => {
+    const database: DatabaseInfo = {
+      ...mockDatabase,
+      filePath: '/app/src/databases/main.ts',
+      schemaImport: './schema',
+      schemaExport: 'schema',
+      schemaTableNames: [],
+    };
+    const code = generateDatabasesModule([database]);
+
+    expect(code).toContain('import { schema as __schema_main } from "/app/src/databases/schema"');
+    expect(code).toContain('schema: __schema_main');
+
+    // The Durable Object class carries the same object.
+    const classes = generateDurableObjectsModule([database], 'durable-db/registry');
+    expect(classes).toContain('import { schema as __schema_main } from "/app/src/databases/schema"');
+    expect(classes).toContain('schema = __schema_main');
+  });
+
+  it('imports a default export or an aliased module the same way, one name per database', () => {
+    const code = generateDatabasesModule([
+      { ...mockDatabase, name: 'order-items', filePath: '/app/src/databases/order-items.ts', schemaImport: './order-items.schema', schemaExport: 'default', schemaTableNames: [] },
+      { ...globalDatabase, schemaImport: '~/schemas/analytics', schemaExport: 'tables', schemaTableNames: [] },
+    ]);
+
+    expect(code).toContain('import { default as __schema_order_items } from "/app/src/databases/order-items.schema"');
+    expect(code).toContain('schema: __schema_order_items');
+    // An alias is left for Vite to resolve.
+    expect(code).toContain('import { tables as __schema_analytics } from "~/schemas/analytics"');
+    expect(code).toContain('schema: __schema_analytics');
   });
 
   it('gives a database without schema tables an empty schema', () => {

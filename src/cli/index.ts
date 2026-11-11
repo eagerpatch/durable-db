@@ -91,6 +91,9 @@ export {
   validate,
 } from './validate';
 
+// What discovery read of a database's schema
+export { declaresSchema } from '../vite/modules/parser';
+
 // Shared helpers
 export {
   type DiscoverOptions,
@@ -100,6 +103,7 @@ export {
   discoverDatabases,
   selectDatabases,
   loadSchema,
+  loadSchemaTables,
   diffSchema,
   diffDatabases,
   reportCliError,

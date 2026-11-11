@@ -111,15 +111,30 @@ function sqlStorageShim(sqlite: DatabaseSync): SqlStorage {
     /^\s*(SELECT|PRAGMA|WITH)/i.test(sql) || /\bRETURNING\b/i.test(sql);
 
   // node:sqlite rejects JS booleans/undefined as bound params; everything the
-  // Kysely plugins emit is already a primitive, but normalise to be safe.
+  // Kysely plugins emit is already a primitive, but normalise to be safe. A
+  // blob it binds from a view of bytes only, a Durable Object from an
+  // ArrayBuffer as well.
   const normalize = (p: unknown) =>
-    typeof p === 'boolean' ? (p ? 1 : 0) : p === undefined ? null : p;
+    typeof p === 'boolean' ? (p ? 1 : 0) : p === undefined ? null : p instanceof ArrayBuffer ? new Uint8Array(p) : p;
+
+  // A blob is answered as the ArrayBuffer a Durable Object answers, not as
+  // node:sqlite's Uint8Array: code that reads one meets the same value here.
+  const asStored = (row: unknown): unknown => {
+    if (typeof row !== 'object' || row === null) return row;
+    let out: Record<string, unknown> | undefined;
+    for (const [key, value] of Object.entries(row)) {
+      if (!(value instanceof Uint8Array)) continue;
+      out ??= { ...(row as Record<string, unknown>) };
+      out[key] = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+    }
+    return out ?? row;
+  };
 
   return {
     exec(query: string, ...bindings: unknown[]) {
       const stmt = sqlite.prepare(query);
       const params = bindings.map(normalize) as never[];
-      const rows = isReader(query) ? (stmt.all(...params) as unknown[]) : (stmt.run(...params), []);
+      const rows = isReader(query) ? (stmt.all(...params) as unknown[]).map(asStored) : (stmt.run(...params), []);
       return { toArray: () => rows } as unknown as ReturnType<SqlStorage['exec']>;
     },
   } as unknown as SqlStorage;

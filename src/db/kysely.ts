@@ -11,7 +11,7 @@ import {
   type KyselyPlugin
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
-import { DateSerializePlugin, createDrizzlePlugins } from './plugins';
+import { DateSerializePlugin, SchemaPlugin, createDrizzlePlugins } from './plugins';
 import { createRelatedPlugins } from './related';
 
 // This module bridges a Cloudflare `SqlStorage` to a Kysely instance. It is
@@ -295,7 +295,11 @@ export function createKyselyFromSql<T>(
   // Add schema/camelCase plugins
   // The two plugins behind `related()` (./related.ts): one before every other
   // plugin, one after. They leave a query without a relation as it is.
-  const related = schema ? createRelatedPlugins(schema) : undefined;
+  // A relation's alias goes through the naming of the plugins between them: where it lands in a row.
+  const naming = schema && camelCase ? new SchemaPlugin(schema) : undefined;
+  const related = schema
+    ? createRelatedPlugins(schema, naming ? { resultKey: (name) => naming.resultKey(name) } : {})
+    : undefined;
   if (related) allPlugins.push(related.capture);
 
   if (schema) {

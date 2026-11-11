@@ -28,9 +28,11 @@ describe('validate command', () => {
     opts: {
       migrations?: Array<{ name: string; sql: string }>;
       schemaContent?: string;
+      /** The database file, when it is not the one that lists `users`. */
+      databaseContent?: string;
     } = {}
   ) {
-    const { migrations = [], schemaContent } = opts;
+    const { migrations = [], schemaContent, databaseContent } = opts;
 
     // Create database file
     if (schemaContent) {
@@ -43,7 +45,8 @@ describe('validate command', () => {
       fs.writeFileSync(path.join(databasesDir, 'schema.ts'), schemaContent);
       fs.writeFileSync(
         path.join(databasesDir, `${name}.ts`),
-        `
+        databaseContent ??
+          `
 import { defineDatabase } from 'durable-db/db';
 import { users } from './schema';
 
@@ -353,6 +356,54 @@ export const users = sqliteTable('users', {
       expect(results).toHaveLength(1);
       expect(results[0].schemaMatches).toBe(false);
       expect(results[0].schemaDiffs.some(d => d.includes('users.email') && d.includes('differs'))).toBe(true);
+    });
+
+    describe('with a schema the module exports whole', () => {
+      const shared = {
+        schemaContent: `${schemaContent}export const schema = { users };\n`,
+        databaseContent: `
+import { defineDatabase } from 'durable-db/db';
+import { schema } from './schema';
+
+export const { action } = defineDatabase({ schema });
+`,
+      };
+
+      it('compares the tables of that const with the migrations', async () => {
+        setupDatabase('main', {
+          ...shared,
+          migrations: [
+            {
+              name: '20240101_create_users',
+              sql: 'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL, `email` text, `name` text NOT NULL);',
+            },
+          ],
+        });
+
+        const results = await validate({ projectRoot: tempDir, databasesDir: 'src/databases' });
+
+        expect(results).toHaveLength(1);
+        expect(results[0].migrationsValid).toBe(true);
+        expect(results[0].schemaDiffs).toEqual([]);
+        expect(results[0].schemaMatches).toBe(true);
+      });
+
+      it('detects a column the migrations lack', async () => {
+        setupDatabase('main', {
+          ...shared,
+          migrations: [
+            {
+              name: '20240101_create_users',
+              sql: 'CREATE TABLE `users` (`id` text PRIMARY KEY NOT NULL, `name` text NOT NULL);',
+            },
+          ],
+        });
+
+        const results = await validate({ projectRoot: tempDir, databasesDir: 'src/databases' });
+
+        expect(results[0].schemaMatches).toBe(false);
+        expect(results[0].schemaDiffs.some(d => d.includes('users.email') && d.includes('only in schema'))).toBe(true);
+      });
     });
 
     it('still detects a table missing from the schema', async () => {

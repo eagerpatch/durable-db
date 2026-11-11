@@ -256,6 +256,97 @@ function warnNonLiteral(filePath: string, key: string, defaultValue: string): vo
 }
 
 /**
+ * Whether a database was given a schema discovery could read: tables listed
+ * in the call, or a const the schema module exports.
+ */
+export function declaresSchema(db: Pick<DatabaseInfo, 'schemaExport' | 'schemaTableNames'>): boolean {
+  return !!db.schemaExport || db.schemaTableNames.length > 0;
+}
+
+/** What `defineDatabase({ schema })` was given, as far as it can be read without running the file. */
+interface DeclaredSchema {
+  schemaImport: string | null;
+  schemaExport: string | null;
+  schemaTableNames: string[];
+}
+
+/** `x as const`, `x satisfies T`, `x!`: the expression itself. */
+function unwrapExpression(node: t.Node): t.Node {
+  let current = node;
+  while (t.isTSAsExpression(current) || t.isTSSatisfiesExpression(current) || t.isTSNonNullExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+/** `{ users, posts }`: the tables by name, and the module they are imported from. */
+function listedTables(
+  object: t.ObjectExpression,
+  imports: Map<string, { source: string; imported: string }>
+): DeclaredSchema {
+  const declared: DeclaredSchema = { schemaImport: null, schemaExport: null, schemaTableNames: [] };
+  for (const schemaProp of object.properties) {
+    // For shorthand { users, posts }
+    if (t.isObjectProperty(schemaProp) && t.isIdentifier(schemaProp.key)) {
+      const tableName = schemaProp.key.name;
+      declared.schemaTableNames.push(tableName);
+
+      // Track where the schema comes from
+      const importInfo = imports.get(tableName);
+      if (importInfo && !declared.schemaImport) {
+        declared.schemaImport = importInfo.source;
+      }
+    }
+  }
+  return declared;
+}
+
+/**
+ * The schema of a defineDatabase() call. Three shapes can be read:
+ *
+ *   defineDatabase({ schema: { users, posts } })   // the tables, listed
+ *   const schema = { users, posts };               // … or listed in a const of this file
+ *   import { schema } from './schema';             // a const the schema module exports,
+ *   defineDatabase({ schema })                     // shared with whoever else needs the tables
+ *
+ * An imported const is not followed into its module here: it is recorded as
+ * the export to import (`schemaExport`), and whoever needs the tables loads it.
+ */
+function extractSchema(
+  declaratorPath: NodePath<t.VariableDeclarator>,
+  value: t.Node,
+  filePath: string,
+  imports: Map<string, { source: string; imported: string }>
+): DeclaredSchema | null {
+  const node = unwrapExpression(value);
+  if (t.isObjectExpression(node)) {
+    return listedTables(node, imports);
+  }
+
+  if (t.isIdentifier(node)) {
+    const imported = imports.get(node.name);
+    if (imported && imported.imported !== '*') {
+      return { schemaImport: imported.source, schemaExport: imported.imported, schemaTableNames: [] };
+    }
+
+    const binding = imported ? undefined : declaratorPath.scope.getBinding(node.name);
+    const init = binding?.path.isVariableDeclarator() ? binding.path.node.init : null;
+    const local = init ? unwrapExpression(init) : null;
+    if (binding?.constant && t.isObjectExpression(local)) {
+      return listedTables(local, imports);
+    }
+  }
+
+  console.warn(
+    `[durable-db] 'schema' in defineDatabase() is read at build time: list the tables ` +
+    `({ schema: { users, posts } }) or pass a const the schema module exports ` +
+    `(import { schema } from './schema'). ${path.basename(filePath)} passes something else, ` +
+    `so its database gets no schema — no migrations, no column mapping.`
+  );
+  return null;
+}
+
+/**
  * Extract database configuration from a defineDatabase() call
  */
 function extractDatabaseInfo(
@@ -274,8 +365,7 @@ function extractDatabaseInfo(
   let instance: 'per-tenant' | 'global' = 'per-tenant';
   let browsable: boolean | 'development' = false;
   let transport: 'rpc' | 'websocket' = 'rpc';
-  let schemaImport: string | null = null;
-  const schemaTableNames: string[] = [];
+  let schema: DeclaredSchema = { schemaImport: null, schemaExport: null, schemaTableNames: [] };
 
   for (const prop of configArg.properties) {
     if (!t.isObjectProperty(prop) || !t.isIdentifier(prop.key)) {
@@ -316,23 +406,8 @@ function extractDatabaseInfo(
       }
     }
 
-    if (key === 'schema' && t.isObjectExpression(prop.value)) {
-      // Extract schema table names and their import source
-      for (const schemaProp of prop.value.properties) {
-        if (t.isObjectProperty(schemaProp) || t.isSpreadElement(schemaProp)) {
-          // For shorthand { users, posts }
-          if (t.isObjectProperty(schemaProp) && t.isIdentifier(schemaProp.key)) {
-            const tableName = schemaProp.key.name;
-            schemaTableNames.push(tableName);
-
-            // Track where the schema comes from
-            const importInfo = imports.get(tableName);
-            if (importInfo && !schemaImport) {
-              schemaImport = importInfo.source;
-            }
-          }
-        }
-      }
+    if (key === 'schema') {
+      schema = extractSchema(declaratorPath, prop.value, filePath, imports) ?? schema;
     }
   }
 
@@ -348,8 +423,7 @@ function extractDatabaseInfo(
     browsable,
     transport,
     migrationsDir: '',
-    schemaImport,
-    schemaTableNames,
+    ...schema,
   };
 }
 

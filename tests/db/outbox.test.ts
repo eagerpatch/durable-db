@@ -51,6 +51,7 @@ describe('the generated Durable Objects and the outbox', () => {
     instance: 'per-tenant',
     migrationsDir: 'migrations/main',
     schemaImport: null,
+    schemaExport: null,
     schemaTableNames: [],
     browsable: false,
     transport: 'rpc',

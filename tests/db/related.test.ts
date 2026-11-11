@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { table, text, integer } from '../../src/schema';
 import { defineDatabase } from '../../src/db/defineDatabase';
+import { createRelated, type AnySchema } from '../../src';
 import { createTestDatabase, type TestDatabase } from '../../src/testing';
 
 const customers = table('customers', {
@@ -247,6 +248,140 @@ describe('related()', () => {
   });
 });
 
+describe('a relation under another name', () => {
+  it('reads the same relation twice, each under the name .as() gave it', async () => {
+    const rows = await t.db
+      .selectFrom('customers')
+      .select([
+        'customers.id',
+        related('customers', 'invoicesAsCustomer', { columns: ['number'], orderBy: { number: 'asc' } }).as('invoices'),
+        related('customers', 'invoicesAsCustomer', { columns: ['number', 'issuedAt'], orderBy: { number: 'desc' }, limit: 1 }).as('latest'),
+      ])
+      .orderBy('customers.id')
+      .execute();
+
+    expect(rows).toEqual([
+      { id: 'c1', invoices: [{ number: 1 }, { number: 2 }], latest: [{ number: 2, issuedAt: null }] },
+      { id: 'c2', invoices: [{ number: 3 }], latest: [{ number: 3, issuedAt: null }] },
+      { id: 'c3', invoices: [], latest: [] },
+    ]);
+  });
+
+  it('renames inside with too, and gives dates and booleans as the table itself does', async () => {
+    const rows = await t.db
+      .selectFrom('customers')
+      .select([
+        related('customers', 'invoicesAsCustomer', {
+          columns: ['id'],
+          orderBy: { number: 'asc' },
+          with: [
+            related('invoices', 'referee', ['name', 'vip', 'createdAt']).as('referredBy'),
+            related('invoices', 'invoiceLines', { columns: ['delivered', 'deliveredAt'], orderBy: { id: 'asc' }, limit: 1 }).as('first'),
+          ],
+        }).as('billed'),
+      ])
+      .where('customers.id', '=', 'c1')
+      .execute();
+
+    expect(rows).toEqual([
+      {
+        billed: [
+          {
+            id: 'i1',
+            referredBy: { name: 'Firman HB', vip: false, createdAt: at('2026-02-03T04:05:06Z') },
+            first: [{ delivered: true, deliveredAt: at('2026-05-02T10:00:00Z') }],
+          },
+          { id: 'i2', referredBy: null, first: [{ delivered: false, deliveredAt: null }] },
+        ],
+      },
+    ]);
+  });
+
+  it('answers under exactly the name as written, whatever the columns are renamed to', async () => {
+    // The columns of a row are camelCased on the way out; a name given here is not a column.
+    const rows = await t.db
+      .selectFrom('invoices')
+      .select([
+        'invoices.customerId',
+        related('invoices', 'invoiceLines', {
+          columns: ['invoiceId'],
+          with: [related('invoiceLines', 'invoice', ['number']).as('of_invoice'), related('invoiceLines', 'invoice', ['id']).as("it's")],
+        }).as('line_items'),
+      ])
+      .where('invoices.id', '=', 'i2')
+      .execute();
+
+    expect(rows).toEqual([{ customerId: 'c1', line_items: [{ invoiceId: 'i2', of_invoice: { number: 2 }, "it's": { id: 'i2' } }] }]);
+  });
+
+  it('is a new expression: the one it is called on keeps its name', () => {
+    const lines = related('invoices', 'invoiceLines', ['id']);
+    const renamed = lines.as('rows');
+    expect([lines.table, lines.alias]).toEqual(['invoices', 'invoiceLines']);
+    expect([renamed.table, renamed.alias]).toEqual(['invoices', 'rows']);
+  });
+
+  it('reads the relations of a returned row under their names too', async () => {
+    const row = await t.db
+      .updateTable('invoices')
+      .set({ number: 30 })
+      .where('id', '=', 'i3')
+      .returning(['invoices.number', related('invoices', 'customer', ['name', 'vip']).as('billedTo')])
+      .executeTakeFirstOrThrow();
+
+    expect(row).toEqual({ number: 30, billedTo: { name: 'Firman HB', vip: false } });
+  });
+});
+
+describe('createRelated()', () => {
+  it('is the related() of a schema, with no database defined on it', async () => {
+    const own = createRelated(schema);
+    const rows = await t.db
+      .selectFrom('invoices')
+      .select(['invoices.id', own('invoices', 'customer', ['name', 'createdAt']), own('invoices', 'invoiceLines', { columns: ['description'], orderBy: { id: 'desc' }, limit: 1 })])
+      .where('invoices.id', '=', 'i1')
+      .execute();
+
+    expect(rows).toEqual([{ id: 'i1', customer: { name: 'Bolaget AB', createdAt: at('2026-01-02T03:04:05Z') }, invoiceLines: [{ description: 'Setup' }] }]);
+  });
+
+  it('builds what the related() of a database on the same schema takes in with', async () => {
+    const own = createRelated(schema);
+    const rows = await t.db
+      .selectFrom('invoiceLines')
+      .select([related('invoiceLines', 'invoice', { columns: ['number'], with: [own('invoices', 'customer', ['name'])] })])
+      .where('invoiceLines.id', '=', 'l4')
+      .execute();
+
+    expect(rows).toEqual([{ invoice: { number: 2, customer: { name: 'Bolaget AB' } } }]);
+  });
+
+  it('takes names that are known only when it runs, and checks them then', async () => {
+    // A library that is handed a schema: its tables and relations are strings to it.
+    const loose = createRelated(schema as AnySchema);
+    const [tableName, relationName]: string[] = ['customers', 'invoicesAsCustomer'];
+    const expression = loose(tableName!, relationName!, {
+      columns: ['number'],
+      orderBy: { number: 'desc' },
+      with: [loose('invoices', 'invoiceLines', ['description']).as('lines')],
+    }).as('invoices');
+
+    const rows = await t.db.selectFrom('customers').select(['customers.id', expression]).where('customers.id', '=', 'c1').execute();
+    expect(rows).toEqual([
+      {
+        id: 'c1',
+        invoices: [
+          { number: 2, lines: [{ description: 'Licence' }] },
+          { number: 1, lines: [{ description: 'Hours' }, { description: 'Travel' }, { description: 'Setup' }] },
+        ],
+      },
+    ]);
+
+    expect(() => loose('customers', 'orders', ['id'])).toThrow(/"customers" has no relation "orders"\. Its relations: invoicesAsCustomer, invoicesAsReferee\./);
+    expect(() => loose('invoices', 'customer', ['nope'])).toThrow(/the column "nope" is not a column of "customers"/);
+  });
+});
+
 describe('the query related() writes', () => {
   it('is one statement, with nothing bound: names and the limit are written out', () => {
     const { sql, parameters } = t.db
@@ -289,6 +424,17 @@ describe('what related() refuses', () => {
       () => loose('customers', 'invoicesAsCustomer', { columns: ['id'], with: [related('invoices', 'referee', ['id']), related('invoices', 'referee', ['name'])] }),
       /"referee" is there twice/,
     ],
+    [
+      'two relations under one name',
+      () => loose('customers', 'invoicesAsCustomer', { columns: ['id'], with: [related('invoices', 'customer', ['id']).as('who'), related('invoices', 'referee', ['id']).as('who')] }),
+      /"who" is there twice — as a column and a relation, or two relations under one name/,
+    ],
+    [
+      'a relation under the name of a column that is read',
+      () => loose('customers', 'invoicesAsCustomer', { columns: ['number'], with: [related('invoices', 'referee', ['id']).as('number')] }),
+      /"number" is there twice/,
+    ],
+    ['a name that is none', () => related('invoices', 'customer', ['id']).as(''), /related\('invoices', 'customer'\)\.as\(\) takes the name to answer it under/],
   ])('%s', (_what, build, message) => {
     expect(build).toThrow(message);
   });
@@ -296,6 +442,8 @@ describe('what related() refuses', () => {
   it('a relation of another database', () => {
     const other = defineDatabase({ schema: { customers, invoices } });
     expect(() => loose('customers', 'invoicesAsCustomer', { columns: ['id'], with: [other.related('invoices', 'customer', ['id'])] })).toThrow(/of another database/);
+    const copy = createRelated({ ...schema });
+    expect(() => loose('customers', 'invoicesAsCustomer', { columns: ['id'], with: [copy('invoices', 'customer', ['id'])] })).toThrow(/of another database/);
   });
 
   it('two relations that would share a name, saying which', () => {

@@ -2,7 +2,7 @@ import { SqliteDurableObject, type Migrations } from '../../src/db/SqliteDurable
 import { RemovedDatabaseDurableObject } from '../../src/db/RemovedDatabaseDurableObject';
 import { type as actionArgsType, registerAction, registerSharedAction, callAction } from '../../src/registry';
 import { createKyselyFromSql } from '../../src/db/kysely';
-import { integer, table, text } from '../../src/schema';
+import { blob, integer, table, text } from '../../src/schema';
 
 /**
  * Minimal SqliteDurableObject subclass that deliberately contains a broken
@@ -165,6 +165,15 @@ const itemsWithWeight = table('items', {
   weightGrams: integer(),
 });
 
+// JSON as text and as a blob, a camelCase name, and bytes.
+const documents = table('documents', {
+  id: text().primaryKey(),
+  meta: text({ mode: 'json' }),
+  metaData: text({ mode: 'json' }),
+  packed: blob({ mode: 'json' }),
+  raw: blob(),
+});
+
 export class TestKyselyDO extends SqliteDurableObject {
   migrations: Migrations = {
     '20240101_items': {
@@ -252,6 +261,55 @@ export class TestKyselyDO extends SqliteDurableObject {
     }
     const count = this.sql.exec('SELECT count(*) AS n FROM wide').toArray()[0] as { n: number };
     return count.n;
+  }
+
+  /**
+   * JSON-mode columns and blob parameters against the real SqlStorage: what it
+   * stores for them and what a read answers.
+   */
+  async jsonAndBlobRoundTrip(): Promise<{
+    stored: Record<string, unknown>[];
+    read: Record<string, unknown>[];
+    found: string[];
+  }> {
+    this.sql.exec(
+      `CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY, meta TEXT, meta_data TEXT, packed BLOB, raw BLOB
+      )`,
+    );
+    const db = createKyselyFromSql<any>(this.sql, { schema: { documents } });
+    const bytes = new Uint8Array([0, 1, 2, 250, 255]);
+    await db
+      .insertInto('documents')
+      .values([
+        { id: 'view', meta: { v: 1, list: ['a'] }, metaData: 'text', packed: { å: 'ö' }, raw: bytes },
+        { id: 'buffer', meta: null, metaData: null, packed: null, raw: bytes.buffer.slice(1, 4) },
+      ])
+      .execute();
+    await db.updateTable('documents').set({ metaData: { camel: true } }).where('id', '=', 'buffer').execute();
+
+    const stored = this.sql
+      .exec(
+        `SELECT id, meta, meta_data, typeof(packed) AS packed_kind, CAST(packed AS TEXT) AS packed_json,
+                typeof(raw) AS raw_kind, hex(raw) AS raw_hex
+         FROM documents ORDER BY id`,
+      )
+      .toArray() as Record<string, unknown>[];
+    const rows = await db.selectFrom('documents').selectAll().orderBy('id').execute();
+    const found = await db.selectFrom('documents').select('id').where('raw', '=', bytes).execute();
+
+    return {
+      stored,
+      read: rows.map((row: any) => ({
+        id: row.id,
+        meta: row.meta,
+        metaData: row.metaData,
+        packed: row.packed,
+        rawIsBuffer: row.raw instanceof ArrayBuffer,
+        raw: [...new Uint8Array(row.raw)],
+      })),
+      found: found.map((row: any) => row.id),
+    };
   }
 
   /** Write a boolean through Kysely; report what SQLite stored and what a read returns. */

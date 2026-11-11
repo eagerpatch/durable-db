@@ -182,7 +182,112 @@ describe('parser', () => {
       expect(result.database!.instance).toBe('per-tenant');
       expect(result.database!.migrationsDir).toBe('');
       expect(result.database!.schemaImport).toBe('./schema');
+      expect(result.database!.schemaExport).toBeNull();
       expect(result.database!.schemaTableNames).toEqual(['users', 'posts']);
+    });
+
+    describe('the schema', () => {
+      const databaseOf = (code: string) => parseDatabaseFile('/src/databases/main.ts', code).database!;
+
+      it('takes a const the schema module exports as the whole schema', () => {
+        const database = databaseOf(`
+          import { defineDatabase } from 'durable-db/db';
+          import { schema } from './schema';
+
+          export const { action } = defineDatabase({ schema });
+        `);
+
+        // The export to import, not its tables: the module is not read here.
+        expect(database).toMatchObject({ schemaImport: './schema', schemaExport: 'schema', schemaTableNames: [] });
+      });
+
+      it('names the export, whatever it is called in the database file', () => {
+        const database = databaseOf(`
+          import { defineDatabase } from 'durable-db/db';
+          import { billing as tables } from '~/schemas/billing';
+
+          export const { action } = defineDatabase({ schema: tables, instance: 'global' });
+        `);
+
+        expect(database).toMatchObject({ schemaImport: '~/schemas/billing', schemaExport: 'billing', schemaTableNames: [] });
+        expect(database.instance).toBe('global');
+      });
+
+      it('takes a default export', () => {
+        const database = databaseOf(`
+          import { defineDatabase } from 'durable-db/db';
+          import schema from './schema';
+
+          export const { action } = defineDatabase({ schema });
+        `);
+
+        expect(database).toMatchObject({ schemaImport: './schema', schemaExport: 'default', schemaTableNames: [] });
+      });
+
+      it('reads the tables of a const of the database file itself', () => {
+        const database = databaseOf(`
+          import { defineDatabase } from 'durable-db/db';
+          import { users, posts } from './schema';
+
+          const schema = { users, posts };
+          export const { action } = defineDatabase({ schema });
+        `);
+
+        expect(database).toMatchObject({ schemaImport: './schema', schemaExport: null, schemaTableNames: ['users', 'posts'] });
+      });
+
+      it.each([
+        ['as const', `const schema = { users, posts } as const;`, `schema`],
+        ['satisfies', `const schema = { users, posts } satisfies Record<string, unknown>;`, `schema`],
+        ['a non-null assertion', `const schema = { users, posts };`, `schema!`],
+        ['an assertion on the listed tables', ``, `{ users, posts } as const`],
+      ])('sees through %s', (_what, declaration, value) => {
+        const database = databaseOf(`
+          import { defineDatabase } from 'durable-db/db';
+          import { users, posts } from './schema';
+
+          ${declaration}
+          export const { action } = defineDatabase({ schema: ${value} });
+        `);
+
+        expect(database).toMatchObject({ schemaImport: './schema', schemaExport: null, schemaTableNames: ['users', 'posts'] });
+      });
+
+      it('sees through an assertion on an imported const', () => {
+        const database = databaseOf(`
+          import { defineDatabase } from 'durable-db/db';
+          import { schema } from './schema';
+
+          export const { action } = defineDatabase({ schema: schema satisfies Record<string, unknown> });
+        `);
+
+        expect(database).toMatchObject({ schemaImport: './schema', schemaExport: 'schema', schemaTableNames: [] });
+      });
+
+      it.each([
+        ['a namespace import', `import * as schema from './schema';`, `schema`],
+        ['a variable that is assigned again', `import { users } from './schema';\nlet schema = { users };\nschema = { users };`, `schema`],
+        ['a const that is not the tables, listed', `import { tables } from './schema';\nconst schema = tables();`, `schema`],
+        ['a call', `import { tables } from './schema';`, `tables()`],
+        ['a member of an import', `import { schemas } from './schema';`, `schemas.main`],
+      ])('says so for %s, and gives the database no schema', (_what, declarations, value) => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        const database = databaseOf(`
+          import { defineDatabase } from 'durable-db/db';
+          ${declarations}
+
+          export const { action } = defineDatabase({ schema: ${value}, instance: 'global' });
+        `);
+
+        expect(database).toMatchObject({ schemaImport: null, schemaExport: null, schemaTableNames: [], instance: 'global' });
+        expect(warnSpy).toHaveBeenCalledOnce();
+        const message = warnSpy.mock.calls[0][0] as string;
+        expect(message).toContain(`'schema' in defineDatabase() is read at build time`);
+        expect(message).toContain('main.ts passes something else');
+
+        warnSpy.mockRestore();
+      });
     });
 
     it('extracts action definitions', () => {

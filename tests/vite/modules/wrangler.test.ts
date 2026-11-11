@@ -35,6 +35,7 @@ describe('wrangler', () => {
     instance: 'per-tenant',
     migrationsDir: '',
     schemaImport: './schema',
+    schemaExport: null,
     schemaTableNames: ['users'],
   };
 
@@ -306,6 +307,7 @@ describe('wrangler', () => {
           instance: 'global',
           migrationsDir: '',
           schemaImport: './schema',
+          schemaExport: null,
           schemaTableNames: ['events'],
         },
       ];
@@ -943,6 +945,7 @@ describe('wrangler', () => {
           instance: 'global',
           migrationsDir: '',
           schemaImport: './schema',
+          schemaExport: null,
           schemaTableNames: ['events'],
         },
       ];

@@ -4,7 +4,7 @@ import path from 'node:path';
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
 import { parse } from '@babel/parser';
-import { BABEL_PARSER_PLUGINS } from './parser';
+import { BABEL_PARSER_PLUGINS, declaresSchema } from './parser';
 import type { TombstoneClass } from './wrangler';
 
 // Handle ESM/CJS babel packages
@@ -168,8 +168,13 @@ function schemaLocalName(db: DatabaseInfo, tableName: string): string {
   return `__schema_${safe(db.name)}_${safe(tableName)}`;
 }
 
+/** The schema as one object, when the schema module exports it whole (`schemaExport`). */
+function schemaConstLocalName(db: DatabaseInfo): string {
+  return `__schema_${db.name.replace(/[^A-Za-z0-9_$]/g, '_')}`;
+}
+
 function hasSchema(db: DatabaseInfo): boolean {
-  return !!db.schemaImport && db.schemaTableNames.length > 0;
+  return !!db.schemaImport && declaresSchema(db);
 }
 
 /**
@@ -185,6 +190,9 @@ function buildSchemaImport(db: DatabaseInfo): t.ImportDeclaration {
   const source = db.schemaImport!.startsWith('.')
     ? path.resolve(path.dirname(db.filePath), db.schemaImport!)
     : db.schemaImport!;
+  if (db.schemaExport) {
+    return createNamedImport([{ imported: db.schemaExport, local: schemaConstLocalName(db) }], source);
+  }
   return createNamedImport(
     db.schemaTableNames.map((tableName) => ({
       imported: tableName,
@@ -194,15 +202,24 @@ function buildSchemaImport(db: DatabaseInfo): t.ImportDeclaration {
   );
 }
 
-function buildSchemaProperty(db: DatabaseInfo): t.ClassProperty {
-  return t.classProperty(
-    t.identifier('schema'),
-    t.objectExpression(
-      db.schemaTableNames.map((tableName) =>
-        t.objectProperty(t.identifier(tableName), t.identifier(schemaLocalName(db, tableName)))
-      )
+/**
+ * The schema in the generated module: the const the schema module exports —
+ * the very object the app's own code holds —, or the listed tables under
+ * their names.
+ */
+function buildSchemaExpression(db: DatabaseInfo): t.Expression {
+  if (db.schemaExport) {
+    return t.identifier(schemaConstLocalName(db));
+  }
+  return t.objectExpression(
+    db.schemaTableNames.map((tableName) =>
+      t.objectProperty(t.identifier(tableName), t.identifier(schemaLocalName(db, tableName)))
     )
   );
+}
+
+function buildSchemaProperty(db: DatabaseInfo): t.ClassProperty {
+  return t.classProperty(t.identifier('schema'), buildSchemaExpression(db));
 }
 
 function buildDbTransportsObject(databases: DatabaseInfo[]): t.ObjectExpression {
@@ -332,7 +349,7 @@ export function generateDatabasesModule(databases: DatabaseInfo[]): string {
       t.objectProperty(t.identifier('instance'), t.stringLiteral(db.instance)),
       t.objectProperty(
         t.identifier('schema'),
-        hasSchema(db) ? (buildSchemaProperty(db).value as t.ObjectExpression) : t.objectExpression([])
+        hasSchema(db) ? buildSchemaExpression(db) : t.objectExpression([])
       ),
     ])
   );

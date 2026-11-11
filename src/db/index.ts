@@ -1,4 +1,8 @@
 export { defineDatabase } from './defineDatabase';
+export { relationsOf, relationOf } from './relations';
+export type { Relation, RelationMap, Relations, RelationType } from './relations';
+export { RelatedExpression } from './related';
+export type { Related, RelatedOptions } from './related';
 export { SqliteDurableObject, createKyselyFromSql, MigrationSchemaConflictError } from './SqliteDurableObject';
 export { outboxSink, queueOutboxSink, tenantOfInstanceKey } from './outbox';
 export type { Outbox, OutboxEnvelope, OutboxMessage, OutboxSink, OutboxSinkContext, OutboxSinkModule } from './outbox';

@@ -675,6 +675,42 @@ export const { action, destroyDatabase } = defineDatabase({
     expect(result!.code).toMatch(/const\s*\{\s*action\s*\}\s*=\s*defineDatabase/);
   });
 
+  it('leaves a file that takes related and relations alone', () => {
+    const code = `
+import { defineDatabase } from 'durable-db/db';
+import { users } from './schema';
+
+export const { action, related, relations } = defineDatabase({
+  schema: { users },
+});
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it('keeps related and relations next to a destroyDatabase it takes out', () => {
+    const code = `
+import { defineDatabase } from 'durable-db/db';
+import { users } from './schema';
+
+export const { action, related, destroyDatabase, relations } = defineDatabase({
+  schema: { users },
+});
+`;
+    const result = transformDatabaseFile({
+      ...defaultDbFileOptions,
+      code,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.code).toMatch(/const\s*\{\s*action,\s*related,\s*relations\s*\}\s*=\s*defineDatabase/);
+    expect(result!.code).toContain('export async function destroyDatabase');
+  });
+
   it('adds cloudflare:workers env import', () => {
     const code = `
 import { defineDatabase } from 'durable-db/db';

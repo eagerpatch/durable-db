@@ -12,6 +12,7 @@ import {
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { DateSerializePlugin, createDrizzlePlugins } from './plugins';
+import { createRelatedPlugins } from './related';
 
 // This module bridges a Cloudflare `SqlStorage` to a Kysely instance. It is
 // deliberately free of any `cloudflare:workers` import — `SqlStorage` is an
@@ -292,6 +293,11 @@ export function createKyselyFromSql<T>(
   const allPlugins: KyselyPlugin[] = [];
 
   // Add schema/camelCase plugins
+  // The two plugins behind `related()` (./related.ts): one before every other
+  // plugin, one after. They leave a query without a relation as it is.
+  const related = schema ? createRelatedPlugins(schema) : undefined;
+  if (related) allPlugins.push(related.capture);
+
   if (schema) {
     // SchemaPlugin extends CamelCasePlugin, so no need for standalone CamelCasePlugin
     allPlugins.push(...createDrizzlePlugins(schema, camelCase));
@@ -304,6 +310,7 @@ export function createKyselyFromSql<T>(
 
   // Add any custom plugins
   allPlugins.push(...plugins);
+  if (related) allPlugins.push(related.results);
 
   return new Kysely<T>({
     dialect: {

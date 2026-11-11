@@ -1,4 +1,6 @@
 import type { Outbox } from './outbox';
+import type { Related } from './related';
+import type { RelationMap } from './relations';
 import type { Kysely } from 'kysely';
 import type { Kyselify } from 'drizzle-orm/kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
@@ -122,6 +124,24 @@ export interface DatabaseDefinition<
   action: <const Def, TResult, TEnv = unknown>(
     config: ActionConfig<Def, TResult, TSchema, TEnv>,
   ) => Action<InferArgs<Def>, TResult>;
+
+  /**
+   * A relation of a table as a selection: the rows a foreign key leads to,
+   * read in the query that reads the row.
+   *
+   *   db.selectFrom('invoices')
+   *     .select(['invoices.id', related('invoices', 'customer', ['id', 'name'])])
+   *
+   * A relation is a column with `.references(() => other.column)`, named in
+   * both directions (see `relations`).
+   */
+  related: Related<TSchema>;
+
+  /**
+   * The relations the schema's foreign keys declare, by table and name:
+   * `relations.invoices.customer` (one), `relations.customers.invoices` (many).
+   */
+  readonly relations: RelationMap;
 
   /**
    * Destroy the database instance, clearing all data via `ctx.storage.deleteAll()`.

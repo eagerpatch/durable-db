@@ -32,6 +32,7 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
 - [Action-to-Action Calls](#action-to-action-calls)
 - [The Outbox](#the-outbox)
 - [Shared Actions](#shared-actions)
+- [Relations](#relations)
 - [PITR Safety](#pitr-safety)
 - [Recovery Workflows](#recovery-workflows)
 - [Architecture](#architecture)
@@ -1118,6 +1119,84 @@ import { createInvoice } from './databases/billing.actions';
 describeAction(createInvoice)?.args?.toJsonSchema();
 // { type: 'object', properties: { customerId: { type: 'string' }, … }, required: [ … ] }
 ```
+
+---
+
+## Relations
+
+A foreign key is a relation. Declare it once, on the column, and read along it in both directions — nothing else to write, nothing generated.
+
+```ts
+import { index, integer, table, text } from 'durable-db/schema';
+
+export const customers = table('customers', {
+  id: text().primaryKey(),
+  name: text().notNull(),
+});
+
+export const invoices = table('invoices', {
+  id: text().primaryKey(),
+  number: integer().notNull(),
+  customerId: text().notNull().references(() => customers.id),
+});
+
+export const invoiceLines = table(
+  'invoice_lines',
+  {
+    id: text().primaryKey(),
+    invoiceId: text().notNull().references(() => invoices.id, { onDelete: 'cascade' }),
+    description: text().notNull(),
+  },
+  (t) => [index('invoice_lines_invoice').on(t.invoiceId)],
+);
+```
+
+`defineDatabase()` hands out `related` next to `action`. It is a selection: put it in a `select()` (or a `returning()`) and the row gets the related rows under the relation's name, typed.
+
+```ts
+export const { action, related, relations } = defineDatabase({ schema });
+
+export const listInvoices = action({
+  args: {},
+  handler: async (db) =>
+    db
+      .selectFrom('invoices')
+      .select([
+        'invoices.number',
+        related('invoices', 'customer', ['name']),
+        related('invoices', 'invoiceLines', {
+          columns: ['description'],
+          orderBy: { id: 'asc' },
+          limit: 50,
+        }),
+      ])
+      .execute(),
+  // { number: number; customer: { name: string }; invoiceLines: { description: string }[] }[]
+});
+```
+
+**Names.** The forward side (`one`) is the column's property without its `Id` (`customerId` → `customer`); it is nullable when the column is. The inverse side (`many`) is the schema key of the table that holds the foreign key (`customers` → `invoices`). A table that points at the same target twice gets `<key>As<Forward>` for each (`invoicesAsCustomer`, `invoicesAsReferee`).
+
+**Nesting.** `with` reads relations of the related table, to any depth — still one SQL query:
+
+```ts
+related('customers', 'invoices', {
+  columns: ['number'],
+  orderBy: { number: 'desc' },
+  with: [related('invoices', 'invoiceLines', ['description'])],
+});
+```
+
+Each relation is a correlated subquery that SQLite answers as JSON (`json_object`, `json_group_array`); dates and booleans inside come back as the columns say, like in any row. Index the foreign key column a `many` is read through (`invoice_lines_invoice` above): without one SQLite scans the child table once per parent row — 200 invoices over 10 000 lines took 80 ms without it and 1.4 ms with it.
+
+**The registry.** `relations` (and `relationsOf(schema)` from `durable-db`) is the same information at runtime — `relations.invoices.customer` is `{ kind: 'one', name: 'customer', table: 'invoices', target: 'customers', local: 'customerId', foreign: 'id', nullable: false }` (tables as schema keys, columns as their properties) — for a library that maps a schema to an API. `Relations<typeof schema>` is its type.
+
+What it does not do yet:
+
+- A table that references itself (or two that reference each other) needs TypeScript's annotation on the callback — `.references((): AnySQLiteColumn => categories.id)` — and that hides the target from the types: the relation is in `relations`, but `related()` does not offer its name.
+- Composite foreign keys (`foreignKey({ columns: [a, b] })`) are not relations.
+- `related()` names the table as the query does: `selectFrom('invoices')`, not `selectFrom('invoices as i')`. It needs the default `camelCase` mapping.
+- No `where` on a relation; filter in the action.
 
 ---
 

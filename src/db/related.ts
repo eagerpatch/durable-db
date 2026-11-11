@@ -1,0 +1,352 @@
+// Reading along a relation, in the query that reads the row.
+//
+//   db.selectFrom('invoices')
+//     .select(['invoices.id', 'invoices.number'])
+//     .select([
+//       related('invoices', 'customer', ['id', 'name']),
+//       related('invoices', 'invoiceLines', { columns: ['id', 'description'], orderBy: { id: 'asc' } }),
+//     ])
+//
+// `related()` is an expression Kysely selects like any other: a correlated
+// subquery that answers the related row(s) as JSON — one query, one round to
+// SQLite, however deep `with` goes. Two plugins make the answer what the types
+// say: the first sees which selections are relations (before any other plugin
+// rewrites the query), the last parses their JSON and revives dates and
+// booleans the way the columns of the row itself are.
+//
+// Opt in: a query without `related()` passes both plugins untouched.
+import {
+  AliasNode,
+  IdentifierNode,
+  sql,
+  type AliasedExpression,
+  type Expression,
+  type KyselyPlugin,
+  type OperationNode,
+  type QueryId,
+  type RawBuilder,
+  type RootOperationNode,
+  type Selectable,
+  type UnknownRow,
+} from 'kysely';
+import { getTableColumns } from 'drizzle-orm';
+import { dateSerializers } from './plugins';
+import { relationOf, type AnySchema, type Relation, type Relations } from './relations';
+import type { DrizzleToKysely } from './types';
+
+// ── Types ──────────────────────────────────────────────────────────────
+
+type Simplify<T> = { [K in keyof T]: T[K] } & {};
+
+type Row<S extends AnySchema, TK> = TK extends keyof S ? Selectable<DrizzleToKysely<S>[TK]> : never;
+
+type TargetOf<Rel> = Rel extends { target: infer T } ? T : never;
+
+/** What the relations in `with` add to a row: each under its name. */
+type Nested<W> = W extends readonly RelatedExpression<string, string, unknown>[]
+  ? { [E in W[number] as E['alias']]: E extends RelatedExpression<string, string, infer V> ? V : never }
+  : {};
+
+/** A `one` answers its row (or null, when the foreign key may be null), a `many` a list. */
+type Value<Rel, Item> = Rel extends { kind: 'one'; nullable: false } ? Item : Rel extends { kind: 'one' } ? Item | null : Item[];
+
+export interface RelatedOptions<C extends string, W, K extends string = C> {
+  /** The columns of the related table to read. */
+  columns: readonly C[];
+  /** Relations of the related table, read with each row: `related('<that table>', …)`. */
+  with?: W;
+  /** A `many` only: the order of its rows, first key first. */
+  orderBy?: { [P in K]?: 'asc' | 'desc' };
+  /** A `many` only: at most this many rows per parent. */
+  limit?: number;
+}
+
+/**
+ * `related(table, relation, columns)`: the rows `relation` leads to from each
+ * row of `table`, as a selection.
+ */
+export interface Related<S extends AnySchema> {
+  <
+    TK extends keyof Relations<S> & string,
+    R extends keyof Relations<S>[TK] & string,
+    C extends keyof Row<S, TargetOf<Relations<S>[TK][R]>> & string,
+  >(
+    table: TK,
+    relation: R,
+    columns: readonly C[],
+  ): RelatedExpression<TK, R, Value<Relations<S>[TK][R], Simplify<Pick<Row<S, TargetOf<Relations<S>[TK][R]>>, C>>>>;
+  <
+    TK extends keyof Relations<S> & string,
+    R extends keyof Relations<S>[TK] & string,
+    C extends keyof Row<S, TargetOf<Relations<S>[TK][R]>> & string,
+    W extends readonly RelatedExpression<TargetOf<Relations<S>[TK][R]> & string, string, unknown>[] = [],
+  >(
+    table: TK,
+    relation: R,
+    options: RelatedOptions<C, W, keyof Row<S, TargetOf<Relations<S>[TK][R]>> & string>,
+  ): RelatedExpression<
+    TK,
+    R,
+    Value<Relations<S>[TK][R], Simplify<Pick<Row<S, TargetOf<Relations<S>[TK][R]>>, C> & Nested<W>>>
+  >;
+}
+
+// ── The expression ─────────────────────────────────────────────────────
+
+/** A relation to read, checked against the schema. Internal: what `related()` builds. */
+export interface RelatedSpec {
+  schema: AnySchema;
+  relation: Relation;
+  columns: string[];
+  with: RelatedSpec[];
+  orderBy: [column: string, direction: 'asc' | 'desc'][];
+  limit?: number;
+}
+
+/** What the result plugin needs to know of a selected relation. */
+interface Meta {
+  /** The table its rows are of: which of their values are dates and booleans. */
+  target: string;
+  with: Map<string, Meta>;
+}
+
+const RELATED = Symbol.for('durable-db.related');
+type Marked = AliasNode & { readonly [RELATED]?: Meta };
+
+const specs = new WeakMap<object, RelatedSpec>();
+
+function metaOf(spec: RelatedSpec): Meta {
+  return { target: spec.relation.target, with: new Map(spec.with.map((nested) => [nested.relation.name, metaOf(nested)])) };
+}
+
+// `outer` is what the parent row goes by where this is selected: its table at
+// the top, the parent relation's alias below. Names are the schema's (keys and
+// properties): the schema plugin turns them into SQL's, like everywhere else.
+// JSON keys and the limit are literals, never parameters — a Durable Object's
+// SQLite takes at most 100 of those per query.
+function render(spec: RelatedSpec, outer: string, depth: number): RawBuilder<unknown> {
+  const { relation } = spec;
+  const row = `_r${depth}`;
+  const pairs = spec.columns.map((column) => sql`${sql.lit(column)}, ${sql.ref(`${row}.${column}`)}`);
+  for (const nested of spec.with) {
+    // A subquery's text is text again: json() makes it the value it holds (and null of null).
+    pairs.push(sql`${sql.lit(nested.relation.name)}, json(${render(nested, row, depth + 1)})`);
+  }
+  const object = sql`json_object(${sql.join(pairs)})`;
+  const target = sql.table(relation.target);
+  const matches = (alias: string) => sql`${sql.ref(`${alias}.${relation.foreign}`)} = ${sql.ref(`${outer}.${relation.local}`)}`;
+
+  if (relation.kind === 'one') {
+    return sql`(select ${object} from ${target} as ${sql.ref(row)} where ${matches(row)} limit 1)`;
+  }
+  if (spec.orderBy.length === 0 && spec.limit === undefined) {
+    return sql`(select json_group_array(${object}) from ${target} as ${sql.ref(row)} where ${matches(row)})`;
+  }
+  // Ordered and cut per parent before they are gathered.
+  const inner = `_s${depth}`;
+  const order =
+    spec.orderBy.length === 0
+      ? sql``
+      : sql` order by ${sql.join(spec.orderBy.map(([column, direction]) => sql`${sql.ref(`${inner}.${column}`)} ${sql.raw(direction)}`))}`;
+  const limit = spec.limit === undefined ? sql`` : sql` limit ${sql.lit(spec.limit)}`;
+  return sql`(select json_group_array(${object}) from (select * from ${target} as ${sql.ref(inner)} where ${matches(inner)}${order}${limit}) as ${sql.ref(row)})`;
+}
+
+/**
+ * A relation as a selection: what `related()` returns. `table` is the table
+ * it is a relation of (so `with` takes only the related table's own), `alias`
+ * the relation's name — the key it is answered under.
+ */
+export class RelatedExpression<TK extends string, A extends string, V> implements AliasedExpression<V, A> {
+  readonly table: TK;
+  readonly alias: A;
+
+  constructor(spec: RelatedSpec) {
+    this.table = spec.relation.table as TK;
+    this.alias = spec.relation.name as A;
+    specs.set(this, spec);
+  }
+
+  get expression(): Expression<V> {
+    return render(specs.get(this)!, this.table, 1) as RawBuilder<V>;
+  }
+
+  toOperationNode(): AliasNode {
+    const spec = specs.get(this)!;
+    const node = AliasNode.create(render(spec, this.table, 1).toOperationNode(), IdentifierNode.create(this.alias));
+    // The mark the first plugin reads: Kysely keeps this very node in the query it hands the plugins.
+    const marked: Marked = { ...node, [RELATED]: metaOf(spec) };
+    return Object.freeze(marked);
+  }
+}
+
+// ── related() ──────────────────────────────────────────────────────────
+
+// Everything a relation is rendered from is checked here, when `related()` is
+// called: a name that reaches the SQL is a relation, a table or a column of
+// the schema, a direction is one of two words and a limit a number.
+function specOf(schema: AnySchema, table: string, name: string, arg: unknown): RelatedSpec {
+  const relation = relationOf(schema, table, name);
+  const where = `[durable-db] related('${table}', '${name}')`;
+  const options = (Array.isArray(arg) ? { columns: arg } : arg) as Partial<RelatedOptions<string, unknown>> | null | undefined;
+  if (typeof options !== 'object' || options === null) {
+    throw new TypeError(`${where} takes the columns to read: ['id', …], or { columns, with, orderBy, limit }.`);
+  }
+
+  const known = getTableColumns(schema[relation.target]!);
+  const column = (key: unknown, what: string): string => {
+    if (typeof key !== 'string' || !Object.hasOwn(known, key)) {
+      throw new TypeError(`${where}: ${what} "${String(key)}" is not a column of "${relation.target}". Its columns: ${Object.keys(known).join(', ')}.`);
+    }
+    return key;
+  };
+
+  if (options.columns !== undefined && !Array.isArray(options.columns)) throw new TypeError(`${where}: columns is a list of column names.`);
+  const columns = [...new Set((options.columns ?? []).map((key) => column(key, 'the column')))];
+  for (const key of columns) {
+    if (known[key]!.getSQLType() === 'blob') {
+      throw new TypeError(`${where}: "${key}" is a blob, and a relation is read as JSON, which holds none — read it in a query of its own.`);
+    }
+  }
+
+  const nested = options.with ?? [];
+  if (!Array.isArray(nested)) throw new TypeError(`${where}: with is a list of relations: [related('${relation.target}', …)].`);
+  const names = new Set(columns);
+  const inner: RelatedSpec[] = [];
+  for (const item of nested) {
+    const spec = item instanceof RelatedExpression ? specs.get(item) : undefined;
+    if (!spec) throw new TypeError(`${where}: with is a list of relations: [related('${relation.target}', …)].`);
+    if (spec.schema !== schema || spec.relation.table !== relation.target) {
+      const other = spec.schema === schema ? '' : ' of another database';
+      throw new TypeError(
+        `${where}: with takes relations of "${relation.target}", and "${spec.relation.name}" is one of "${spec.relation.table}"${other}.`,
+      );
+    }
+    if (names.has(spec.relation.name)) {
+      throw new TypeError(`${where}: "${spec.relation.name}" is there twice — as a column and a relation, or the relation twice.`);
+    }
+    names.add(spec.relation.name);
+    inner.push(spec);
+  }
+  if (names.size === 0) throw new TypeError(`${where} reads nothing: name the columns to read.`);
+
+  const orderBy: RelatedSpec['orderBy'] = [];
+  for (const [key, direction] of Object.entries(options.orderBy ?? {})) {
+    if (direction === undefined) continue;
+    if (direction !== 'asc' && direction !== 'desc') throw new TypeError(`${where}: orderBy.${key} is 'asc' or 'desc'.`);
+    orderBy.push([column(key, 'orderBy'), direction]);
+  }
+  const { limit } = options;
+  if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0)) throw new TypeError(`${where}: limit is a whole number, 0 or more.`);
+  if (relation.kind === 'one' && (orderBy.length > 0 || limit !== undefined)) {
+    throw new TypeError(`${where} leads to one row: orderBy and limit are for a relation that leads to many.`);
+  }
+
+  return { schema, relation, columns, with: inner, orderBy, limit };
+}
+
+/** `related` for a schema: what `defineDatabase()` hands out. */
+export function createRelated<S extends AnySchema>(schema: S): Related<S> {
+  const related = (table: string, relation: string, arg: unknown) => new RelatedExpression(specOf(schema, table, relation, arg));
+  return related as unknown as Related<S>;
+}
+
+// ── The plugins ────────────────────────────────────────────────────────
+
+function isMarked(node: unknown): node is Marked & { readonly [RELATED]: Meta } {
+  return typeof node === 'object' && node !== null && (node as Marked)[RELATED] !== undefined;
+}
+
+/** The relations among what a query selects (or returns): each by the key its rows carry it under. */
+function relationsIn(node: RootOperationNode): Map<string, Meta> | undefined {
+  const root = node as { selections?: readonly OperationNode[]; returning?: { selections?: readonly OperationNode[] } };
+  let found: Map<string, Meta> | undefined;
+  for (const item of [...(root.selections ?? []), ...(root.returning?.selections ?? [])]) {
+    const selected = (item as { selection?: unknown }).selection;
+    if (!isMarked(selected)) continue;
+    found ??= new Map();
+    found.set((selected.alias as IdentifierNode).name, selected[RELATED]);
+  }
+  return found;
+}
+
+// As the boolean plugin reads a column of the row itself.
+function toBoolean(value: unknown): unknown {
+  if (typeof value === 'number') return value !== 0;
+  if (value === 'true' || value === '1') return true;
+  if (value === 'false' || value === '0') return false;
+  return value;
+}
+
+/**
+ * The two plugins behind `related()`. `capture` goes first — it reads the
+ * query as the builder made it, marks and all — and `results` last, when the
+ * row's keys are the schema's again.
+ */
+export function createRelatedPlugins(schema: AnySchema): { capture: KyselyPlugin; results: KyselyPlugin } {
+  const selected = new WeakMap<QueryId, Map<string, Meta>>();
+  const kinds = new Map<string, { dates: Set<string>; booleans: Set<string> }>();
+
+  const kindsOf = (table: string) => {
+    let kind = kinds.get(table);
+    if (!kind) {
+      kind = { dates: new Set(), booleans: new Set() };
+      const target = schema[table];
+      const columns: Record<string, { dataType: string }> = target ? getTableColumns(target) : {};
+      for (const [key, column] of Object.entries(columns)) {
+        if (column.dataType === 'date') kind.dates.add(key);
+        else if (column.dataType === 'boolean') kind.booleans.add(key);
+      }
+      kinds.set(table, kind);
+    }
+    return kind;
+  };
+
+  const revive = (value: unknown, meta: Meta): unknown => {
+    if (Array.isArray(value)) return value.map((item) => revive(item, meta));
+    if (typeof value !== 'object' || value === null) return value;
+    const { dates, booleans } = kindsOf(meta.target);
+    const row = value as Record<string, unknown>;
+    for (const [key, item] of Object.entries(row)) {
+      const nested = meta.with.get(key);
+      if (nested) row[key] = revive(item, nested);
+      else if (dates.has(key)) {
+        if (typeof item === 'string' && dateSerializers.isSerializedDateString(item)) row[key] = dateSerializers.deserialize(item);
+      } else if (booleans.has(key)) row[key] = toBoolean(item);
+    }
+    return row;
+  };
+
+  const capture: KyselyPlugin = {
+    transformQuery({ node, queryId }) {
+      const found = relationsIn(node);
+      if (found) selected.set(queryId, found);
+      return node;
+    },
+    async transformResult({ result }) {
+      return result;
+    },
+  };
+
+  const results: KyselyPlugin = {
+    transformQuery({ node }) {
+      return node;
+    },
+    async transformResult({ result, queryId }) {
+      const relations = selected.get(queryId);
+      if (!relations) return result;
+      const rows = result.rows.map((row): UnknownRow => {
+        const out: UnknownRow = { ...row };
+        for (const [key, meta] of relations) {
+          const raw = out[key];
+          // Null is a `one` that leads nowhere; anything else is the subquery's JSON.
+          if (typeof raw === 'string') out[key] = revive(JSON.parse(raw), meta);
+        }
+        return out;
+      });
+      return { ...result, rows };
+    },
+  };
+
+  return { capture, results };
+}

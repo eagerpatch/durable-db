@@ -1,4 +1,5 @@
 export { TestMigrationDO, TestHappyDO, TestKyselyDO, TestRaceDO, TestDevHandoffDO, TestArgsDO, TestRemovedDatabaseDO, TestOutboxDO, TestSharedDO } from './test-do';
+export { TestRelatedDO } from './related-do';
 
 /**
  * Placeholder worker entry — tests interact with DOs directly via the

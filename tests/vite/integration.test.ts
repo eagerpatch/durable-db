@@ -223,6 +223,44 @@ export const createUser = action({
       expect(transformed!.code).toMatch(/getTenantId\(\)/);
     });
 
+    it('keeps the related() a handler reads with', () => {
+      const mainCode = `
+import { defineDatabase } from 'durable-db/db';
+import { users, posts } from './schema';
+export const { action, related, relations } = defineDatabase({
+  schema: { users, posts },
+});
+export const listUsers = action({
+  args: {},
+  handler: async (db) => db.selectFrom('users').select(['users.id', related('users', 'posts', ['title'])]).execute(),
+});
+`;
+      fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'main.ts'), mainCode);
+
+      const discovered = discoverDatabaseFiles({
+        projectRoot: tempDir,
+        databasesDir: 'src/databases',
+      });
+
+      const code = readFile(discovered[0].absolutePath);
+      const parsed = parseDatabaseFile(discovered[0].absolutePath, code);
+      expect(parsed.actions.map((action) => action.exportName)).toEqual(['listUsers']);
+
+      const transformed = transformActionFile({
+        code,
+        dbName: parsed.database!.name,
+        database: parsed.database!,
+        actionsInFile: parsed.actions,
+        contextImport: 'durable-db/context',
+        registryImport: 'durable-db/registry',
+      });
+
+      // The factory's other members stay where the handler reads them from.
+      expect(transformed!.code).toMatch(/const\s*\{\s*action,\s*related,\s*relations\s*\}\s*=\s*defineDatabase/);
+      expect(transformed!.code).toContain("related('users', 'posts', ['title'])");
+      expect(transformed!.code).toContain('export async function listUsers');
+    });
+
     it('generates correct stub for global database', () => {
       const analyticsCode = `
 import { defineDatabase } from 'durable-db/db';

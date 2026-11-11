@@ -1,5 +1,23 @@
 # durable-db
 
+## 0.9.0
+
+### Minor Changes
+
+- f766028: `describeAction(action)`, for libraries: what an action is, read from the function an app exports — `{ database, name, args }`, `args` being its compiled schema (`.toJsonSchema()`), so a library can map actions to an API of its own without the app repeating their arguments. The build registers the compiled schema and the call site with each action (`registerAction(…, { validator, handler, args, stub })`); nothing else changes, and nothing reads them unless a module asks.
+- 4a8e430: Relations, from the foreign keys a schema declares: `.references(() => customers.id)` on a column is now typed with its target (an overload on Drizzle's column builder, through `durable-db/schema`), and `defineDatabase()` returns `related` and `relations` next to `action`. `related(table, relation, columns | { columns, with, orderBy, limit })` is a selection for `select()` / `returning()`: the related row (`one`) or rows (`many`) under the relation's name, typed, nested to any depth through `with`, in the same SQL query (a correlated JSON subquery; dates and booleans revived like any column). Both directions are named from the one declaration — `invoices.customer`, `customers.invoices`, `<key>As<Forward>` when a table points at the same target twice. `relations` / `relationsOf(schema)` is the same registry at runtime and `Relations<Schema>` its type, for a library that maps a schema to an API.
+  
+  Nothing changes for a schema or a query that does not use them: the extra Kysely plugins only act on a query that selects a `related()`. Not covered yet: a self or mutual reference is in the registry but not in the types (TypeScript needs `(): AnySQLiteColumn` there), composite foreign keys, an aliased outer table, `camelCase: false`, a `where` on a relation.
+- f766028: Shared actions, for libraries: `registerSharedAction(name, { validator, handler })` (`durable-db/registry`) registers an action every database has — `stub.rpc(name, args)` runs it in whichever Durable Object is called, with that database's `db` and the action context; a database's own action of the same name wins. `virtual:durable-db/__databases` lists the discovered databases with their tables (`{ name, bindingName, className, instance, schema }`) for a library that maps a table to its database. Both are opt-in: nothing is registered or generated unless a module asks.
+
+### Patch Changes
+
+- 5dcecdd: A migration that rebuilds a table no longer acts on the rows that reference it. SQLite cannot alter most of a table in place, so `db generate` writes a rebuild — `CREATE TABLE __new_t`, copy, `DROP TABLE t`, `ALTER TABLE __new_t RENAME TO t` — with `PRAGMA foreign_keys=OFF` around it. In a Durable Object that pragma does nothing: foreign keys are enforced and stay enforced. So the `DROP` ran every referencing table's `ON DELETE`: `cascade` deleted the rows, `set null` emptied their column, `restrict` and `no action` failed the migration. Changing a column of `customers` could silently delete a tenant's `invoices`.
+  
+  The runtime now stands in for the pragma. Before a table is dropped that the same chunk puts back with a `RENAME TO`, the rows of the tables that reference it (and of those that reference them) are moved aside, and put back once the rename has run — then checked with `PRAGMA foreign_key_check`, so a rebuild that leaves out rows others still reference fails the migration, which rolls back, instead of leaving orphans. A `DROP TABLE` of a referenced table that nothing replaces runs at the end of its chunk, after the referencing tables were rebuilt without the reference. A table that is dropped and created anew keeps its meaning: its rows go, and what they take with them. A chunk without a `DROP TABLE` runs exactly as before.
+  
+  Not covered, and unchanged: a rebuild whose `DROP` and `RENAME` are in different chunks (a hand-placed `--> breakpoint` between them), and one that renames the old table away instead of dropping it. Rebuilds woven into each other (`DROP a`, `DROP b`, then the renames) fail with a message that says so. The rows are copied twice, so a rebuild of a table costs in proportion to the rows that reference it.
+
 ## 0.8.0
 
 ### Minor Changes

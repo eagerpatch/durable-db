@@ -1,5 +1,23 @@
 # durable-db
 
+## 0.10.0
+
+### Minor Changes
+
+- f36abdc: `related()` for a library: `createRelated(schema)` is exported (`durable-db`, `durable-db/db`) — the builder `defineDatabase()` hands out as `related`, for code that is handed a schema and not the database file. For a schema whose tables TypeScript knows it is typed the same; for one known only at runtime (`AnySchema`) it is `AnyRelated`: strings, checked when called — the table, the relation, its columns, the order, a blob column refused. `RelatedSpec` (what a `RelatedExpression` is made from) and the `AnyRelated` / `AnySchema` types are exported with it. A nested relation must be built for the same schema object as the one it is nested in.
+  
+  `.as(name)` answers a relation under another name — `related('invoices', 'customer', ['name']).as('buyer')` — at the top of a query and inside `with`, typed, so one relation can be read twice in a query (`.as('invoices')`, `.as('latest')`). It returns a new expression. A relation at the top of a query is now answered under exactly the name it was given, whatever the naming plugin would make of it (`line_items` stays `line_items`); a relation's own name was already that.
+- f36abdc: `defineDatabase({ schema })` takes a schema the schema module exports whole: `export const schema = { users, posts }` there, `import { schema } from './schema'` in the database file. Until now the build read the tables only from an object written in the call (`schema: { users, posts }`); anything else gave the database no schema, without a word — and code that needs the same object elsewhere (a test database, a library that reads the relations) had to list the tables a second time. The const is read as it is exported: its keys are the table names, a default export works, `as const` and `satisfies` are seen through, and a `const` of listed tables in the database file is read like the object in the call. The generated Durable Object class and `virtual:durable-db/__databases` import that export and use the object itself; `db push`, `generate`, `status` and `validate` read the tables off it, and say so when the export is missing or is not an object of tables.
+  
+  A `schema` the build cannot read (a function call, a namespace import, a value built at runtime) now warns, naming the file, instead of silently yielding a database without tables. For tooling on `durable-db/cli`: `DatabaseInfo` has `schemaExport` (the export's name, `null` for listed tables — `schemaTableNames` is then empty for a database that has a schema), `declaresSchema(db)` answers whether it has one in either form, and `loadSchemaTables(db, schemaPath)` loads its tables. Nothing changes for a database that lists its tables.
+
+### Patch Changes
+
+- f36abdc: A blob can be written. The plugin that serialises dates walked into every object among a query's values, so an `ArrayBuffer` or a `Uint8Array` bound for a `blob()` column arrived as an empty object and the insert failed. Binary values now pass through untouched and are bound as blobs. A Durable Object answers a blob as an `ArrayBuffer`; `createTestDatabase()` now answers the same (it answered `node:sqlite`'s `Uint8Array`) and takes an `ArrayBuffer` as a parameter like the object does.
+- f36abdc: A JSON-mode column is stored and read as JSON. `text({ mode: 'json' })` and `blob({ mode: 'json' })` were typed as the value (`$type<T>()`) and handled as plain text: an object written to one failed to bind, and a row came back with the stored string. The value is now serialised on the way in — what `values()` and `set()` write to such a column, `JSON.stringify(value)`, a string included (so `'123'` stays a string); a blob column stores the UTF-8 bytes — and parsed on the way out, wherever a query reads the column by name: `select`, an alias, `selectAll`, `returning`, a join, and through `related()`. A raw `sql` query is matched by column name. `null` stays `null`; stored text that is no JSON is answered as it is.
+  
+  A value that was stringified by hand to get around this is now encoded twice, and reads back as that string: write the value itself. Not covered, as before: what an expression writes or compares — `INSERT … SELECT`, `excluded.meta` in an upsert, a `sql` fragment, a `where` against the column — works on the stored text; so does JSON read through `jsonArrayFrom` or a JSON path. A schema without a JSON-mode column gets no extra plugin.
+
 ## 0.9.0
 
 ### Minor Changes

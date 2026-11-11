@@ -19,6 +19,7 @@ import {
   type CreateKyselyOptions,
   type SqlExecutor,
 } from './kysely';
+import { guardReferencingRows } from './referencingRows';
 
 // The Kysely-over-SqlStorage bridge lives in ./kysely so it can be imported
 // without pulling in `cloudflare:workers` (e.g. the durable-db/testing harness
@@ -784,6 +785,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
       const applyChunk = () => {
         skipped = 0;
+        const toRun: { index: number; statement: string }[] = [];
         for (let i = 0; i < statements.length; i++) {
           const statement = statements[i];
           if (!statement.trim()) continue;
@@ -791,10 +793,27 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
             skipped++;
             continue;
           }
-          currentIndex = i;
-          currentStatement = statement;
-          this.sql.exec(statement);
+          toRun.push({ index: i, statement });
         }
+
+        // Null unless the chunk drops a table: then the rows that reference it are kept through the drop.
+        const guard = guardReferencingRows(
+          this.sql,
+          toRun.map(({ statement }) => statement)
+        );
+        toRun.forEach(({ index, statement }, at) => {
+          // A drop the guard puts off runs at the end of the chunk, and fails as its own statement.
+          const execute = () => {
+            currentIndex = index;
+            currentStatement = statement;
+            this.sql.exec(statement);
+          };
+          if (!guard) return execute();
+          currentIndex = index;
+          currentStatement = statement;
+          guard.run(at, execute);
+        });
+        guard?.finish();
 
         currentIndex = -1;
         currentStatement = null;

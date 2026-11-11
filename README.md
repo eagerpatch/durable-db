@@ -23,6 +23,7 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
   - [Production Migrations](#production-migrations)
   - [Breakpoints](#breakpoints)
   - [Adding a required column](#adding-a-required-column)
+  - [Rebuilding a table that others reference](#rebuilding-a-table-that-others-reference)
   - [Epoch System](#epoch-system)
   - [Typical Workflow](#typical-workflow)
 - [Vite Plugin](#vite-plugin)
@@ -691,6 +692,20 @@ SQLite rejects `ALTER TABLE … ADD … NOT NULL` without a default on a table t
 - add it nullable (`currency: text()`), deploy, backfill every tenant (a job over your tenants, say), then make it `.notNull()` in a later migration.
 
 The same holds for renames: answering a rename question with "create" (or `--no-renames`) adds the new column — `NOT NULL` without a default fails the same way — and drops the old one with its data.
+
+### Rebuilding a table that others reference
+
+SQLite cannot alter most of a table in place, so many schema changes become a rebuild: `CREATE TABLE __new_t`, copy the rows, `DROP TABLE t`, `ALTER TABLE __new_t RENAME TO t`, with `PRAGMA foreign_keys=OFF` around it. In a Durable Object that pragma does nothing — foreign keys are always enforced — so the `DROP` would run the `ON DELETE` of every table that references `t`: `cascade` would delete those rows, `set null` empty their column.
+
+The runtime stands in for the pragma. While a chunk rebuilds a table, the rows of the tables that reference it (and of those that reference them) are moved aside before the `DROP` and put back after the `RENAME`, with none of their triggers run, and then checked: a rebuild that leaves out rows others still reference fails the migration, and nothing of it is kept. A referenced table that is dropped for good is dropped at the end of its chunk, once the tables that referenced it were rebuilt without the reference.
+
+What to know when writing a migration by hand:
+
+- keep a rebuild in one chunk: with a `--> breakpoint` between its `DROP TABLE` and its `RENAME TO`, the rows that reference the table are not kept;
+- drop the old table, then rename the new one into its place — renaming the old one away first (`ALTER TABLE t RENAME TO old_t`) is not recognised as a rebuild;
+- finish one rebuild before the next begins: `DROP a`, `DROP b`, then the renames, fails with a message that says so;
+- a table that is dropped and created again (`DROP TABLE t`, `CREATE TABLE t`) loses its rows on purpose, and the rows that cascade from them;
+- the rows that are moved aside are copied twice, so rebuilding a table costs in proportion to the rows that reference it.
 
 ### Epoch System
 

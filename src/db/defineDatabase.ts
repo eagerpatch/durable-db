@@ -1,6 +1,8 @@
 import { type } from '../arktypeConfig'; // jitless `type` — eval-free for Workers
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { actionArgsType } from './actionArgs';
+import { createRelated } from './related';
+import { relationsOf } from './relations';
 import type {
   DatabaseConfig,
   DatabaseDefinition,
@@ -187,5 +189,13 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
     );
   };
 
-  return { action, destroyDatabase } as unknown as DatabaseDefinition<TSchema>;
+  return {
+    action,
+    destroyDatabase,
+    related: createRelated(schema),
+    // Read from the schema's foreign keys the first time anything asks.
+    get relations() {
+      return relationsOf(schema);
+    },
+  } as unknown as DatabaseDefinition<TSchema>;
 }

@@ -38,6 +38,10 @@
       {
         "name": "TEST_SHARED_DO",
         "class_name": "TestSharedDO"
+      },
+      {
+        "name": "TEST_RELATED_DO",
+        "class_name": "TestRelatedDO"
       }
     ]
   },
@@ -63,6 +67,12 @@
       "tag": "v3",
       "new_sqlite_classes": [
         "TestSharedDO"
+      ]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": [
+        "TestRelatedDO"
       ]
     }
   ],

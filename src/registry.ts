@@ -2,6 +2,7 @@ import { type } from './arktypeConfig'; // jitless `type` — eval-free for Work
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { WebSocketTransport } from './transport/websocket';
 import { actionArgsType } from './db/actionArgs';
+import { ACTION_INFO, type ActionInfo } from './db/describeAction';
 
 // The `type` the action-file transform injects (as `__ddType`) to compile each
 // action's `args`, for the RPC stub and the Durable Object's validator alike.
@@ -24,6 +25,10 @@ export { actionArgsType as type };
 export interface ActionDefinition {
   validator: (args: unknown) => unknown;
   handler: (db: unknown, args: unknown, ctx: unknown) => Promise<unknown>;
+  /** The compiled args schema (a `type()`), for `describeAction()`. */
+  args?: unknown;
+  /** The call site the build compiled this action to: `describeAction()` reads the description from it. */
+  stub?: object;
 }
 
 export interface DoContext {
@@ -86,10 +91,42 @@ export function registerAction(dbName: string, actionName: string, def: ActionDe
     actionsByDb.set(dbName, dbMap);
   }
   dbMap.set(actionName, def);
+  // What the action is, on its call site (see ./db/describeAction): inert
+  // unless a library asks, non-enumerable like the untransformed action's meta.
+  if (def.stub) {
+    Object.defineProperty(def.stub, ACTION_INFO, {
+      value: { database: dbName, name: actionName, args: def.args } satisfies ActionInfo,
+      enumerable: false,
+      configurable: true,
+    });
+  }
 }
 
 export function getAction(dbName: string, actionName: string): ActionDefinition | undefined {
-  return actionsByDb.get(dbName)?.get(actionName);
+  return actionsByDb.get(dbName)?.get(actionName) ?? sharedActions().get(actionName);
+}
+
+// On globalThis for the same reason as the DO-context getter above: a worker
+// may hold two copies of this module, and what one registers the other looks up.
+const SHARED_ACTIONS = Symbol.for('durable-db.sharedActions');
+
+function sharedActions(): Map<string, ActionDefinition> {
+  const store = globalThis as Record<symbol, unknown>;
+  return (store[SHARED_ACTIONS] ??= new Map<string, ActionDefinition>()) as Map<string, ActionDefinition>;
+}
+
+/**
+ * Registers an action every database has: `stub.rpc(actionName, args)` runs it
+ * in whichever Durable Object is called, with that database's `db` and the
+ * action context — for a library that works on any schema (a query executor,
+ * an exporter). A database's own action of the same name wins; give a shared
+ * action a name no export can have (`"graph:run"`).
+ *
+ * Opt-in: nothing is registered unless a module calls this, and the module
+ * has to be loaded in the Durable Object's isolate (the worker's entry is).
+ */
+export function registerSharedAction(actionName: string, def: ActionDefinition): void {
+  sharedActions().set(actionName, def);
 }
 
 function getOrThrow(dbName: string, actionName: string): ActionDefinition {

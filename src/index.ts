@@ -16,6 +16,10 @@ export {
 } from './schema';
 export type { AnySQLiteColumn } from './schema';
 
+// What an action is, read from the function (a library that maps actions to an API)
+export { describeAction } from './db/describeAction';
+export type { ActionDescription } from './db/describeAction';
+
 // Tenant context
 export {
   setTenantIdResolver,

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   registerAction,
+  registerSharedAction,
   getAction,
   getDoContext,
   runWithDoContext,
@@ -546,5 +547,47 @@ describe('type (the transform\'s args compiler)', () => {
       createMockContext('reviews')
     );
     expect(result).toStrictEqual({ productId: 'p1', photoKey: undefined });
+  });
+});
+
+// ============================================================================
+// registerSharedAction
+// ============================================================================
+
+describe('registerSharedAction', () => {
+  it('is found on every database, registered or not', () => {
+    const shared = createMockAction('shared');
+    registerSharedAction('lib:everywhere', shared);
+    registerAction('sharedDbA', 'own', createMockAction('own'));
+
+    expect(getAction('sharedDbA', 'lib:everywhere')).toBe(shared);
+    expect(getAction('aDatabaseNobodyRegistered', 'lib:everywhere')).toBe(shared);
+  });
+
+  it("lets a database's own action of the same name win", () => {
+    const own = createMockAction('own');
+    registerSharedAction('lib:clash', createMockAction('shared'));
+    registerAction('sharedDbB', 'lib:clash', own);
+
+    expect(getAction('sharedDbB', 'lib:clash')).toBe(own);
+    expect(getAction('sharedDbC', 'lib:clash')).not.toBe(own);
+  });
+
+  it('leaves every other lookup as it was', () => {
+    registerSharedAction('lib:other', createMockAction('shared'));
+
+    expect(getAction('sharedDbD', 'notRegistered')).toBeUndefined();
+  });
+
+  it("runs through callAction with the calling database's db and context", async () => {
+    registerSharedAction('lib:echo', {
+      validator: (args) => args,
+      handler: async (db, args, ctx) => ({ db, args, dbName: (ctx as RpcContext).dbName }),
+    });
+    const ctx = createMockContext('sharedDbE');
+
+    const result = await callAction('the-db', 'sharedDbE', 'lib:echo', { a: 1 }, ctx);
+
+    expect(result).toMatchObject({ db: 'the-db', args: { a: 1 }, dbName: 'sharedDbE' });
   });
 });

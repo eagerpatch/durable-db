@@ -31,6 +31,7 @@ Define your schema with [Drizzle](https://orm.drizzle.team/), query with [Kysely
 - [Instance Strategies](#instance-strategies)
 - [Action-to-Action Calls](#action-to-action-calls)
 - [The Outbox](#the-outbox)
+- [Shared Actions](#shared-actions)
 - [PITR Safety](#pitr-safety)
 - [Recovery Workflows](#recovery-workflows)
 - [Architecture](#architecture)
@@ -1088,6 +1089,35 @@ export const createUser = action({
 
 - **Same database**: The call uses a direct fast path via AsyncLocalStorage (no RPC overhead). The registry detects that we're already inside the target DO and calls the handler directly.
 - **Cross database**: The call routes through RPC to the other database's Durable Object, using the appropriate instance key based on the target database's strategy.
+
+---
+
+## Shared Actions
+
+For a library that works on any schema — a query executor, an exporter — an action can be registered once and run in **every** database. It is opt-in: nothing changes for an app that never calls it.
+
+```ts
+import { registerSharedAction } from 'durable-db/registry';
+
+registerSharedAction('export:rows', {
+  validator: (args) => args as { table: string },
+  handler: async (db, args, ctx) => db.selectFrom(args.table).selectAll().execute(),
+});
+```
+
+`stub.rpc('export:rows', { table: 'users' })` then runs it in whichever Durable Object is called, with that database's `db` and the action context. The module that registers it has to be loaded in the Durable Object's isolate (anything the worker's entry imports is). A database's own action of the same name wins, so give a shared action a name no export can have (`"lib:name"`).
+
+`virtual:durable-db/__databases` lists what the plugin discovered — `databases: [{ name, bindingName, className, instance, schema }]`, the tables being the schema module's own objects — for a library that needs to know which database a table belongs to. It is generated only when something imports it.
+
+`describeAction(action)` (from `durable-db`) answers what an action is, given the function an app exports: `{ database, name, args }`, `args` being its compiled schema — `.toJsonSchema()` for a library that maps actions to an API of its own. It reads what the build registered for the call site (in tests, where nothing is compiled, `database` and `name` are `null`), and `undefined` for anything that is not an action.
+
+```ts
+import { describeAction } from 'durable-db';
+import { createInvoice } from './databases/billing.actions';
+
+describeAction(createInvoice)?.args?.toJsonSchema();
+// { type: 'object', properties: { customerId: { type: 'string' }, … }, required: [ … ] }
+```
 
 ---
 

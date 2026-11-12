@@ -10,6 +10,7 @@ interface RelatedStub {
     deliveredAt: unknown[];
   }>;
   nested(): Promise<{ customer: unknown; queries: number }>;
+  filtered(): Promise<unknown>;
   afterCascade(): Promise<unknown>;
 }
 
@@ -62,6 +63,13 @@ describe('related() in a Durable Object', () => {
         { number: 2, invoiceLines: [], referee: null },
       ],
     });
+  });
+
+  it('reads the rows of a many that meet a condition, the same relation filtered two ways', async () => {
+    expect(await newStub().filtered()).toEqual([
+      { number: 1, open: [{ description: 'Travel' }], delivered: [{ description: 'Setup' }] },
+      { number: 2, open: [], delivered: [] },
+    ]);
   });
 
   it('reads what the foreign keys leave: a deleted invoice takes its lines along', async () => {

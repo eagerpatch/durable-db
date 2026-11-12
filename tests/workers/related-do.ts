@@ -144,6 +144,20 @@ export class TestRelatedDO extends SqliteDurableObject {
     return { customer, queries };
   }
 
+  /** A relation's where: a boolean and a date bound inside the relation's subquery, before its order and limit. */
+  async filtered() {
+    const db = await this.seeded();
+    return db
+      .selectFrom('invoices')
+      .select([
+        'invoices.number',
+        related('invoices', 'invoiceLines', { columns: ['description'], where: (eb) => eb('delivered', '=', false), orderBy: { id: 'desc' }, limit: 1 }).as('open'),
+        related('invoices', 'invoiceLines', { columns: ['description'], where: (eb) => eb('deliveredAt', '>=', new Date('2026-05-01T00:00:00Z')) }).as('delivered'),
+      ])
+      .orderBy('invoices.number')
+      .execute();
+  }
+
   /** The foreign keys are enforced here, so what a relation reads is what they leave. */
   async afterCascade() {
     const db = await this.seeded();

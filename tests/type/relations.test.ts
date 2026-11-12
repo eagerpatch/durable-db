@@ -2,7 +2,7 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { integer, table, text } from '../../src/schema';
 import { defineDatabase } from '../../src/db/defineDatabase';
-import { createRelated, type AnyRelated, type RelatedExpression } from '../../src/db/related';
+import { createRelated, type AnyRelated, type RelatedExpression, type RelatedWhere } from '../../src/db/related';
 import type { AnySchema, Relations } from '../../src/db/relations';
 
 // What the types say of a schema's relations, and of a query that reads along
@@ -123,6 +123,51 @@ describe('related()', () => {
       // @ts-expect-error the types were not told where parentId leads
       related('categories', 'parent', ['id']);
     };
+    expect(refused).toBeTypeOf('function');
+  });
+});
+
+describe('where', () => {
+  it('is a condition on the related table, typed from the schema', () => {
+    const open = related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('delivered', '=', false) });
+    expectTypeOf(open).toEqualTypeOf<RelatedExpression<'invoices', 'invoiceLines', { id: string }[]>>();
+
+    // A column alone or after its table, with an order and under another name.
+    const late = related('invoices', 'invoiceLines', {
+      columns: ['description'],
+      where: (eb) => eb('invoiceLines.deliveredAt', '>', new Date(0)),
+      orderBy: { deliveredAt: 'desc' },
+    }).as('late');
+    expectTypeOf(late).toEqualTypeOf<RelatedExpression<'invoices', 'late', { description: string }[]>>();
+
+    // Another table is read in a subquery, which names the related row after its table.
+    const billed = related('customers', 'invoicesAsCustomer', {
+      columns: ['number'],
+      where: (eb) => eb.exists(eb.selectFrom('invoiceLines').select('invoiceLines.id').whereRef('invoiceLines.invoiceId', '=', 'invoices.id')),
+    });
+    expectTypeOf(billed).toEqualTypeOf<RelatedExpression<'customers', 'invoicesAsCustomer', { number: number }[]>>();
+
+    // A condition kept apart says which table it is about.
+    const hours: RelatedWhere<typeof schema, 'invoiceLines'> = (eb) => eb('description', '=', 'Hours');
+    expectTypeOf(related('invoices', 'invoiceLines', { columns: ['id'], where: hours })).toEqualTypeOf<
+      RelatedExpression<'invoices', 'invoiceLines', { id: string }[]>
+    >();
+  });
+
+  it('refuses what the related table does not have', () => {
+    const refused = () => {
+      // @ts-expect-error not a column of invoiceLines
+      related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('number', '>', 1) });
+      // @ts-expect-error a column of the row it hangs on, not of the related rows
+      related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('invoices.number', '>', 1) });
+      // @ts-expect-error a description is text
+      related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('description', '=', 1) });
+      // @ts-expect-error a condition, not a value
+      related('invoices', 'invoiceLines', { columns: ['id'], where: () => 'yes' });
+      // @ts-expect-error a condition about another table
+      related('invoices', 'invoiceLines', { columns: ['id'], where: hoursOfInvoices });
+    };
+    const hoursOfInvoices: RelatedWhere<typeof schema, 'invoices'> = (eb) => eb('number', '=', 1);
     expect(refused).toBeTypeOf('function');
   });
 });

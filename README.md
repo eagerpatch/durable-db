@@ -1224,6 +1224,32 @@ related('customers', 'invoices', {
 });
 ```
 
+**Filtering.** `where` says which rows of a `many` to read — a condition on the related table, written with Kysely's expression builder and typed from the schema. It applies before `limit`, and its values are bound like those of any condition:
+
+```ts
+related('invoices', 'invoiceLines', {
+  columns: ['description'],
+  where: (eb) => eb('quantity', '>', 0),
+});
+
+// Whatever Kysely builds of the table's columns…
+related('invoices', 'invoiceLines', {
+  columns: ['description'],
+  where: (eb) => eb.or([eb('delivered', '=', false), eb('deliveredAt', '>', since)]),
+});
+
+// …and another table in a subquery, which names the related row after its table.
+related('customers', 'invoices', {
+  columns: ['number'],
+  where: (eb) =>
+    eb.exists(
+      eb.selectFrom('invoiceLines').select('invoiceLines.id').whereRef('invoiceLines.invoiceId', '=', 'invoices.id'),
+    ),
+});
+```
+
+A column is named alone or after its table (`'quantity'`, `'invoiceLines.quantity'`). A `one` takes no `where` (the row a foreign key leads to is there or it is not), and a column of another table outside a subquery is refused when `related()` is called. `RelatedWhere<Schema, '<table>'>` is the type of a condition kept in a variable.
+
 **Another name.** `.as()` answers a relation under a name of your choosing, at the top of a query and inside `with`, and the type follows. The same relation can then be read twice in one query:
 
 ```ts
@@ -1251,7 +1277,7 @@ What it does not do yet:
 - A table that references itself (or two that reference each other) needs TypeScript's annotation on the callback — `.references((): AnySQLiteColumn => categories.id)` — and that hides the target from the types: the relation is in `relations`, but `related()` does not offer its name.
 - Composite foreign keys (`foreignKey({ columns: [a, b] })`) are not relations.
 - `related()` names the table as the query does: `selectFrom('invoices')`, not `selectFrom('invoices as i')`. It needs the default `camelCase` mapping.
-- No `where` on a relation; filter in the action.
+- A `where` compares a JSON column with what is stored (its text), like any `where`.
 
 ---
 

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { table, text, integer } from '../../src/schema';
 import { defineDatabase } from '../../src/db/defineDatabase';
-import { createRelated, type AnySchema } from '../../src';
+import { createRelated, type AnySchema, type RelatedWhere } from '../../src';
 import { createTestDatabase, type TestDatabase } from '../../src/testing';
 
 const customers = table('customers', {
@@ -382,7 +382,193 @@ describe('createRelated()', () => {
   });
 });
 
+describe("a relation's where", () => {
+  const lines = (where: RelatedWhere<typeof schema, 'invoiceLines'>) =>
+    t.db
+      .selectFrom('invoices')
+      .select(['invoices.id', related('invoices', 'invoiceLines', { columns: ['id'], orderBy: { id: 'asc' }, where })])
+      .orderBy('invoices.id')
+      .execute();
+
+  it('reads the rows of a relation that meet a condition, for each row', async () => {
+    const rows = await t.db
+      .selectFrom('invoices')
+      .select(['invoices.id', related('invoices', 'invoiceLines', { columns: ['description'], where: (eb) => eb('quantity', '>', 1) })])
+      .orderBy('invoices.id')
+      .execute();
+
+    expect(rows).toEqual([
+      { id: 'i1', invoiceLines: [{ description: 'Hours' }, { description: 'Setup' }] },
+      { id: 'i2', invoiceLines: [{ description: 'Licence' }] },
+      { id: 'i3', invoiceLines: [] },
+    ]);
+  });
+
+  it('takes a column alone or after its table, and what Kysely builds of them', async () => {
+    expect(await lines((eb) => eb('invoiceLines.quantity', '>', 1))).toEqual([
+      { id: 'i1', invoiceLines: [{ id: 'l1' }, { id: 'l3' }] },
+      { id: 'i2', invoiceLines: [{ id: 'l4' }] },
+      { id: 'i3', invoiceLines: [] },
+    ]);
+    expect((await lines((eb) => eb.or([eb('description', '=', 'Travel'), eb('quantity', '>=', 10)])))[0]).toEqual({
+      id: 'i1',
+      invoiceLines: [{ id: 'l1' }, { id: 'l2' }],
+    });
+    expect((await lines((eb) => eb('description', 'in', ['Setup', 'Licence'])))[0]).toEqual({ id: 'i1', invoiceLines: [{ id: 'l3' }] });
+  });
+
+  it('compares booleans and dates as the table holds them', async () => {
+    expect((await lines((eb) => eb('delivered', '=', true)))[0]).toEqual({ id: 'i1', invoiceLines: [{ id: 'l1' }] });
+    expect((await lines((eb) => eb('delivered', '=', false)))[0]).toEqual({ id: 'i1', invoiceLines: [{ id: 'l2' }, { id: 'l3' }] });
+    expect((await lines((eb) => eb('deliveredAt', '>', at('2026-05-01T00:00:00Z'))))[0]).toEqual({ id: 'i1', invoiceLines: [{ id: 'l1' }] });
+    expect((await lines((eb) => eb('deliveredAt', '>', at('2026-06-01T00:00:00Z'))))[0]).toEqual({ id: 'i1', invoiceLines: [] });
+    expect((await lines((eb) => eb('deliveredAt', 'is', null)))[0]).toEqual({ id: 'i1', invoiceLines: [{ id: 'l2' }, { id: 'l3' }] });
+  });
+
+  it('filters before the order and the limit cut', async () => {
+    const rows = await t.db
+      .selectFrom('invoices')
+      .select([
+        'invoices.id',
+        related('invoices', 'invoiceLines', { columns: ['description'], where: (eb) => eb('delivered', '=', false), orderBy: { quantity: 'desc' }, limit: 1 }),
+      ])
+      .orderBy('invoices.id')
+      .execute();
+
+    expect(rows).toEqual([
+      { id: 'i1', invoiceLines: [{ description: 'Setup' }] },
+      { id: 'i2', invoiceLines: [{ description: 'Licence' }] },
+      { id: 'i3', invoiceLines: [] },
+    ]);
+  });
+
+  it('filters a relation of the related rows, and the same relation twice under two names', async () => {
+    const rows = await t.db
+      .selectFrom('customers')
+      .select([
+        'customers.id',
+        related('customers', 'invoicesAsCustomer', {
+          columns: ['number'],
+          orderBy: { number: 'asc' },
+          where: (eb) => eb('number', '<', 3),
+          with: [
+            related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('delivered', '=', true) }).as('delivered'),
+            related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('delivered', '=', false), orderBy: { id: 'desc' } }).as('open'),
+          ],
+        }),
+      ])
+      .orderBy('customers.id')
+      .execute();
+
+    expect(rows).toEqual([
+      {
+        id: 'c1',
+        invoicesAsCustomer: [
+          { number: 1, delivered: [{ id: 'l1' }], open: [{ id: 'l3' }, { id: 'l2' }] },
+          { number: 2, delivered: [], open: [{ id: 'l4' }] },
+        ],
+      },
+      // Its one invoice is number 3.
+      { id: 'c2', invoicesAsCustomer: [] },
+      { id: 'c3', invoicesAsCustomer: [] },
+    ]);
+  });
+
+  it('reads another table in a subquery, which names the related row after its table', async () => {
+    const rows = await t.db
+      .selectFrom('customers')
+      .select([
+        'customers.id',
+        related('customers', 'invoicesAsCustomer', {
+          columns: ['id'],
+          where: (eb) =>
+            eb.exists(eb.selectFrom('invoiceLines').select('invoiceLines.id').whereRef('invoiceLines.invoiceId', '=', 'invoices.id').where('invoiceLines.quantity', '>', 5)),
+        }),
+      ])
+      .orderBy('customers.id')
+      .execute();
+
+    // i1 has a line of 10; i2's one line is 5, i3 has none.
+    expect(rows).toEqual([
+      { id: 'c1', invoicesAsCustomer: [{ id: 'i1' }] },
+      { id: 'c2', invoicesAsCustomer: [] },
+      { id: 'c3', invoicesAsCustomer: [] },
+    ]);
+  });
+
+  it('filters the rows of a table that references itself, not the row they hang on', async () => {
+    const loose = related as any;
+    const rows = await t.db
+      .selectFrom('categories')
+      .select(['categories.id', loose('categories', 'categories', { columns: ['name'], where: (eb: any) => eb('categories.name', '=', 'Leaf') })])
+      .orderBy('categories.id')
+      .execute();
+
+    expect(rows).toEqual([
+      { id: 'k1', categories: [{ name: 'Leaf' }] },
+      { id: 'k2', categories: [] },
+      { id: 'k3', categories: [] },
+    ]);
+
+    // A subquery that reads the table itself keeps the table's name for its own rows.
+    const withSiblings = await t.db
+      .selectFrom('categories')
+      .select([
+        'categories.id',
+        loose('categories', 'categories', {
+          columns: ['name'],
+          orderBy: { name: 'asc' },
+          where: (eb: any) => eb.exists(eb.selectFrom('categories').select('categories.id').where('categories.name', '=', 'Root')),
+        }),
+      ])
+      .where('categories.id', '=', 'k1')
+      .execute();
+    expect(withSiblings).toEqual([{ id: 'k1', categories: [{ name: 'Leaf' }, { name: 'Other leaf' }] }]);
+  });
+
+  it('filters the relations of a row an action answers, and of one createRelated() reads', async () => {
+    const open = action({
+      args: { 'min?': 'number' },
+      handler: async (db, args) =>
+        db
+          .selectFrom('invoices')
+          .select(['invoices.id', related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('quantity', '>=', args.min ?? 0) })])
+          .where('invoices.id', '=', 'i1')
+          .executeTakeFirstOrThrow(),
+    });
+    expect(await t.run(open, { min: 2 })).toEqual({ id: 'i1', invoiceLines: [{ id: 'l1' }, { id: 'l3' }] });
+    expect(await t.run(open, {})).toEqual({ id: 'i1', invoiceLines: [{ id: 'l1' }, { id: 'l2' }, { id: 'l3' }] });
+
+    const loose = createRelated(schema as AnySchema);
+    const row = await t.db
+      .selectFrom('invoices')
+      .select(['invoices.id', loose('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('quantity', '=', 1) })])
+      .where('invoices.id', '=', 'i1')
+      .executeTakeFirstOrThrow();
+    expect(row).toEqual({ id: 'i1', invoiceLines: [{ id: 'l2' }] });
+  });
+});
+
 describe('the query related() writes', () => {
+  it('binds the values of a where, and names its columns after the rows it reads', () => {
+    const { sql, parameters } = t.db
+      .selectFrom('invoices')
+      .select([
+        related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('quantity', '>', 1) }).as('some'),
+        related('invoices', 'invoiceLines', { columns: ['id'], where: (eb) => eb('invoiceLines.description', '=', 'Hours'), limit: 2 }).as('few'),
+      ])
+      .compile();
+
+    expect(parameters).toEqual([1, 'Hours']);
+    expect(sql.replace(/\s+/g, ' ')).toBe(
+      "select (select json_group_array(json_object('id', `_r1`.`id`)) from `invoice_lines` as `_r1` " +
+        'where `_r1`.`invoice_id` = `invoices`.`id` and (`_r1`.`quantity` > ?)) as `some`, ' +
+        "(select json_group_array(json_object('id', `_r1`.`id`)) from " +
+        '(select * from `invoice_lines` as `_s1` where `_s1`.`invoice_id` = `invoices`.`id` and (`_s1`.`description` = ?) limit 2) as `_r1`) as `few` ' +
+        'from `invoices`',
+    );
+  });
+
   it('is one statement, with nothing bound: names and the limit are written out', () => {
     const { sql, parameters } = t.db
       .selectFrom('invoices')
@@ -417,6 +603,18 @@ describe('what related() refuses', () => {
     ['a direction that is none', () => loose('invoices', 'invoiceLines', { columns: ['id'], orderBy: { id: 'up' } }), /orderBy\.id is 'asc' or 'desc'/],
     ['a limit that is no count', () => loose('invoices', 'invoiceLines', { columns: ['id'], limit: -1 }), /limit is a whole number, 0 or more/],
     ['an order or a limit where one row is read', () => loose('invoices', 'customer', { columns: ['id'], limit: 1 }), /leads to one row/],
+    [
+      'a where where one row is read',
+      () => loose('invoices', 'customer', { columns: ['id'], where: (eb: any) => eb('vip', '=', true) }),
+      /leads to one row: orderBy, limit and where are for a relation that leads to many/,
+    ],
+    ['a where that is no function', () => loose('invoices', 'invoiceLines', { columns: ['id'], where: { quantity: 1 } }), /where is a function that answers a condition — where: \(eb\) => eb\('<column>', '=', value\)/],
+    ['a where that answers no condition', () => loose('invoices', 'invoiceLines', { columns: ['id'], where: () => true }), /where answers a condition/],
+    [
+      'a where on a column of another table',
+      () => loose('invoices', 'invoiceLines', { columns: ['id'], where: (eb: any) => eb('invoices.number', '>', 1) }),
+      /related\('invoices', 'invoiceLines'\): where is a condition on "invoiceLines", and "invoices\.number" is of another table — read that one in a subquery/,
+    ],
     ['a relation of another table in with', () => loose('invoices', 'customer', { columns: ['id'], with: [related('invoices', 'customer', ['id'])] }), /with takes relations of "customers", and "customer" is one of "invoices"/],
     ['what is no relation in with', () => loose('invoices', 'customer', { columns: ['id'], with: ['invoicesAsCustomer'] }), /with is a list of relations/],
     [

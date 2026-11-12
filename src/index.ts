@@ -2,7 +2,7 @@
 export { relationsOf, relationOf } from './db/relations';
 export type { AnySchema, Relation, RelationMap, Relations, RelationType } from './db/relations';
 export { RelatedExpression, createRelated } from './db/related';
-export type { AnyRelated, Related, RelatedOptions, RelatedSpec } from './db/related';
+export type { AnyRelated, Related, RelatedOptions, RelatedSpec, RelatedWhere } from './db/related';
 export { defineDatabase } from './db/defineDatabase';
 
 // Schema builders (re-exported from ./schema with auto-snake_case table names)

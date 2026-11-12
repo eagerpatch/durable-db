@@ -2,7 +2,7 @@ export { defineDatabase } from './defineDatabase';
 export { relationsOf, relationOf } from './relations';
 export type { AnySchema, Relation, RelationMap, Relations, RelationType } from './relations';
 export { RelatedExpression, createRelated } from './related';
-export type { AnyRelated, Related, RelatedOptions, RelatedSpec } from './related';
+export type { AnyRelated, Related, RelatedOptions, RelatedSpec, RelatedWhere } from './related';
 export { SqliteDurableObject, createKyselyFromSql, MigrationSchemaConflictError } from './SqliteDurableObject';
 export { outboxSink, queueOutboxSink, tenantOfInstanceKey } from './outbox';
 export type { Outbox, OutboxEnvelope, OutboxMessage, OutboxSink, OutboxSinkContext, OutboxSinkModule } from './outbox';

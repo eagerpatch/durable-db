@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Snapshot } from './snapshot';
 import { debugMigrations } from '../utils/debug';
+import { SCHEMA_TEMP_PREFIX } from '../cli/state';
 import {
   createEmptySnapshot,
   generateSnapshotFromSchema,
@@ -332,7 +333,7 @@ export async function buildAndLoadSchema(
   // scan) race the create/delete and error with ENOENT in a loop.
   const tempDir = resolveTempDir(schemaPath);
   fs.mkdirSync(tempDir, { recursive: true });
-  const tempFile = path.join(tempDir, `_schema_temp_${Date.now()}.mjs`);
+  const tempFile = path.join(tempDir, `${SCHEMA_TEMP_PREFIX}${Date.now()}.mjs`);
 
   try {
     fs.writeFileSync(tempFile, result.outputFiles[0].text);

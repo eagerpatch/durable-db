@@ -725,6 +725,46 @@ describe('dev cache watcher', () => {
       { timeout: 5000, interval: 500 }
     );
   });
+
+  it('does not reload for the bundled schema a schema load writes into the cache dir', async () => {
+    const plugin = durableDb();
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'serve' } as ResolvedConfig);
+    const { server, clientSend } = createMockServer();
+    (plugin.configureServer as Function)(server);
+
+    // The watcher is listening once a real state change gets through (see the
+    // test above for why it is written until seen).
+    const { getDevPaths, loadDevState, saveDevState } = await import('../../src/cli/state');
+    const devState = loadDevState(tempDir);
+    let bumps = 0;
+    await vi.waitFor(
+      () => {
+        if (clientSend.mock.calls.length === 0) {
+          devState.epoch = `bumped-${++bumps}`;
+          saveDevState(tempDir, devState);
+        }
+        expect(clientSend).toHaveBeenCalledWith({ type: 'full-reload' });
+      },
+      { timeout: 5000, interval: 500 }
+    );
+    // Let a reload still pending from the last bump pass, then start counting.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    clientSend.mockClear();
+
+    // What `db status`, `db validate` or a host's doctor does beside a running
+    // dev server: the schema loader writes its bundle here, imports it and
+    // removes it again.
+    const cacheDir = getDevPaths(tempDir).cacheDir;
+    for (let i = 0; i < 3; i++) {
+      const file = path.join(cacheDir, `_schema_temp_${Date.now()}${i}.mjs`);
+      fs.writeFileSync(file, 'export const notes = {};');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      fs.rmSync(file);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(clientSend).not.toHaveBeenCalled();
+  });
 });
 
 // ============================================================================

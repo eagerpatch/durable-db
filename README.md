@@ -339,7 +339,24 @@ The resolver is called at the moment a database operation needs the tenant ID �
 
 Behind the scenes, each action call is an RPC call to the correct Durable Object instance. The Vite plugin generates stubs that handle instance routing, argument validation, and DO communication transparently.
 
-Calls to the **same** Durable Object instance that start before the code waits on I/O share one round trip: `Promise.all([countProducts({}), listProducts({ featuredOnly: true })])` (or sibling server components fetching at once, or two RPC procedures whose middleware awaits a different number of times before their action calls) sends both in a single RPC, and the object runs them one after another, in the order they were made — each result or error goes back to its own caller. A lone call, or calls made one after another, are plain RPCs as before. Each action's args schema is compiled on its first call and reused.
+Each action's args schema is compiled on its first call and reused.
+
+### One round trip per invocation: `batchScope()`
+
+Calls to the **same** Durable Object instance that one invocation starts before it waits on I/O can share one round trip. Say what an invocation is by wrapping what the platform invokes:
+
+```ts
+import { batchScope } from 'durable-db/registry';
+
+export default {
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) => batchScope(() => app.fetch(request, env, ctx)),
+  queue: (batch: MessageBatch, env: Env) => batchScope(() => consume(batch, env)),
+};
+```
+
+Inside it, `Promise.all([countProducts({}), listProducts({ featuredOnly: true })])` (or sibling server components fetching at once, or two RPC procedures whose middleware awaits a different number of times before their action calls) sends both in a single RPC, and the object runs them one after another, in the order they were made — each result or error goes back to its own caller. A lone call, and calls made one after another, are plain RPCs.
+
+Outside a scope every call is its own RPC. A batch is only safe among the calls of one invocation — the Workers runtime refuses to settle one request's promise from another request's context — and nothing but the scope tells two concurrent requests' calls apart. (Before 0.12 calls were batched per object across the whole isolate, and two requests that reached one object in the same turn could leave one of them hanging.)
 
 ---
 

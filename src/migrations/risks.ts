@@ -18,6 +18,7 @@ type Snapshot = DrizzleSQLiteSnapshotJSON;
 export type MigrationRiskKind =
   | 'add-not-null-without-default'
   | 'set-not-null'
+  | 'add-foreign-key'
   | 'drop-column'
   | 'drop-table';
 
@@ -29,6 +30,10 @@ export interface MigrationRisk {
   column?: string;
   message: string;
 }
+
+/** What a foreign key references, as one string: the same key before and after is no change. */
+const referenceOf = (key: { tableTo: string; columnsFrom: string[]; columnsTo: string[] }): string =>
+  `${key.columnsFrom.join(',')}->${key.tableTo}(${key.columnsTo.join(',')})`;
 
 /** The remedy `db generate` prints when it refuses a NOT NULL column without a default. */
 export const NOT_NULL_WITHOUT_DEFAULT_HINT =
@@ -98,6 +103,25 @@ export function analyzeMigrationRisks(
             `holds NULL there: backfill it first`,
         });
       }
+    }
+
+    // A foreign key that a table with rows did not have: the table is rebuilt
+    // with it, and a row that references nothing fails the copy. A database
+    // whose migration fails answers no call until a fixed one ships.
+    const had = new Set(Object.values(table.foreignKeys ?? {}).map(referenceOf));
+    for (const key of Object.values(after.foreignKeys ?? {})) {
+      if (had.has(referenceOf(key))) continue;
+      const from = key.columnsFrom.join(', ');
+      risks.push({
+        kind: 'add-foreign-key',
+        severity: 'warning',
+        table: name,
+        ...(key.columnsFrom.length === 1 ? { column: key.columnsFrom[0] } : {}),
+        message:
+          `${name}.${from} now references ${key.tableTo}.${key.columnsTo.join(', ')} — the migration fails on a database ` +
+          `where a row of ${name} references a row of ${key.tableTo} that is not there, and that database answers nothing ` +
+          `until it passes: remove or repair those rows in a migration before this one`,
+      });
     }
   }
 

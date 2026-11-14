@@ -1,5 +1,18 @@
 # durable-db
 
+## 0.12.0
+
+### Minor Changes
+
+- f8317a8: Calls are batched within one invocation, never across two: `batchScope()`. Since 0.6.0 the calls to one Durable Object that started in the same turn waited in one list per object for the whole isolate, so two requests that reached the same object at the same time shared a batch — the RPC was sent by one of them, and the other's call was settled from a request context that was not its own. The Workers runtime refuses that ("A promise was resolved or rejected from a different request context"), and the request was left hanging until it was cancelled: two concurrent requests of one tenant were enough for a 500.
+  
+  A batch now belongs to a scope. Wrap what the platform invokes — `fetch: (request, env, ctx) => batchScope(() => app.fetch(request, env, ctx))`, and a `queue` or `scheduled` handler the same way — and the calls that invocation starts on one object before it waits on I/O travel in one RPC, as before. Outside a scope every call is its own RPC: a worker that does not open one is correct and unbatched. `batchScope` is exported from `durable-db/registry`, where the compiled call sites get their `batchedRpc`; the scopes live in one store per isolate, whichever copy of the package opens them.
+
+### Patch Changes
+
+- f8317a8: `db generate` warns about a foreign key added to a table that already exists. The table is rebuilt with the constraint, and on a tenant where a row references something that is not there the copy fails (`FOREIGN KEY constraint failed`) — a database whose migration fails answers no call until a fixed migration ships, and neither `db generate`, `db status` nor `db validate` (which replay on an empty database) said so. The warning names the table, the column and what it references, and what to do: remove or repair those rows in a migration before this one. A foreign key of a new table, and one the table already had, are not warned about.
+- 86df64c: A running dev server no longer reloads when another process reads the schemas. The schema loader writes its bundled schema (`_schema_temp_<timestamp>.mjs`) into `node_modules/.cache/durable-db` to import it, and the dev plugin's watcher on that directory took the file for a change of dev state: `db status`, `db validate`, `db generate` — or a host's own check that loads the schemas — beside a running dev server reloaded the whole worker, and a request or a hot update that landed in that moment was answered from half-evaluated modules. The watcher now leaves those files alone; a change of the dev state itself (`db reset`, `db push`) reloads as before.
+
 ## 0.11.0
 
 ### Minor Changes

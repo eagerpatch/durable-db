@@ -1,12 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { batchedRpc, cachedArgsSchema, type BatchedResult } from '../src/registry';
+import { batchedRpc, batchScope, cachedArgsSchema, type BatchedResult } from '../src/registry';
 // The Durable Object base class extends cloudflare:workers' DurableObject, which only workerd has.
 vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }));
 const { SqliteDurableObject } = await import('../src/db/SqliteDurableObject');
 
 // The worker → Durable Object path: every action call used to be its own RPC.
-// Calls to the same object started before the code waits on I/O now share one
-// (rpcBatch); a lone call stays a plain rpc.
+// Calls of ONE invocation (`batchScope()`: a request, a queue batch) to the
+// same object, started before the code waits on I/O, share one (rpcBatch); a
+// lone call, and every call outside a scope, is a plain rpc.
 function namespace(options: { batch?: (calls: Array<{ action: string; args: unknown }>) => BatchedResult[] | Promise<BatchedResult[]> } = {}) {
   const rpc = vi.fn(async (action: string, args: unknown) => {
     const value = { action, args };
@@ -40,11 +41,9 @@ describe('batchedRpc', () => {
 
   it('sends calls to one object started in the same turn as ONE rpcBatch, in order, each result to its caller', async () => {
     const { ns, rpc, rpcBatch, ids } = namespace();
-    const results = await Promise.all([
-      batchedRpc(ns, 'acme', 'count', {}),
-      batchedRpc(ns, 'acme', 'list', { featuredOnly: true }),
-      batchedRpc(ns, 'acme', 'get', { id: 'cup' }),
-    ]);
+    const results = await batchScope(() =>
+      Promise.all([batchedRpc(ns, 'acme', 'count', {}), batchedRpc(ns, 'acme', 'list', { featuredOnly: true }), batchedRpc(ns, 'acme', 'get', { id: 'cup' })]),
+    );
     expect(rpc).not.toHaveBeenCalled();
     expect(rpcBatch).toHaveBeenCalledExactlyOnceWith(
       [
@@ -66,10 +65,9 @@ describe('batchedRpc', () => {
       for (let i = 0; i < awaits; i++) await Promise.resolve();
       return call();
     };
-    await Promise.all([
-      through(1, () => batchedRpc(ns, 'acme', 'count', {})),
-      through(12, () => batchedRpc(ns, 'acme', 'list', { featuredOnly: true })),
-    ]);
+    await batchScope(() =>
+      Promise.all([through(1, () => batchedRpc(ns, 'acme', 'count', {})), through(12, () => batchedRpc(ns, 'acme', 'list', { featuredOnly: true }))]),
+    );
     expect(rpc).not.toHaveBeenCalled();
     expect(rpcBatch).toHaveBeenCalledOnce();
     expect(rpcBatch.mock.calls[0]?.[0].map((call) => call.action)).toEqual(['count', 'list']);
@@ -81,7 +79,7 @@ describe('batchedRpc', () => {
         call.action === 'bad' ? { ok: false as const, error: { name: 'TypeError', message: 'no such product' } } : { ok: true as const, value: call.action },
       ),
     });
-    const [good, bad] = await Promise.allSettled([batchedRpc(ns, 'acme', 'good', {}), batchedRpc(ns, 'acme', 'bad', {})]);
+    const [good, bad] = await batchScope(() => Promise.allSettled([batchedRpc(ns, 'acme', 'good', {}), batchedRpc(ns, 'acme', 'bad', {})]));
     expect(good).toEqual({ status: 'fulfilled', value: 'good' });
     expect(bad.status).toBe('rejected');
     expect((bad as PromiseRejectedResult).reason).toMatchObject({ name: 'TypeError', message: 'no such product' });
@@ -89,19 +87,49 @@ describe('batchedRpc', () => {
 
   it('rejects every call of a batch whose RPC failed', async () => {
     const { ns } = namespace({ batch: () => Promise.reject(new Error('network gone')) });
-    const settled = await Promise.allSettled([batchedRpc(ns, 'acme', 'a', {}), batchedRpc(ns, 'acme', 'b', {})]);
+    const settled = await batchScope(() => Promise.allSettled([batchedRpc(ns, 'acme', 'a', {}), batchedRpc(ns, 'acme', 'b', {})]));
     expect(settled.map((s) => s.status)).toEqual(['rejected', 'rejected']);
   });
 
   it('keeps objects apart, and calls made one after another apart', async () => {
     const { ns, rpc, rpcBatch } = namespace();
-    await Promise.all([batchedRpc(ns, 'acme', 'count', {}), batchedRpc(ns, 'fika', 'count', {})]);
-    expect(rpc).toHaveBeenCalledTimes(2);
-    expect(rpcBatch).not.toHaveBeenCalled();
-    await batchedRpc(ns, 'acme', 'count', {});
-    await batchedRpc(ns, 'acme', 'list', {});
+    await batchScope(async () => {
+      await Promise.all([batchedRpc(ns, 'acme', 'count', {}), batchedRpc(ns, 'fika', 'count', {})]);
+      expect(rpc).toHaveBeenCalledTimes(2);
+      expect(rpcBatch).not.toHaveBeenCalled();
+      await batchedRpc(ns, 'acme', 'count', {});
+      await batchedRpc(ns, 'acme', 'list', {});
+    });
     expect(rpc).toHaveBeenCalledTimes(4);
     expect(rpcBatch).not.toHaveBeenCalled();
+  });
+
+  it('never shares a batch between two invocations: two requests that reach one object in the same turn each send their own', async () => {
+    const { ns, rpc, rpcBatch } = namespace();
+    // Two requests of one tenant, interleaved as the runtime interleaves them:
+    // each starts two calls to the same object before either waits on I/O.
+    const request = (name: string) => batchScope(() => Promise.all([batchedRpc(ns, 'acme', `${name}:count`, {}), batchedRpc(ns, 'acme', `${name}:list`, {})]));
+    const [first, second] = await Promise.all([request('a'), request('b')]);
+
+    expect(rpc).not.toHaveBeenCalled();
+    // One RPC per request, each with its own calls and no one else's.
+    expect(rpcBatch.mock.calls.map(([calls]) => calls.map((call) => call.action))).toEqual([
+      ['a:count', 'a:list'],
+      ['b:count', 'b:list'],
+    ]);
+    expect(first.map((result) => (result as { action: string }).action)).toEqual(['a:count', 'a:list']);
+    expect(second.map((result) => (result as { action: string }).action)).toEqual(['b:count', 'b:list']);
+  });
+
+  it('batches nothing outside an invocation: nothing there tells one request\'s calls from another\'s', async () => {
+    const { ns, rpc, rpcBatch } = namespace();
+    const results = await Promise.all([batchedRpc(ns, 'acme', 'count', {}), batchedRpc(ns, 'acme', 'list', {})]);
+
+    expect(rpcBatch).not.toHaveBeenCalled();
+    expect(rpc.mock.calls.map(([action]) => action)).toEqual(['count', 'list']);
+    expect(results.map((result) => (result as { action: string }).action)).toEqual(['count', 'list']);
+    // Plain values, as from a batch: the RPC's Symbol.dispose is dropped.
+    expect(Object.getOwnPropertySymbols(results[0] as object)).toEqual([]);
   });
 });
 

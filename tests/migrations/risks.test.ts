@@ -62,6 +62,29 @@ describe('analyzeMigrationRisks', () => {
     ]);
   });
 
+  it('warns about a foreign key added to a table that exists: rows that reference nothing fail it', async () => {
+    const customers = sqliteTable('customers', { id: text().primaryKey() });
+    const prev = await generateSnapshotFromSchema({ customers, invoices: sqliteTable('invoices', { id: text().primaryKey(), customerId: text() }) });
+    const cur = await generateSnapshotFromSchema({
+      customers,
+      invoices: sqliteTable('invoices', { id: text().primaryKey(), customerId: text().references(() => customers.id) }),
+    });
+    expect(analyzeMigrationRisks(prev, cur)).toEqual([
+      {
+        kind: 'add-foreign-key',
+        severity: 'warning',
+        table: 'invoices',
+        // By the names the database has: the snapshot's.
+        column: 'customer_id',
+        message:
+          'invoices.customer_id now references customers.id — the migration fails on a database where a row of invoices references a row of customers that is not there, and that database answers nothing until it passes: remove or repair those rows in a migration before this one',
+      },
+    ]);
+    // The same key before and after is no change, and a new table has no rows to fail on.
+    expect(analyzeMigrationRisks(cur, cur)).toEqual([]);
+    expect(analyzeMigrationRisks(await generateSnapshotFromSchema({ customers }), cur)).toEqual([]);
+  });
+
   it('treats a renamed column as neither dropped nor added', async () => {
     const [prev, cur] = await diff(
       { ...base, description: text().notNull() },

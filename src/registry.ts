@@ -267,41 +267,83 @@ export function cachedArgsSchema<T>(key: string, make: () => T): T {
   return schema;
 }
 
-// Calls waiting for their object's RPC, by namespace and instance key. A
+// Calls waiting for their object's RPC, by namespace and instance key — of ONE
+// invocation (a request, a queue batch, a scheduled run: `batchScope()`). A
 // timer flushes them, once the microtasks have run out: everything the code
 // running now starts before it waits on I/O goes out together. A microtask
 // was too early — two procedures started by one `Promise.all` reach their
 // action calls a different number of awaits later (oRPC's middleware, input
 // validation), so each flushed alone.
-const pending = new WeakMap<object, Map<string, PendingCall[]>>();
+//
+// Never across invocations. The calls used to wait in one list per object for
+// the whole isolate, so two requests that reached the same object in the same
+// turn shared a batch: the RPC was sent by the request whose timer fired, and
+// the other's call was settled from a request context that was not its own —
+// which the Workers runtime refuses ("A promise was resolved or rejected from
+// a different request context"), leaving that request hanging until it was
+// cancelled. Two concurrent requests of one tenant were enough.
+interface BatchScope {
+  pending: WeakMap<object, Map<string, PendingCall[]>>;
+}
+
+// On globalThis: bundlers routinely produce two copies of this package in one
+// worker (see the DO-context getter above), and the code that opens a scope
+// and the compiled call sites that read it must meet in one store.
+const BATCH_SCOPES = Symbol.for('durable-db.batchScopes');
+const batchScopes: AsyncLocalStorage<BatchScope> = ((globalThis as Record<symbol, unknown>)[BATCH_SCOPES] ??= new AsyncLocalStorage<BatchScope>()) as AsyncLocalStorage<BatchScope>;
 
 /**
- * Call an action on the Durable Object `instanceKey` of `namespace`. Calls to
- * the same object started before the code waits on I/O — `Promise.all([a(),
- * b()])` however deep in middleware, sibling server components awaiting at
- * once — travel in ONE RPC
- * (`rpcBatch`) and run there one after another, in the order they were made,
- * each result or error to its own caller; a lone call is a plain `rpc`, as
- * before. Results are plain values: the RPC's top-level `Symbol.dispose` is
- * dropped (React Server Components refuse symbol-keyed props).
+ * Runs `fn` as one invocation: the action calls it starts on the same Durable
+ * Object before it waits on I/O travel in ONE RPC. Wrap what the platform
+ * invokes — a worker's `fetch`, `queue` and `scheduled` handlers:
+ *
+ *   export default { fetch: (request, env, ctx) => batchScope(() => app.fetch(request, env, ctx)) }
+ *
+ * Outside a scope every call is its own RPC: batching is only safe among the
+ * calls of one invocation, and nothing else tells them apart.
+ */
+export function batchScope<T>(fn: () => T): T {
+  return batchScopes.run({ pending: new WeakMap() }, fn);
+}
+
+/**
+ * Call an action on the Durable Object `instanceKey` of `namespace`. Inside a
+ * `batchScope()`, calls to the same object started before the code waits on
+ * I/O — `Promise.all([a(), b()])` however deep in middleware, sibling server
+ * components awaiting at once — travel in ONE RPC (`rpcBatch`) and run there
+ * one after another, in the order they were made, each result or error to its
+ * own caller; a lone call, and every call outside a scope, is a plain `rpc`.
+ * Results are plain values: the RPC's top-level `Symbol.dispose` is dropped
+ * (React Server Components refuse symbol-keyed props).
  */
 export function batchedRpc(namespace: ActionNamespace, instanceKey: string, action: string, args: unknown): Promise<unknown> {
+  const scope = batchScopes.getStore();
   return new Promise((resolve, reject) => {
-    let byKey = pending.get(namespace);
-    if (!byKey) pending.set(namespace, (byKey = new Map()));
+    const call: PendingCall = { action, args, resolve, reject };
+    // No invocation to share a batch within: this call alone, now.
+    if (!scope) {
+      sendCalls(namespace, instanceKey, [call]);
+      return;
+    }
+    let byKey = scope.pending.get(namespace);
+    if (!byKey) scope.pending.set(namespace, (byKey = new Map()));
     let calls = byKey.get(instanceKey);
     if (!calls) {
       byKey.set(instanceKey, (calls = []));
       const queued = byKey;
       setTimeout(() => flushCalls(namespace, instanceKey, queued), 0);
     }
-    calls.push({ action, args, resolve, reject });
+    calls.push(call);
   });
 }
 
 function flushCalls(namespace: ActionNamespace, instanceKey: string, byKey: Map<string, PendingCall[]>): void {
   const calls = byKey.get(instanceKey) ?? [];
   byKey.delete(instanceKey);
+  sendCalls(namespace, instanceKey, calls);
+}
+
+function sendCalls(namespace: ActionNamespace, instanceKey: string, calls: PendingCall[]): void {
   if (calls.length === 0) return;
   let stub: ActionStub;
   try {

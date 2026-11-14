@@ -52,6 +52,13 @@ const CACHE_DIR_NAME = '.cache/durable-db';
 const STATE_FILE_NAME = 'state.json';
 /** Written by the Vite plugin while a dev server runs (see {@link writeDevServerLock}). */
 export const DEV_SERVER_LOCK_FILE = 'dev-server.json';
+
+/**
+ * What the schema loader names the bundled schema it writes next to the dev
+ * state to import it (`_schema_temp_<timestamp>.mjs`, removed right after):
+ * a file of the cache dir that is no dev state.
+ */
+export const SCHEMA_TEMP_PREFIX = '_schema_temp_';
 const DEV_MIGRATIONS_DIR = 'migrations';
 const DEV_SNAPSHOT_FILE = '_snapshot.json';
 

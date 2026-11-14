@@ -20,6 +20,7 @@ import {
   writeDevServerLock,
   removeDevServerLock,
   DEV_SERVER_LOCK_FILE,
+  SCHEMA_TEMP_PREFIX,
 } from '../cli/state';
 
 // ============================================================================
@@ -519,6 +520,14 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         // dir itself — its creation, which macOS reports after the watcher
         // starts on a fresh project (a state change names the file).
         if (typeof filename === 'string' && (path.basename(filename) === DEV_SERVER_LOCK_FILE || filename === cacheDirName)) {
+          return;
+        }
+        // Nor the bundled schema a schema load writes here to import it: any
+        // process that reads the schemas does (`db status`, `db validate`, a
+        // host's doctor), and reloading the worker for it made a running dev
+        // server answer a request that landed in that moment from
+        // half-evaluated modules.
+        if (typeof filename === 'string' && path.basename(filename).startsWith(SCHEMA_TEMP_PREFIX)) {
           return;
         }
         if (state.isWithinSelfDevStateWriteWindow()) {

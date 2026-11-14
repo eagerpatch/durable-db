@@ -163,6 +163,41 @@ export function findAmbiguities(prevSnapshot: Snapshot, curSnapshot: Snapshot): 
   return ambiguities;
 }
 
+/**
+ * The questions that have one answer: a table that lost exactly one column
+ * and gained exactly one that is declared the same way — its type, whether it
+ * may be null, its default, everything but the name — and a schema that lost
+ * exactly one table and gained exactly one with the same columns. That is a
+ * rename: the name changed and nothing else did. Taking it for a drop and a
+ * create would lose the data for a change nobody made; so it is answered
+ * without asking, and said (`renamesFromStatements()` of what was generated).
+ * Two candidates, or one that changed in more than its name, stay a question.
+ */
+export function obviousRenames(prevSnapshot: Snapshot, curSnapshot: Snapshot, ambiguities: SchemaAmbiguity[] = findAmbiguities(prevSnapshot, curSnapshot)): RenameAnswer[] {
+  const prev = shape(prevSnapshot);
+  const cur = shape(curSnapshot);
+  const but = (column: SnapshotColumn): string => JSON.stringify({ ...column, name: '' });
+  const answers: RenameAnswer[] = [];
+  for (const ambiguity of ambiguities) {
+    if (ambiguity.created.length !== 1 || ambiguity.deleted.length !== 1) continue;
+    const from = ambiguity.deleted[0]!;
+    const to = ambiguity.created[0]!;
+    if (ambiguity.kind === 'column') {
+      const was = prev.tables[ambiguity.table!]?.columns[from];
+      const now = cur.tables[ambiguity.table!]?.columns[to];
+      if (was && now && but(was) === but(now)) answers.push({ kind: 'column', table: ambiguity.table!, from, to });
+    } else if (ambiguity.kind === 'table') {
+      const was = Object.values(prev.tables[from]?.columns ?? {}).map(but).sort();
+      const now = Object.values(cur.tables[to]?.columns ?? {}).map(but).sort();
+      const names = (columns: Record<string, SnapshotColumn> | undefined) => Object.keys(columns ?? {}).sort().join(',');
+      if (was.length > 0 && JSON.stringify(was) === JSON.stringify(now) && names(prev.tables[from]?.columns) === names(cur.tables[to]?.columns)) {
+        answers.push({ kind: 'table', from, to });
+      }
+    }
+  }
+  return answers;
+}
+
 /** One line per ambiguity: `products: summary added, description removed`. */
 export function describeAmbiguity(ambiguity: SchemaAmbiguity): string {
   const where = ambiguity.kind === 'column' ? `${ambiguity.table}: ` : `${ambiguity.kind}s: `;

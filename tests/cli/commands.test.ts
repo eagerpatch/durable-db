@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { push, pushOne } from '../../src/cli/push';
-import { generate, generateOne, UnsafeMigrationError } from '../../src/cli/generate';
+import { generate, generateOne, MigrationFailsOnRowsError, UnsafeMigrationError } from '../../src/cli/generate';
 import { reset, resetAndPush, DevServerRunningError } from '../../src/cli/reset';
 import { status, formatStatus } from '../../src/cli/status';
 import { validate } from '../../src/cli/validate';
@@ -679,25 +679,48 @@ export const { action } = defineDatabase({ schema: { reviews } });
       writeProject('  summary: text().notNull(),');
     }
 
-    it('status reports changes pending that need rename resolution, not "up to date"', async () => {
+    /** One name gone and two new: which of them it became is a question nobody but the author can answer. */
+    async function generateAmbiguous() {
+      writeProject('  description: text().notNull(),');
+      await generate(ctx(), { name: 'init', interactive: false });
+      writeProject('  summary: text().notNull(),\n  blurb: text(),');
+    }
+
+    it('a rename that is one needs no answer: one name gone, one new, declared the same — generate writes the RENAME', async () => {
       await generateInitial();
+
+      const pending = (await status(ctx())).databases.find((db) => db.name === 'catalog')!;
+      expect(pending.needsRenameResolution).toEqual([]);
+      expect(pending.pendingStatements).toEqual(['ALTER TABLE `products` RENAME COLUMN "description" TO "summary";']);
+      const [waiting] = await validate({ ...ctx(), database: 'catalog' });
+      expect(waiting.pendingWarnings).toEqual(['not yet generated: products.description=summary — a rename: the data is kept']);
+
+      const [catalog] = await generate(ctx(), { name: 'rename', database: 'catalog', interactive: false });
+      expect(catalog.statements).toEqual(['ALTER TABLE `products` RENAME COLUMN "description" TO "summary";']);
+      expect(catalog.warnings).toEqual([]);
+      // On rows too: the values are there under the new name.
+      expect((await validate({ ...ctx(), database: 'catalog' }))[0]).toMatchObject({ migrationsValid: true, schemaMatches: true, rowsWarnings: [] });
+    });
+
+    it('status reports changes pending that need rename resolution, not "up to date"', async () => {
+      await generateAmbiguous();
 
       const result = await status(ctx());
       const catalog = result.databases.find((db) => db.name === 'catalog')!;
 
       expect(catalog.hasUncommittedChanges).toBe(true);
       expect(catalog.needsRenameResolution).toEqual([
-        { kind: 'column', table: 'products', created: ['summary'], deleted: ['description'] },
+        { kind: 'column', table: 'products', created: ['summary', 'blurb'], deleted: ['description'] },
       ]);
       const text = formatStatus(result);
       expect(text).toContain('Changes pending — needs rename resolution');
-      expect(text).toContain('products: summary added, description removed');
+      expect(text).toContain('products: summary, blurb added, description removed');
       expect(text).toContain('--rename products.description=summary');
       expect(text).not.toMatch(/catalog[\s\S]*Schema is up to date[\s\S]*reviews/);
     });
 
     it('push and generate name the TTY requirement and the answers, and write nothing', async () => {
-      await generateInitial();
+      await generateAmbiguous();
       const migrationsBefore = fs.readdirSync(path.join(tempDir, 'migrations', 'catalog'));
 
       for (const run of [
@@ -753,6 +776,96 @@ export const { action } = defineDatabase({ schema: { reviews } });
       await expect(
         generate(ctx(), { renames: ['products.title=name', 'products.description=summary'], interactive: false })
       ).rejects.toThrow('--rename products.title=name matches no pending change');
+    });
+  });
+
+  describe('on a database that has rows', () => {
+    const dir = () => path.join(tempDir, 'migrations', 'catalog');
+    const sqlFiles = () => fs.readdirSync(dir()).filter((file) => file.endsWith('.sql')).sort();
+
+    /** `sku` may be empty; then the schema says it may not. */
+    async function requireSku() {
+      writeProject('  name: text().notNull(),\n  sku: text(),');
+      await generate(ctx(), { name: 'init', interactive: false });
+      writeProject('  name: text().notNull(),\n  sku: text().notNull(),');
+    }
+
+    it('generate refuses a migration that fails where a row holds what the old schema allowed, writing nothing', async () => {
+      await requireSku();
+      const before = fs.readdirSync(dir());
+
+      const error = await generate(ctx(), { name: 'sku', interactive: false }).catch((e) => e);
+
+      expect(error).toBeInstanceOf(MigrationFailsOnRowsError);
+      expect(error.message).toContain('Refusing to write a migration that is not safe on a database that has rows');
+      expect(error.message).toMatch(/catalog: it fails on a database that has rows — .*NOT NULL constraint failed: __new_products\.sku/);
+      expect(error.message).toContain('UPDATE … SET … WHERE … IS NULL');
+      expect(error.message).toContain('generate --force, edit the migration, then db validate');
+      expect(fs.readdirSync(dir())).toEqual(before);
+    });
+
+    it('generate --force writes it — and validate refuses it until the migration repairs the rows', async () => {
+      await requireSku();
+      const [catalog] = await generate(ctx(), { name: 'sku', database: 'catalog', force: true, interactive: false });
+      expect(catalog.hasChanges).toBe(true);
+      expect(catalog.warnings.join('\n')).toContain('db validate refuses it until the migration repairs the rows');
+
+      const [refused] = await validate({ ...ctx(), database: 'catalog' });
+      expect(refused.migrationsValid).toBe(false);
+      expect(refused.errors).toEqual([expect.objectContaining({ migration: catalog.migrationName, rows: expect.objectContaining({ kind: 'fails' }) })]);
+      expect(refused.errors[0].error).toMatch(/NOT NULL constraint failed/);
+      // The SQL itself is fine: an empty database takes it, and the schema it leaves is the one declared.
+      expect(refused.schemaMatches).toBe(true);
+      expect((await validate({ ...ctx(), database: 'catalog', rows: false }))[0].migrationsValid).toBe(true);
+
+      // The repair, written into the migration before the statement that fails.
+      const file = path.join(dir(), `${catalog.migrationName}.sql`);
+      fs.writeFileSync(file, "UPDATE `products` SET `sku` = '' WHERE `sku` IS NULL;\n\n" + fs.readFileSync(file, 'utf-8'));
+      const [repaired] = await validate({ ...ctx(), database: 'catalog' });
+      expect(repaired.migrationsValid).toBe(true);
+      expect(repaired.errors).toEqual([]);
+      expect(repaired.rowsWarnings).toEqual([]);
+    });
+
+    it('validate --accept records what was looked at and let through, next to the snapshot', async () => {
+      await requireSku();
+      const [catalog] = await generate(ctx(), { name: 'sku', database: 'catalog', force: true, interactive: false });
+
+      const [accepted] = await validate({ ...ctx(), database: 'catalog', accept: true });
+      expect(accepted.migrationsValid).toBe(true);
+      expect(accepted.rowsWarnings).toEqual([expect.stringMatching(new RegExp(`^accepted: ${catalog.migrationName} fails on a database that has rows`))]);
+      const recorded = JSON.parse(fs.readFileSync(path.join(dir(), '_accepted.json'), 'utf-8'));
+      expect(Object.keys(recorded)).toEqual([catalog.migrationName]);
+
+      // It stays accepted — and a migration is not: the file names what it lets through.
+      const [again] = await validate({ ...ctx(), database: 'catalog' });
+      expect(again.migrationsValid).toBe(true);
+      expect(again.rowsWarnings).toHaveLength(1);
+      expect(sqlFiles()).toHaveLength(2);
+    });
+
+    it('generate refuses a unique column over rows that repeat, and takes a change rows do not mind', async () => {
+      writeProject('  name: text().notNull(),');
+      await generate(ctx(), { name: 'init', interactive: false });
+
+      writeProject('  name: text().notNull().unique(),');
+      const error = await generate(ctx(), { name: 'unique', interactive: false }).catch((e) => e);
+      expect(error).toBeInstanceOf(MigrationFailsOnRowsError);
+      expect(error.message).toMatch(/UNIQUE constraint failed/);
+
+      writeProject('  name: text().notNull(),\n  note: text(),');
+      const [catalog] = await generate(ctx(), { name: 'note', database: 'catalog', interactive: false });
+      expect(catalog.hasChanges).toBe(true);
+      expect(catalog.warnings).toEqual([]);
+    });
+
+    it('validate says what a dev migration would do to rows as a warning: generate is what refuses it', async () => {
+      await requireSku();
+      await push({ ...ctx(), interactive: false });
+
+      const [catalog] = await validate({ ...ctx(), database: 'catalog' });
+      expect(catalog.migrationsValid).toBe(true);
+      expect(catalog.rowsWarnings).toEqual([expect.stringMatching(/^not yet generated: fails on a database that has rows — .*NOT NULL constraint failed/)]);
     });
   });
 

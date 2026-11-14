@@ -232,6 +232,8 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
     .description('Dry-run migrations against local SQLite to catch errors before deployment')
     .option('--database <db>', 'Only validate this database')
     .option('--no-dev', 'Skip dev migrations, only validate production')
+    .option('--no-rows', 'Skip the replay on a database that has rows')
+    .option('--accept', 'Record what the replay on rows finds in the production migrations as looked at and let through (_accepted.json)')
     .option('-d, --databases-dir <dir>', 'Directory containing databases (default: src/databases)')
     .option('-m, --migrations-dir <dir>', 'Directory for production migrations (default: migrations)')
     .option('-v, --verbose', 'Show each migration as it is applied')
@@ -242,6 +244,8 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           verbose: options.verbose,
           noDev: !options.dev,
           database: options.database,
+          rows: options.rows !== false,
+          accept: options.accept === true,
         });
 
         if (results.length === 0) {
@@ -250,6 +254,7 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
         }
 
         let allValid = true;
+        let onRows = false;
         for (const r of results) {
           const status = r.migrationsValid ? '✓' : '✗';
           const devNote = r.includesDevMigrations ? ' (includes dev migrations)' : '';
@@ -258,7 +263,8 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
           if (!r.migrationsValid) {
             allValid = false;
             for (const err of r.errors) {
-              console.error(`  ✗ ${err.migration}[${err.chunk}]: ${err.error}`);
+              if (err.rows) onRows = true;
+              console.error(err.rows ? `  ✗ ${err.migration}: ${err.error}` : `  ✗ ${err.migration}[${err.chunk}]: ${err.error}`);
               if (options.verbose) {
                 console.error(`    Statement: ${err.statement}`);
               }
@@ -275,9 +281,16 @@ export function registerDbCommands(program: Command, defaults: DbCommandDefaults
             console.log(`  Schema matches ✓`);
           }
 
-          for (const warning of r.pendingWarnings) {
+          for (const warning of [...r.pendingWarnings, ...r.rowsWarnings]) {
             console.warn(`  ⚠ ${warning}`);
           }
+        }
+
+        if (onRows) {
+          console.error(
+            '\nEvery tenant\'s database migrates on its own, after the deploy: a migration has to pass on any rows the schema before it allows.\n' +
+            'Repair the rows in the migration, before the statement that fails. Where it already ran everywhere, or the rows it fails on cannot exist: db validate --accept'
+          );
         }
 
         if (!allValid) {

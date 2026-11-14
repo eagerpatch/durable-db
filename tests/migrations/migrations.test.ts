@@ -253,13 +253,43 @@ describe('generateMigrationStatements rename resolution', () => {
   }
 
   it('throws SchemaRenameRequiredError instead of drizzle-kit\'s TTY error when it cannot prompt', async () => {
-    const { prev, cur } = await renameDiff();
+    // Two new names for one that is gone: which of them it became is a question.
+    const { prev } = await renameDiff();
+    const cur = await generateSnapshotFromSchema({
+      products: sqliteTable('products', { ...columns, summary: text().notNull(), blurb: text().notNull(), price: integer() }),
+    });
     const error = await generateMigrationStatements(prev, cur, { interactive: false }).catch((e) => e);
     expect(error).toBeInstanceOf(SchemaRenameRequiredError);
     expect(error.ambiguities).toEqual([
-      { kind: 'column', table: 'products', created: ['summary'], deleted: ['description'] },
+      { kind: 'column', table: 'products', created: ['summary', 'blurb'], deleted: ['description'] },
     ]);
     expect(error.message).not.toContain('Interactive prompts require a TTY terminal (process.stdin');
+  });
+
+  it('takes a rename that is one without asking: one name gone, one new, declared the same — the data is kept', async () => {
+    const { prev, cur } = await renameDiff();
+    const statements = await generateMigrationStatements(prev, cur, { interactive: false });
+    expect(statements).toEqual(['ALTER TABLE `products` RENAME COLUMN "description" TO "summary";']);
+    expect(await applyWithRow(prev, statements)).toEqual([{ id: 'p1', summary: 'A widget', price: 100 }]);
+  });
+
+  it('still asks where more than the name changed: that may be another column', async () => {
+    const { prev } = await renameDiff();
+    // `description` was required; `summary` may be empty.
+    const cur = await generateSnapshotFromSchema({
+      products: sqliteTable('products', { ...columns, summary: text(), price: integer() }),
+    });
+    await expect(generateMigrationStatements(prev, cur, { interactive: false })).rejects.toBeInstanceOf(SchemaRenameRequiredError);
+  });
+
+  it('takes a table renamed with its columns as they were, and asks about one that changed with it', async () => {
+    const items = { ...columns, name: text().notNull() };
+    const prev = await generateSnapshotFromSchema({ items: sqliteTable('items', items) });
+    const renamed = await generateSnapshotFromSchema({ products: sqliteTable('products', items) });
+    expect(await generateMigrationStatements(prev, renamed, { interactive: false })).toEqual(['ALTER TABLE `items` RENAME TO `products`;']);
+
+    const changed = await generateSnapshotFromSchema({ products: sqliteTable('products', { ...items, price: integer() }) });
+    await expect(generateMigrationStatements(prev, changed, { interactive: false })).rejects.toBeInstanceOf(SchemaRenameRequiredError);
   });
 
   it('applies a --rename answer without asking, keeping the data', async () => {

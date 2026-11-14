@@ -5,6 +5,7 @@ import {
 import { createRequire } from 'node:module'
 import {
   applyRenames,
+  obviousRenames,
   findAmbiguities,
   parseRenameSpec,
   SchemaRenameRequiredError,
@@ -18,6 +19,7 @@ export type Snapshot = DrizzleSQLiteSnapshotJSON;
 
 export {
   applyRenames,
+  obviousRenames,
   describeAmbiguity,
   exampleRenames,
   findAmbiguities,
@@ -128,10 +130,22 @@ export async function generateMigrationStatements(
   resolution: MigrationResolution = {}
 ): Promise<string[]> {
   const answers = (resolution.renames ?? []).map((r) => (typeof r === 'string' ? parseRenameSpec(r) : r));
-  const renamed = answers.length > 0
+  let renamed = answers.length > 0
     ? applyRenames(from, to, answers)
     : { snapshot: from, statements: [] as string[] };
-  const ambiguities = findAmbiguities(renamed.snapshot, to);
+  let ambiguities = findAmbiguities(renamed.snapshot, to);
+
+  // A question with one answer is not asked: one column (or table) gone, one
+  // new, declared the same but for its name — a rename, and the data is kept.
+  // `noRenames` says otherwise, for all of them.
+  if (ambiguities.length > 0 && !resolution.noRenames) {
+    const obvious = obviousRenames(renamed.snapshot, to, ambiguities);
+    if (obvious.length > 0) {
+      const taken = applyRenames(renamed.snapshot, to, obvious);
+      renamed = { snapshot: taken.snapshot, statements: [...renamed.statements, ...taken.statements] };
+      ambiguities = findAmbiguities(renamed.snapshot, to);
+    }
+  }
 
   if (ambiguities.length === 0) {
     return [...renamed.statements, ...(await generateSQLiteMigration(renamed.snapshot, to))];

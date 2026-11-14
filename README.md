@@ -455,21 +455,28 @@ db generate --database main add_posts_table
 | `--database <db>` | Only generate for this specific database |
 | `--rename <table.old=new>` | Answer a rename question without a prompt (repeatable). See [Renames](#renames) |
 | `--no-renames` | Answer every remaining rename question with "create" (the old column/table is dropped) |
-| `--force` | Write the migration even when a statement fails on every table that has rows |
+| `--force` | Write the migration even when it is not safe on a database that has rows (`db validate` still refuses it) |
 
 **What it does:**
 
 1. Compares your current Drizzle schema against the production snapshot (`_snapshot.json`)
 2. Generates SQL statements for the diff (asking about renames — see [Renames](#renames))
-3. Checks what they do to a database that has rows (below) — before any file is written
+3. Checks what they do to a database that has rows (below): reads the schema change, then replays the migration on rows — before any file is written
 4. Writes a timestamped `.sql` file to the configured `migrationsDir`
 5. Updates the production snapshot with a new ID and `prevId` chain
 6. Clears dev state for this database (the dev migrations are now superseded by the production migration)
 
-**Unsafe statements.** Per-tenant databases migrate lazily, on each tenant's first request after a deploy — so a statement that only fails on a table with rows surfaces in production, once per tenant with data, and that tenant's database stays broken until a fixed migration ships. `db validate` cannot catch it: it replays the migrations on an empty database. So `generate`:
+**Unsafe statements.** Per-tenant databases migrate lazily, on each tenant's first request after a deploy — so a statement that only fails on a table with rows surfaces in production, once per tenant with data, and that tenant's database stays broken until a fixed migration ships. Nobody can look into every tenant's database first, so a migration has to pass on **any rows the schema before it allows**. `generate` checks that twice, and writes nothing when it does not hold:
 
-- **refuses** (exit code 1, nothing written) a column added `NOT NULL` without a default: `products.currency is added NOT NULL without a default — the migration fails on every table that has rows: add .default(...) or add it nullable and backfill`. `--force` writes it anyway (a table known to be empty everywhere). See [Adding a required column](#adding-a-required-column);
-- **warns** (`⚠`) when a column or table is dropped (its data is lost) or a column becomes `NOT NULL` (fails where a row holds `NULL`).
+- It **reads the schema change**: a column added `NOT NULL` without a default is refused (`products.currency is added NOT NULL without a default — the migration fails on every table that has rows: add .default(...) or add it nullable and backfill`; see [Adding a required column](#adding-a-required-column)); a dropped column or table, a column made `NOT NULL` and a foreign key added to a table that exists are warned about (`⚠`).
+- It **replays the migration on a database that has rows** (see [On a database that has rows](#on-a-database-that-has-rows)) and refuses one that fails there, or takes rows or values along:
+
+  ```
+  Refusing to write a migration that is not safe on a database that has rows:
+    main: it fails on a database that has rows — FOREIGN KEY constraint failed (chunk 0, statement 2: INSERT INTO `__new_cart_items`…): a row references a row that is not there — remove or repair those rows in this migration, before the statement: DELETE FROM … WHERE … NOT IN (SELECT …)
+  ```
+
+`--force` writes the migration anyway — for one you are about to repair by hand (add the `UPDATE` or `DELETE` before the statement that fails), or for tables known to be empty everywhere. Writing is not accepting: `db validate` refuses it until the migration passes on rows or the finding is accepted there.
 
 **Output example:**
 
@@ -583,6 +590,8 @@ db validate --verbose
 |------|-------------|
 | `--database <db>` | Only validate this specific database |
 | `--no-dev` | Skip dev migrations, only validate production migrations |
+| `--no-rows` | Skip the replay on a database that has rows |
+| `--accept` | Record what the replay on rows finds in the production migrations as looked at and let through |
 
 **What it does:**
 
@@ -591,9 +600,8 @@ db validate --verbose
 3. Builds the expected schema separately from the Drizzle definition
 4. Compares the migrated schema against the expected schema to detect drift
 5. Reports SQL errors, foreign key violations, or schema mismatches
-6. Warns (`⚠ not yet generated: …`) about what the schema change `db generate` has not written yet would do to a database that has rows — the checks `generate` applies (a `NOT NULL` column without a default, dropped columns and tables, names that may be renames)
-
-The replay runs on an **empty** database, so it proves a migration is valid SQL, not that it succeeds on a table with rows. Committed migrations are not re-checked for that: validate cannot know which of them already ran where.
+6. Replays the migrations once more **on a database that has rows** ([below](#on-a-database-that-has-rows)): a production migration that fails there, or takes rows or values along, is an error
+7. Warns (`⚠ not yet generated: …`) about what the schema change `db generate` has not written yet would do to a database that has rows — the checks `generate` applies (a `NOT NULL` column without a default, dropped columns and tables, names that may be renames), and what a dev migration does on rows
 
 **Output example (success):**
 
@@ -607,6 +615,11 @@ The replay runs on an **empty** database, so it proves a migration is valid SQL,
 ```
 ✗ main: 5 migration(s)
   ✗ 20240315123045_bad[0]: near "INVALID": syntax error
+```
+
+```
+✗ main: 5 migration(s)
+  ✗ 20240315123045_sku: fails on a database that has rows — NOT NULL constraint failed: __new_products.sku (chunk 0, statement 2: INSERT INTO `__new_products`…): a row holds NULL there — give those rows a value in this migration, before the statement: UPDATE … SET … WHERE … IS NULL
 ```
 
 Schema drift (migrations ran cleanly but produce a different schema than your Drizzle definition) is reported as:
@@ -625,7 +638,9 @@ Schema drift (migrations ran cleanly but produce a different schema than your Dr
 
 ### Renames
 
-drizzle-kit cannot tell a renamed column (or table) from a dropped one plus a new one. When a table has both a new and a vanished column — or the schema both a new and a vanished table — its diff asks:
+drizzle-kit cannot tell a renamed column (or table) from a dropped one plus a new one. durable-db can, where there is one way to read it: **a table that lost exactly one column and gained exactly one declared the same way** — type, nullability, default, everything but the name — **was renamed**, and so was a table that is gone while a new one has its columns. `push` and `generate` write the rename (`` ALTER TABLE `users` RENAME COLUMN "bio" TO "about"; ``) without asking, in a terminal or not, and the data is kept. Taking it for a drop and a create would lose the data for a change nobody made; `--no-renames` says that is what you meant.
+
+What is left is a real question — two new names for one that is gone, or a column that changed in more than its name. There drizzle-kit's diff asks:
 
 ```
 Is about column in users table created or renamed from another column?
@@ -720,6 +735,39 @@ CREATE TABLE posts (id TEXT PRIMARY KEY, author_id TEXT REFERENCES users(id));
 Each chunk is tracked independently in the `__migrations` table. If a Durable Object restarts mid-migration, it resumes from the last completed chunk rather than re-running from the start.
 
 Concurrent first calls to a Durable Object share one migration run: requests that arrive while it migrates wait for it instead of applying the same statements again.
+
+### On a database that has rows
+
+A migration replayed on an empty database proves it is valid SQL. What goes wrong in production goes wrong on rows — and every tenant's database migrates on its own, after the deploy, where nobody is watching. So `db generate` and `db validate` replay each migration a second time, on a database filled with rows that are valid for the schema as it was and as unkind as that schema lets them be:
+
+- every nullable column `NULL` in one row — a column made `NOT NULL` fails;
+- the same values in two rows wherever nothing says they are unique — a new unique index fails;
+- values no other table has in columns no foreign key ties down — a new foreign key fails;
+- rows in every table that references another — a rebuild that takes them along shows.
+
+It runs as a Durable Object runs a migration: foreign keys on and staying on (`PRAGMA foreign_keys=OFF` does nothing there, which is why a rebuild that adds a foreign key fails in production and passes anywhere else), each chunk in a transaction, the rows that reference a rebuilt table kept through its `DROP`.
+
+What it reports, per migration:
+
+| Finding | Meaning |
+|---------|---------|
+| `fails on a database that has rows — …` | A statement failed: the SQLite error, the statement, and what to do |
+| `N of the M rows of <table> are gone after it` | Rows are lost and no statement of the migration deletes them |
+| `<table>.<column> is empty after it in N row(s)` | A rebuild did not copy a column that is still there |
+
+A rename keeps its rows and values under the new name, and is no finding. A `DELETE FROM` or `UPDATE` written into the migration is its author's: rows it removes and values it changes are not reported.
+
+**The fix is in the migration.** Make the rows fit before the statement that needs them to:
+
+```sql
+UPDATE `products` SET `sku` = '' WHERE `sku` IS NULL;
+
+--> breakpoint
+
+-- … the rebuild that makes sku NOT NULL
+```
+
+Then `db validate` passes. Where a finding cannot happen — the migration already ran everywhere, or the rows it fails on cannot exist — accept it: `db validate --accept` writes it to `_accepted.json` next to the snapshot (by migration and finding, so a new finding in the same migration is still an error, and the file shows in review what was let through). A table no row could be made for (a `CHECK` the made-up values do not meet) is said, and not checked.
 
 ### Adding a required column
 
@@ -1241,7 +1289,7 @@ related('customers', 'invoices', {
 });
 ```
 
-**Filtering.** `where` says which rows of a `many` to read — a condition on the related table, written with Kysely's expression builder and typed from the schema. It applies before `limit`, and its values are bound like those of any condition:
+**Filtering.** `where` says which rows of a relation to read — a condition on the related table, written with Kysely's expression builder and typed from the schema. On a `many` it applies before `limit`. On a `one` it says whether the row the foreign key leads to is read at all: where it does not hold the relation answers `null`, also for a foreign key that is never null — and the type says so (`related('invoices', 'customer', { columns: ['name'], where: (eb) => eb('vip', '=', true) })` is `{ name: string } | null`). Its values are bound like those of any condition:
 
 ```ts
 related('invoices', 'invoiceLines', {

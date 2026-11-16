@@ -62,6 +62,9 @@ type Nested<W> = W extends readonly RelatedExpression<string, string, unknown>[]
 /** A `one` answers its row (or null, when the foreign key may be null), a `many` a list. */
 type Value<Rel, Item> = Rel extends { kind: 'one'; nullable: false } ? Item : Rel extends { kind: 'one' } ? Item | null : Item[];
 
+/** What the options say of the rows: a `where` on a `one` makes the row it leads to one that may not be there. */
+type Conditioned<Rel, V, O> = Rel extends { kind: 'one' } ? (O extends { where: (...args: never[]) => unknown } ? V | null : V) : V;
+
 /**
  * Which rows of a `many` to read: a condition on the related table `TK`,
  * written with Kysely's expression builder — `(eb) => eb('quantity', '>', 0)`.
@@ -78,11 +81,14 @@ export interface RelatedOptions<C extends string, W, K extends string = C, E = E
   /** A `many` only: at most this many rows per parent. */
   limit?: number;
   /**
-   * A `many` only: which of its rows — a condition on the related table, by
-   * Kysely's expression builder: `(eb) => eb('quantity', '>', 0)`. Its columns
-   * are named alone or after the table (`'invoiceLines.quantity'`); another
-   * table is read in a subquery (`eb.exists(eb.selectFrom(…))`), which names
-   * the related row's columns after the table. It applies before `limit`.
+   * Which of its rows — a condition on the related table, by Kysely's
+   * expression builder: `(eb) => eb('quantity', '>', 0)`. Its columns are
+   * named alone or after the table (`'invoiceLines.quantity'`); another table
+   * is read in a subquery (`eb.exists(eb.selectFrom(…))`), which names the
+   * related row's columns after the table. On a `many` it applies before
+   * `limit`. On a `one` it says whether the row the foreign key leads to is
+   * read at all: where it does not hold, the relation answers null — also
+   * for a foreign key that is never null, and the type says so.
    */
   where?: (eb: E) => Expression<SqlBool>;
 }
@@ -106,19 +112,31 @@ export interface Related<S extends AnySchema> {
     R extends keyof Relations<S>[TK] & string,
     C extends keyof Row<S, TargetOf<Relations<S>[TK][R]>> & string,
     W extends readonly RelatedExpression<TargetOf<Relations<S>[TK][R]> & string, string, unknown>[] = [],
-  >(
-    table: TK,
-    relation: R,
-    options: RelatedOptions<
+    const O extends RelatedOptions<
+      C,
+      W,
+      keyof Row<S, TargetOf<Relations<S>[TK][R]>> & string,
+      ExpressionBuilder<DrizzleToKysely<S>, TargetOf<Relations<S>[TK][R]> & keyof S>
+    > = RelatedOptions<
       C,
       W,
       keyof Row<S, TargetOf<Relations<S>[TK][R]>> & string,
       ExpressionBuilder<DrizzleToKysely<S>, TargetOf<Relations<S>[TK][R]> & keyof S>
     >,
+  >(
+    table: TK,
+    relation: R,
+    options: O &
+      RelatedOptions<
+        C,
+        W,
+        keyof Row<S, TargetOf<Relations<S>[TK][R]>> & string,
+        ExpressionBuilder<DrizzleToKysely<S>, TargetOf<Relations<S>[TK][R]> & keyof S>
+      >,
   ): RelatedExpression<
     TK,
     R,
-    Value<Relations<S>[TK][R], Simplify<Pick<Row<S, TargetOf<Relations<S>[TK][R]>>, C> & Nested<W>>>
+    Conditioned<Relations<S>[TK][R], Value<Relations<S>[TK][R], Simplify<Pick<Row<S, TargetOf<Relations<S>[TK][R]>>, C> & Nested<W>>>, O>
   >;
 }
 
@@ -256,7 +274,7 @@ function render(spec: RelatedSpec, outer: string, depth: number): RawBuilder<unk
   const matches = (alias: string) => sql`${sql.ref(`${alias}.${relation.foreign}`)} = ${sql.ref(`${outer}.${relation.local}`)}`;
 
   if (relation.kind === 'one') {
-    return sql`(select ${object} from ${target} as ${sql.ref(row)} where ${matches(row)} limit 1)`;
+    return sql`(select ${object} from ${target} as ${sql.ref(row)} where ${matches(row)}${filter(spec, row)} limit 1)`;
   }
   if (spec.orderBy.length === 0 && spec.limit === undefined) {
     return sql`(select json_group_array(${object}) from ${target} as ${sql.ref(row)} where ${matches(row)}${filter(spec, row)})`;
@@ -373,9 +391,9 @@ function specOf(schema: AnySchema, table: string, name: string, arg: unknown): R
   }
   const { limit } = options;
   if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 0)) throw new TypeError(`${where}: limit is a whole number, 0 or more.`);
-  // A condition on the one row a foreign key leads to would make a relation that is always there one that may not be.
-  if (relation.kind === 'one' && (orderBy.length > 0 || limit !== undefined || options.where !== undefined)) {
-    throw new TypeError(`${where} leads to one row: orderBy, limit and where are for a relation that leads to many.`);
+  // One row has no order and no limit. A condition it may have: then the row is read only where it holds.
+  if (relation.kind === 'one' && (orderBy.length > 0 || limit !== undefined)) {
+    throw new TypeError(`${where} leads to one row: orderBy and limit are for a relation that leads to many.`);
   }
 
   let condition: OperationNode | undefined;

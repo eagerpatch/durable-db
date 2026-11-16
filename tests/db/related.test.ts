@@ -404,6 +404,47 @@ describe("a relation's where", () => {
     ]);
   });
 
+  it('on a one says whether the row it leads to is read at all: null where it does not hold, whatever the foreign key', async () => {
+    const rows = await t.db
+      .selectFrom('invoices')
+      .select([
+        'invoices.id',
+        // customerId is never null — and still the customer is read only where it is a vip.
+        related('invoices', 'customer', { columns: ['name'], where: (eb) => eb('vip', '=', true) }),
+        related('invoices', 'customer', ['name']).as('billedTo'),
+      ])
+      .orderBy('invoices.id')
+      .execute();
+
+    expect(rows).toEqual([
+      { id: 'i1', customer: { name: 'Bolaget AB' }, billedTo: { name: 'Bolaget AB' } },
+      { id: 'i2', customer: { name: 'Bolaget AB' }, billedTo: { name: 'Bolaget AB' } },
+      { id: 'i3', customer: null, billedTo: { name: 'Firman HB' } },
+    ]);
+  });
+
+  it('filters a one inside with, and binds its values like any condition', async () => {
+    const rows = await t.db
+      .selectFrom('invoices')
+      .select([
+        'invoices.id',
+        related('invoices', 'invoiceLines', {
+          columns: ['id'],
+          orderBy: { id: 'asc' },
+          limit: 1,
+          with: [related('invoiceLines', 'invoice', { columns: ['number'], where: (eb) => eb('number', '>', 1) })],
+        }),
+      ])
+      .orderBy('invoices.id')
+      .execute();
+
+    expect(rows).toEqual([
+      { id: 'i1', invoiceLines: [{ id: 'l1', invoice: null }] },
+      { id: 'i2', invoiceLines: [{ id: 'l4', invoice: { number: 2 } }] },
+      { id: 'i3', invoiceLines: [] },
+    ]);
+  });
+
   it('takes a column alone or after its table, and what Kysely builds of them', async () => {
     expect(await lines((eb) => eb('invoiceLines.quantity', '>', 1))).toEqual([
       { id: 'i1', invoiceLines: [{ id: 'l1' }, { id: 'l3' }] },
@@ -602,12 +643,7 @@ describe('what related() refuses', () => {
     ['an order on a column the target does not have', () => loose('invoices', 'invoiceLines', { columns: ['id'], orderBy: { nope: 'asc' } }), /orderBy "nope" is not a column of "invoiceLines"/],
     ['a direction that is none', () => loose('invoices', 'invoiceLines', { columns: ['id'], orderBy: { id: 'up' } }), /orderBy\.id is 'asc' or 'desc'/],
     ['a limit that is no count', () => loose('invoices', 'invoiceLines', { columns: ['id'], limit: -1 }), /limit is a whole number, 0 or more/],
-    ['an order or a limit where one row is read', () => loose('invoices', 'customer', { columns: ['id'], limit: 1 }), /leads to one row/],
-    [
-      'a where where one row is read',
-      () => loose('invoices', 'customer', { columns: ['id'], where: (eb: any) => eb('vip', '=', true) }),
-      /leads to one row: orderBy, limit and where are for a relation that leads to many/,
-    ],
+    ['an order or a limit where one row is read', () => loose('invoices', 'customer', { columns: ['id'], limit: 1 }), /leads to one row: orderBy and limit are for a relation that leads to many/],
     ['a where that is no function', () => loose('invoices', 'invoiceLines', { columns: ['id'], where: { quantity: 1 } }), /where is a function that answers a condition — where: \(eb\) => eb\('<column>', '=', value\)/],
     ['a where that answers no condition', () => loose('invoices', 'invoiceLines', { columns: ['id'], where: () => true }), /where answers a condition/],
     [

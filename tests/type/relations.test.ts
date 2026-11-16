@@ -71,6 +71,18 @@ describe('related()', () => {
     >();
   });
 
+  it('a where on a one makes the row it leads to one that may not be there, whatever the foreign key', () => {
+    // customerId is never null: without a condition the customer is there.
+    expectTypeOf(related('invoices', 'customer', { columns: ['name'] })).toEqualTypeOf<RelatedExpression<'invoices', 'customer', { name: string }>>();
+    expectTypeOf(related('invoices', 'customer', { columns: ['name'], where: (eb) => eb('vip', '=', true) })).toEqualTypeOf<
+      RelatedExpression<'invoices', 'customer', { name: string } | null>
+    >();
+    // A many is a list either way.
+    expectTypeOf(related('customers', 'invoicesAsCustomer', { columns: ['number'], where: (eb) => eb('number', '>', 1) })).toEqualTypeOf<
+      RelatedExpression<'customers', 'invoicesAsCustomer', { number: number }[]>
+    >();
+  });
+
   it('types the rows of the query that selects it', () => {
     const listInvoices = action({
       args: {},

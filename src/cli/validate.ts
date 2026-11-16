@@ -9,13 +9,17 @@ import {
 } from '../migrations/generator';
 import {
   analyzeMigrationRisks,
+  applyRenames,
   describeAmbiguity,
   exampleRenames,
   findAmbiguities,
+  formatRename,
   generateSnapshotFromSchema,
+  obviousRenames,
   snapshotsEqual,
 } from '../migrations/snapshot';
 import { loadDevMigrations } from './state';
+import { accept, readAccepted, replayWithRows, sift, writeAccepted, type RowsFinding } from '../migrations/withRows';
 import { loadSchemaTables, selectDatabases } from './shared';
 import { debugCli } from '../utils/debug';
 
@@ -32,6 +36,18 @@ export interface ValidateContext {
   noDev?: boolean;
   /** Only validate this database */
   database?: string;
+  /**
+   * Skip the replay on a database that has rows (default: it runs). The
+   * replay on an empty one proves the SQL; this one, that it passes on data.
+   */
+  rows?: boolean;
+  /**
+   * Record what the replay on rows finds in the production migrations as
+   * looked at and let through (`_accepted.json` next to the snapshot): for
+   * migrations that already ran everywhere, and for a failure that cannot
+   * happen on the data there is.
+   */
+  accept?: boolean;
 }
 
 export interface ValidateError {
@@ -39,6 +55,8 @@ export interface ValidateError {
   chunk: number;
   statement: string;
   error: string;
+  /** Found by the replay on a database that has rows: the SQL is valid, the migration is not safe. */
+  rows?: RowsFinding;
 }
 
 export interface ValidateResult {
@@ -57,6 +75,14 @@ export interface ValidateResult {
    * database and cannot know which committed migrations already ran where.
    */
   pendingWarnings: string[];
+  /**
+   * What the replay on a database that has rows found and somebody accepted
+   * (`_accepted.json`), what it found in dev migrations (`db generate` will
+   * refuse those), and the tables it could make no row for. What it found in
+   * production migrations and nobody accepted is in `errors`, and makes
+   * `migrationsValid` false.
+   */
+  rowsWarnings: string[];
 }
 
 // ============================================================================
@@ -66,7 +92,7 @@ export interface ValidateResult {
 /** Minimal interface for the subset of the libsql/better-sqlite3 API we use */
 interface SqliteDatabase {
   exec(sql: string): void;
-  prepare(sql: string): { all(...params: any[]): any[] };
+  prepare(sql: string): { all(...params: any[]): any[]; run(...params: any[]): unknown };
   close(): void;
 }
 
@@ -311,21 +337,26 @@ function diffSchemas(fromMigrations: string[], fromSchema: string[]): string[] {
 // ============================================================================
 
 /**
- * Warnings for the schema change `db generate` has not written yet. Renames
- * are unknown until it runs, so a new name next to a vanished one is reported
- * both as a possible rename and with the risks of create + drop.
+ * Warnings for the schema change `db generate` has not written yet. A rename
+ * that is one — a name changed, nothing else — is what generate will write,
+ * and no risk. What is left unanswered is unknown until it runs, so a new name
+ * next to a vanished one is reported both as a possible rename and with the
+ * risks of create + drop.
  */
 async function pendingChangeWarnings(
   migrationsDir: string,
   schema: Record<string, unknown>,
 ): Promise<string[]> {
-  const prod = loadSnapshot(migrationsDir);
+  const production = loadSnapshot(migrationsDir);
   const current = await generateSnapshotFromSchema(schema);
-  if (snapshotsEqual(prod, current)) return [];
+  if (snapshotsEqual(production, current)) return [];
 
+  const obvious = obviousRenames(production, current);
+  const prod = obvious.length > 0 ? applyRenames(production, current, obvious).snapshot : production;
   const warnings = analyzeMigrationRisks(prod, current).map(
     (risk) => `not yet generated: ${risk.message}`
   );
+  for (const rename of obvious) warnings.push(`not yet generated: ${formatRename(rename)} — a rename: the data is kept`);
   for (const ambiguity of findAmbiguities(prod, current)) {
     const example = exampleRenames(ambiguity)[0];
     warnings.push(
@@ -352,6 +383,8 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
     migrationsDir = 'migrations',
     noDev = false,
     database: onlyDatabase,
+    rows = true,
+    accept: acceptFindings = false,
   } = ctx;
 
   // Try to load libsql (better-sqlite3-compatible API)
@@ -380,6 +413,8 @@ export async function validate(ctx: ValidateContext = {}): Promise<ValidateResul
       projectRoot,
       noDev,
       Database,
+      rows,
+      accept: acceptFindings,
     });
     results.push(result);
   }
@@ -391,13 +426,15 @@ interface ValidateDatabaseOptions {
   projectRoot: string;
   noDev: boolean;
   Database: SqliteDatabaseConstructor;
+  rows: boolean;
+  accept: boolean;
 }
 
 async function validateDatabase(
   db: import('../db/types').DatabaseInfo,
   opts: ValidateDatabaseOptions,
 ): Promise<ValidateResult> {
-  const { projectRoot, noDev, Database } = opts;
+  const { projectRoot, noDev, Database, rows, accept: acceptFindings } = opts;
 
   const result: ValidateResult = {
     database: db.name,
@@ -408,6 +445,7 @@ async function validateDatabase(
     migrationCount: 0,
     includesDevMigrations: false,
     pendingWarnings: [],
+    rowsWarnings: [],
   };
 
   // ---- Path A: Migration replay ----
@@ -464,6 +502,34 @@ async function validateDatabase(
           }
         }
       }
+    }
+
+    // ---- On a database that has rows ----
+    // Only what is valid SQL: a migration that fails on an empty database is said above, once.
+    if (rows && result.migrationsValid && sortedNames.length > 0) {
+      const replay = replayWithRows(
+        Database,
+        sortedNames.map((name) => [name, allMigrations.get(name)!] as const),
+      );
+      const ofProduction = replay.findings.filter((finding) => prodMigrations.has(finding.migration));
+      const ofDev = replay.findings.filter((finding) => !prodMigrations.has(finding.migration));
+      let accepted = readAccepted(prodMigrationsDir);
+      if (acceptFindings && ofProduction.length > 0) {
+        accepted = accept(accepted, ofProduction);
+        writeAccepted(prodMigrationsDir, accepted);
+      }
+      const sifted = sift(ofProduction, accepted);
+      for (const finding of sifted.open) {
+        result.migrationsValid = false;
+        result.errors.push({ migration: finding.migration, chunk: finding.chunk ?? 0, statement: finding.statement ?? '', error: finding.message, rows: finding });
+      }
+      for (const finding of sifted.accepted) result.rowsWarnings.push(`accepted: ${finding.migration} ${finding.message}`);
+      // A dev migration is squashed again by the next push; what it does to rows is what `db generate` will refuse.
+      for (const finding of ofDev) result.rowsWarnings.push(`not yet generated: ${finding.message}`);
+      for (const { table, reason } of replay.unseeded) {
+        result.rowsWarnings.push(`no row could be made for ${table} (${reason}): what its migrations do to rows is not checked`);
+      }
+      if (replay.stopped) result.rowsWarnings.push(`the replay on rows stopped at ${replay.stopped.migration}: ${replay.stopped.error}`);
     }
 
     // ---- Path B: Schema from scratch (dual-path comparison) ----

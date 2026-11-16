@@ -62,6 +62,7 @@ export {
   generate,
   generateOne,
   UnsafeMigrationError,
+  MigrationFailsOnRowsError,
 } from './generate';
 
 // Reset command
@@ -90,6 +91,20 @@ export {
   type ValidateResult,
   validate,
 } from './validate';
+
+// Migrations replayed on a database that has rows
+export {
+  replayWithRows,
+  sift,
+  accept,
+  readAccepted,
+  writeAccepted,
+  ACCEPTED_FILE,
+  type RowsFinding,
+  type RowsFindingKind,
+  type RowsReplay,
+  type Accepted,
+} from '../migrations/withRows';
 
 // What discovery read of a database's schema
 export { declaresSchema } from '../vite/modules/parser';

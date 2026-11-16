@@ -1,5 +1,20 @@
 # durable-db
 
+## 0.13.0
+
+### Minor Changes
+
+- a1ba9a0: A rename that is one needs no answer. A table that lost exactly one column and gained exactly one declared the same way — type, nullability, default, everything but the name — was renamed, and so was a table that is gone while a new one has its columns: `push` and `generate` now write the `RENAME` without asking, in a terminal or not, and the data is kept (`obviousRenames()`). Before, each such change stopped a push without a terminal (`SchemaRenameRequiredError`) and asked in one, on every push and again on generate — and the wrong answer dropped the column's data. `--no-renames` still says "create and drop"; two candidates, or a column that changed in more than its name, are still a question. `db status` shows the rename as the pending statement, and `db validate` reports it as a rename instead of a possible data loss.
+- a1ba9a0: Migrations are replayed on a database that has rows. `db validate` replayed them on an empty one, which proves the SQL and nothing about data — and a tenant's database migrates on its own, after the deploy: a column made `NOT NULL` where a row holds `NULL`, a foreign key added where a row references nothing, a unique index over rows that repeat, a rebuild that takes rows along all passed validation and failed (or lost data) in production, once per tenant. Now `db generate` and `db validate` replay each migration a second time on a database filled with rows the schema before it allows — every nullable column `NULL` in a row, the same values in two rows where nothing says unique, values no other table has where no foreign key says otherwise — and run it as a Durable Object does: foreign keys on and staying on (`PRAGMA foreign_keys=OFF` does nothing there), each chunk in a transaction, the rows that reference a rebuilt table kept through its `DROP`.
+  
+  - `db generate` refuses a migration that fails there or takes rows or values along (`MigrationFailsOnRowsError`: the SQLite error, the statement, what to do), writing nothing. `--force` writes it — to be repaired by hand — and does not accept it.
+  - `db validate` reports the same for every production migration as an error (`ValidateError.rows`, `migrationsValid: false`), for a dev migration as a warning (`rowsWarnings`). `--no-rows` skips it.
+  - The fix is in the migration: an `UPDATE` or a `DELETE` before the statement that needs the rows to fit. What cannot happen — a migration that already ran everywhere — is accepted with `db validate --accept`, which records it in `_accepted.json` next to the snapshot, by migration and finding.
+  - Programmatically: `replayWithRows()`, `sift()`, `accept()`, `readAccepted()`, `writeAccepted()` in `durable-db/cli`'s `validate`/`generate`; `validate({ rows, accept })`.
+  
+  An app whose committed migrations fail on rows gets errors from `db validate` after upgrading: repair what has not shipped, and `db validate --accept` the rest once.
+- a1ba9a0: A `where` on a relation that leads to one row: `related('invoices', 'customer', { columns: ['name'], where: (eb) => eb('vip', '=', true) })` reads the customer only where the condition holds and answers `null` where it does not — in the same statement, like a `many`'s. It was refused, since it makes a relation that is always there (a foreign key that is never null) one that may not be; now the type says so: the row is `{ … } | null` whenever a `where` is given. `orderBy` and `limit` are still a `many`'s. For a library that decides per viewer which rows are seen (Lagerverk's graph), this keeps such a relation in the statement of the row it hangs on instead of a statement of its own.
+
 ## 0.12.0
 
 ### Minor Changes

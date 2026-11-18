@@ -98,7 +98,7 @@ function parseObject(def: Record<string, unknown>, ctx: ParseContext): ObjectNod
     if (key === '...') {
       const spread = parseDefinition(value, ctx);
       if (!(spread instanceof ObjectNode)) throw new ParseError(`'...' must spread an object (was ${spread.expression})`);
-      props = mergeProps(props, spread.props);
+      props = mergeProps(props, spread.declaredProps);
       index.push(...spread.index);
       continue;
     }
@@ -129,9 +129,12 @@ function parseObject(def: Record<string, unknown>, ctx: ParseContext): ObjectNod
 }
 
 /** Later props replace earlier ones with the same key (`'...'`, `.merge()`). */
+/** `base` with `over`'s keys: a key both have keeps its place and takes `over`'s prop (like an object spread), new keys follow. */
 export function mergeProps(base: readonly Prop[], over: readonly Prop[]): Prop[] {
-  const keys = new Set(over.map((p) => p.key));
-  return [...base.filter((p) => !keys.has(p.key)), ...over];
+  const byKey = new Map(over.map((p) => [p.key, p]));
+  const merged = base.map((p) => byKey.get(p.key) ?? p);
+  const known = new Set(base.map((p) => p.key));
+  return [...merged, ...over.filter((p) => !known.has(p.key))];
 }
 
 /** `'number = 5'` → `{ def: 'number', value: '5' }`: the top-level `=` that is not `<=`, `>=` or `==`. */
@@ -255,8 +258,8 @@ export function union(branches: readonly Node[]): Node {
 /** `a & b`: one object of both's keys, one base with both's rules, or both checks in turn. */
 export function intersect(a: Node, b: Node): Node {
   if (a instanceof ObjectNode && b instanceof ObjectNode) {
-    const props = [...a.props];
-    for (const prop of b.props) {
+    const props = [...a.declaredProps];
+    for (const prop of b.declaredProps) {
       const i = props.findIndex((p) => p.key === prop.key);
       if (i < 0) props.push(prop);
       else {

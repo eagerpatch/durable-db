@@ -832,6 +832,8 @@ export class ObjectNode extends Node {
   readonly expected = 'an object';
   /** Required keys, then optional ones, each sorted — the order ArkType checks and prints them in. */
   readonly props: readonly Prop[];
+  /** The keys in the order they were declared — what a JSON Schema's `properties` lists, so a form or an API shows them as written. */
+  readonly declaredProps: readonly Prop[];
   private readonly declared: ReadonlySet<string>;
 
   constructor(
@@ -840,6 +842,7 @@ export class ObjectNode extends Node {
     readonly undeclared?: 'ignore' | 'reject' | 'delete',
   ) {
     super();
+    this.declaredProps = [...props];
     const required = props.filter((p) => p.kind === 'required').sort(byKey);
     const optional = props.filter((p) => p.kind === 'optional').sort(byKey);
     this.props = [...required, ...optional];
@@ -930,7 +933,7 @@ export class ObjectNode extends Node {
     const schema: JsonSchema = { type: 'object' };
     if (this.props.length > 0) {
       const properties: Record<string, JsonSchema> = {};
-      for (const prop of this.props) {
+      for (const prop of this.declaredProps) {
         const value = this.valueOf(prop, js.config).json(js);
         properties[prop.key] = prop.default ? { ...value, default: prop.default.value } : value;
       }

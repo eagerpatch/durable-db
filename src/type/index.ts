@@ -263,19 +263,19 @@ const prototype: ThisType<Internals> & Record<string, unknown> = {
     const node = objectNode(this, 'merge');
     const other = parseDefinition(def, contextFor(this[CONFIG]));
     if (!(other instanceof ObjectNode)) throw new TypeError(`.merge() needs an object (was ${other.expression})`);
-    return makeType(new ObjectNode(mergeProps(node.props, other.props), [...node.index, ...other.index], other.undeclared ?? node.undeclared), this[CONFIG]);
+    return makeType(new ObjectNode(mergeProps(node.declaredProps, other.declaredProps), [...node.index, ...other.index], other.undeclared ?? node.undeclared), this[CONFIG]);
   },
   pick(...keys: string[]) {
-    return withProps(this, objectNode(this, 'pick').props.filter((p) => keys.includes(p.key)));
+    return withProps(this, objectNode(this, 'pick').declaredProps.filter((p) => keys.includes(p.key)));
   },
   omit(...keys: string[]) {
-    return withProps(this, objectNode(this, 'omit').props.filter((p) => !keys.includes(p.key)));
+    return withProps(this, objectNode(this, 'omit').declaredProps.filter((p) => !keys.includes(p.key)));
   },
   partial() {
-    return withProps(this, objectNode(this, 'partial').props.map((p) => ({ ...p, kind: 'optional' as const })));
+    return withProps(this, objectNode(this, 'partial').declaredProps.map((p) => ({ ...p, kind: 'optional' as const })));
   },
   required() {
-    return withProps(this, objectNode(this, 'required').props.map(({ default: _default, ...p }) => ({ ...p, kind: 'required' as const })));
+    return withProps(this, objectNode(this, 'required').declaredProps.map(({ default: _default, ...p }) => ({ ...p, kind: 'required' as const })));
   },
   keyof() {
     return makeType(keyofNode(this[NODE]), this[CONFIG]);
@@ -312,7 +312,7 @@ const prototype: ThisType<Internals> & Record<string, unknown> = {
   },
   onUndeclaredKey(behavior: 'ignore' | 'reject' | 'delete') {
     const node = objectNode(this, 'onUndeclaredKey');
-    return makeType(new ObjectNode(node.props, node.index, behavior), this[CONFIG]);
+    return makeType(new ObjectNode(node.declaredProps, node.index, behavior), this[CONFIG]);
   },
   atLeast(limit: number) {
     return bounded(this, '>=', limit, 'value');

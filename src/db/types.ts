@@ -1,8 +1,7 @@
 import type { Outbox } from './outbox';
 import type { Related } from './related';
 import type { RelationMap } from './relations';
-import type { Kysely } from 'kysely';
-import type { Kyselify } from 'drizzle-orm/kysely';
+import type { ColumnType, Kysely } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 import { type as arkType } from '../arktypeConfig'; // jitless `type` — eval-free for Workers
 import type { type as ArkTypeNs } from 'arktype'; // the namespace (validate/infer) lives on arktype's own export
@@ -39,10 +38,31 @@ export interface DatabaseConfig<
 export type DrizzleToKysely<
   TSchema extends Record<string, SQLiteTableWithColumns<any>>,
 > = {
-  [K in keyof TSchema]: TSchema[K] extends SQLiteTableWithColumns<any>
-    ? Kyselify<TSchema[K]>
-    : never;
+  [K in keyof TSchema]: KyselyTable<TSchema[K]>;
 };
+
+// A table as Kysely reads it, by its columns' database names — what
+// drizzle-orm's `Kyselify` says, worked out per column from the column alone:
+// `Kyselify` wraps every column in `ColumnType<select, insert, update>` from the
+// table's whole select and insert models, and Kysely unwraps it again for each
+// query — most of what an action's queries cost TypeScript. A column whose
+// three types agree is its plain type (a nullable one is optional to insert,
+// as Kysely reads `null`); one with a default is optional to insert; a
+// generated one is not inserted or updated at all.
+type ColumnsOf<T> = T extends { _: { columns: infer C } } ? C : never;
+type KyselyTable<T> = {
+  [C in keyof ColumnsOf<T> & string as DbNameOf<C, ColumnsOf<T>[C]>]: KyselyColumn<ColumnsOf<T>[C]>;
+};
+type DbNameOf<Key, Col> = Col extends { _: { name: infer N extends string } } ? N : Key;
+/** A column's value as a row holds it: null where it may be. */
+type ColumnValue<Col> = Col extends { _: { notNull: true; data: infer D } } ? D : Col extends { _: { data: infer D } } ? D | null : never;
+type KyselyColumn<Col> = Col extends { _: { notNull: true; hasDefault: false } }
+  ? ColumnValue<Col>
+  : Col extends { _: { generated: undefined; identity: undefined } }
+    ? Col extends { _: { notNull: true } }
+      ? ColumnType<ColumnValue<Col>, ColumnValue<Col> | undefined, ColumnValue<Col> | undefined>
+      : ColumnValue<Col>
+    : ColumnType<ColumnValue<Col>, never, never>;
 
 /**
  * ArkType helpers – mirror Ark's own API:

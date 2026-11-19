@@ -316,6 +316,9 @@ export async function buildAndLoadSchema(
     platform: 'node',
     packages: 'external', // Don't bundle dependencies
     target: 'node18',
+    // A schema that does not build is thrown, with esbuild's reason in the
+    // message: the caller says it once, so esbuild prints nothing of its own.
+    logLevel: 'silent',
   });
 
   if (result.outputFiles?.length !== 1) {

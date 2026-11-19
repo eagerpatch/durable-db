@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createRequire } from 'node:module';
+import { loadSqlite } from '../../src/testing';
 
 /**
  * Tests for SqliteDurableObject PITR integration.
@@ -951,7 +951,7 @@ describe('concurrent first calls', () => {
  * errors ("duplicate column name", "already exists") are SQLite's own.
  */
 function createSqliteState() {
-  const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+  const { DatabaseSync } = loadSqlite();
   const sqlite = new DatabaseSync(':memory:');
   const sql = {
     exec(query: string, ...params: unknown[]) {

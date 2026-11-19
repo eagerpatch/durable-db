@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
 import { effectOf, guardReferencingRows, type Sql } from '../../src/db/referencingRows';
+import { loadSqlite } from '../../src/testing';
+
+const { DatabaseSync } = loadSqlite();
 
 describe('what a statement does to the set of tables', () => {
   it.each([

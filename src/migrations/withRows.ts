@@ -296,7 +296,7 @@ function compare(migration: string, statements: string[], before: Map<string, Ta
 function remedy(error: string): string {
   if (/NOT NULL constraint failed/i.test(error)) return 'a row holds NULL there — give those rows a value in this migration, before the statement: UPDATE … SET … WHERE … IS NULL';
   if (/FOREIGN KEY constraint failed|foreign key mismatch|references a row that is not there/i.test(error)) {
-    return 'a row references a row that is not there — remove or repair those rows in this migration, before the statement: DELETE FROM … WHERE … NOT IN (SELECT …)';
+    return 'a row references a row that is not there — remove or repair those rows in this migration, before the statement: add the rows they reference (INSERT INTO … SELECT DISTINCT … WHERE … NOT IN (SELECT …)), or remove the ones that reference nothing (DELETE FROM … WHERE … NOT IN (SELECT …))';
   }
   if (/UNIQUE constraint failed/i.test(error)) return 'two rows hold the same value there — make them distinct, or remove one, in this migration before the statement';
   if (/CHECK constraint failed/i.test(error)) return 'a row does not meet the check — repair those rows in this migration, before the statement';

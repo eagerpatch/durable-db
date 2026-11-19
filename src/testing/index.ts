@@ -41,8 +41,31 @@ import {
 // Loaded at runtime (not a static import) so no bundler tries to resolve
 // `node:sqlite` — some still don't recognise it as a builtin. It's only ever
 // reached from test code running under Node, where the require resolves fine.
-const loadSqlite = (): typeof import('node:sqlite') =>
-  createRequire(import.meta.url)('node:sqlite');
+// Node 22 says "SQLite is an experimental feature" once per process that
+// loads it — every test worker, every test file of an app — so that one
+// warning is held back while it loads; every other warning goes through.
+let sqlite: typeof import('node:sqlite') | undefined;
+/** `node:sqlite`, loaded without Node 22's experimental notice: for a test that opens a database of its own. */
+export const loadSqlite = (): typeof import('node:sqlite') => {
+  if (sqlite) return sqlite;
+  const emit = process.emitWarning;
+  process.emitWarning = function (warning: string | Error, ...rest: unknown[]) {
+    const option = rest[0];
+    const type =
+      typeof option === 'string'
+        ? option
+        : ((option as { type?: string } | undefined)?.type ?? (warning instanceof Error ? warning.name : undefined));
+    const text = warning instanceof Error ? warning.message : String(warning);
+    if (type === 'ExperimentalWarning' && text.startsWith('SQLite ')) return;
+    return (emit as (...args: unknown[]) => void).call(process, warning, ...rest);
+  } as typeof process.emitWarning;
+  try {
+    sqlite = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+  } finally {
+    process.emitWarning = emit;
+  }
+  return sqlite;
+};
 
 type Schema = Record<string, SQLiteTableWithColumns<any>>;
 

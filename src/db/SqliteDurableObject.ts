@@ -1,9 +1,14 @@
 import {
   OUTBOX_DDL,
+  OUTBOX_DEAD_DDL,
+  OUTBOX_DEAD_TABLE,
   OUTBOX_DELIVERY_SIZE,
+  OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_NEXT_ATTEMPT_COLUMN,
   OUTBOX_TABLE,
   createActionOutbox,
   outboxRetryDelay,
+  settleOutboxDelivery,
   tenantOfInstanceKey,
   type Outbox,
   type OutboxEnvelope,
@@ -245,6 +250,22 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   protected databaseName?: string;
 
   /**
+   * The database's `instance` (`defineDatabase({ instance })`): the generated
+   * Durable Object sets it. A global database's instance has no tenant,
+   * whatever its key; a hand-written subclass that sets none is per-tenant,
+   * `defineDatabase()`'s default.
+   */
+  protected databaseInstance?: 'per-tenant' | 'global';
+
+  /**
+   * What the build appends to this database's instance keys —
+   * `applyDevEpoch('', name)`: `__dev_<epoch>` in dev, `''` in production. The
+   * generated Durable Object sets it; a key's tenant is the key without
+   * exactly this.
+   */
+  protected devEpochSuffix = '';
+
+  /**
    * Whether migrations have been run for this instance
    */
   private migrationsApplied = false;
@@ -276,16 +297,45 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
+   * The name an outbox envelope gives this database: `databaseName`, else
+   * one derived from the class name, else the class name.
+   */
+  private knownDatabaseName(): string {
+    return this.databaseName ?? databaseNameFromClass(this.constructor.name) ?? this.constructor.name;
+  }
+
+  /**
+   * The tenant of an instance key of this database: null for a global
+   * database, else the key without exactly the dev epoch the build applied
+   * (`devEpochSuffix`) — never cut anywhere else, so a tenant id containing
+   * `__dev_` is kept whole. What `getTenantId()` answers in an action
+   * (the generated `rpc` hands it to the action's context) and an outbox
+   * envelope's `tenantId`.
+   */
+  protected tenantOf(instanceKey: string): string | null {
+    return tenantOfInstanceKey(instanceKey, { instance: this.databaseInstance ?? 'per-tenant', devEpochSuffix: this.devEpochSuffix });
+  }
+
+  /**
    * Where the outbox delivers (`./outbox`): the generated class sets it from
    * `durableDb({ outbox })`. Null: `ctx.outbox.push()` refuses, naming the option.
    */
   protected outboxSink: OutboxSink | null = null;
+
+  /**
+   * How many failed deliveries move a message to `__outbox_dead`
+   * (`durableDb({ outbox: { maxAttempts } })`, which the generated class sets).
+   */
+  protected outboxMaxAttempts: number = OUTBOX_MAX_ATTEMPTS;
 
   private outboxReady = false;
 
   private ensureOutboxTable(): void {
     if (this.outboxReady) return;
     this.sql.exec(OUTBOX_DDL);
+    // An outbox an older durable-db created: CREATE TABLE IF NOT EXISTS left it without next_attempt_at.
+    const columns = this.sql.exec(`PRAGMA table_info(${OUTBOX_TABLE})`).toArray() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'next_attempt_at')) this.sql.exec(OUTBOX_NEXT_ATTEMPT_COLUMN);
     this.outboxReady = true;
   }
 
@@ -315,39 +365,110 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Delivers the outbox: up to OUTBOX_DELIVERY_SIZE messages, oldest first, to
-   * the sink; what was delivered is deleted, and the alarm comes back while
-   * more are waiting. A delivery that throws stays in the table and is retried
-   * with backoff (5 s, doubling, at most 5 minutes), so a message arrives at
-   * least once. A subclass with an alarm of its own calls `super.alarm()`.
+   * Delivers the outbox: up to OUTBOX_DELIVERY_SIZE of the messages that are
+   * due, oldest first, to the sink. What was delivered is deleted; a message
+   * the sink did not take (a delivery that throws: all of it; `{ retry }`:
+   * those) is retried on its own backoff (5 s, doubling, at most 5 minutes),
+   * so it never holds back the messages behind it — which also means no order
+   * is kept across a failure. One that failed `outboxMaxAttempts` deliveries
+   * is moved to `__outbox_dead`, logged, and never retried by itself. The
+   * alarm is then set to the earliest row due. A message arrives at least
+   * once. A subclass with an alarm of its own calls `super.alarm()`.
    */
   async alarm(): Promise<void> {
     if (!this.outboxSink) return;
     this.ensureOutboxTable();
     const rows = this.sql
-      .exec(`SELECT id, instance_key, message, recorded_at, attempts FROM ${OUTBOX_TABLE} ORDER BY id LIMIT ?`, OUTBOX_DELIVERY_SIZE)
+      .exec(
+        `SELECT id, instance_key, message, recorded_at, attempts FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY id LIMIT ?`,
+        Date.now(),
+        OUTBOX_DELIVERY_SIZE,
+      )
       .toArray() as Array<{ id: number; instance_key: string; message: string; recorded_at: number; attempts: number }>;
-    if (rows.length === 0) return;
-    const lastId = rows[rows.length - 1]!.id;
+    if (rows.length > 0) await this.deliverOutbox(rows);
+    // The earliest row due — pushed while this delivery ran, beyond this batch, or waiting for its retry.
+    const next = (this.sql.exec(`SELECT min(next_attempt_at) AS at FROM ${OUTBOX_TABLE}`).toArray()[0] as { at: number | null } | undefined)?.at;
+    if (next !== null && next !== undefined) await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+  }
+
+  private async deliverOutbox(
+    rows: Array<{ id: number; instance_key: string; message: string; recorded_at: number; attempts: number }>,
+  ): Promise<void> {
+    const database = this.knownDatabaseName();
     const envelopes: OutboxEnvelope[] = rows.map((row) => ({
       message: JSON.parse(row.message) as OutboxMessage,
+      database,
       instanceKey: row.instance_key,
-      tenantId: tenantOfInstanceKey(row.instance_key),
+      tenantId: this.tenantOf(row.instance_key),
       recordedAt: row.recorded_at,
+      attempts: row.attempts,
     }));
+    let settled: ReturnType<typeof settleOutboxDelivery>;
     try {
-      await this.outboxSink.deliver(envelopes, { env: this.env });
+      settled = settleOutboxDelivery(envelopes, await this.outboxSink!.deliver(envelopes, { env: this.env }));
     } catch (error) {
-      const attempts = Math.max(...rows.map((row) => row.attempts)) + 1;
-      const delay = outboxRetryDelay(attempts);
-      this.sql.exec(`UPDATE ${OUTBOX_TABLE} SET attempts = attempts + 1, last_error = ? WHERE id <= ?`, String(error), lastId);
-      console.error(`[db] Outbox delivery failed (attempt ${attempts}, ${rows.length} message(s)); retrying in ${delay / 1000}s:`, error);
-      await this.ctx.storage.setAlarm(Date.now() + delay);
-      return;
+      settled = { retry: new Set(envelopes), error };
     }
-    this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id <= ?`, lastId);
-    // Pushed while this delivery ran, or beyond this batch: another round.
-    if (this.sql.exec(`SELECT 1 FROM ${OUTBOX_TABLE} LIMIT 1`).toArray().length > 0) await this.ctx.storage.setAlarm(Date.now());
+
+    // Settled together: one synchronous block, committed as one.
+    const now = Date.now();
+    const lastError = settled.retry.size > 0 ? String(settled.error) : null;
+    const maxAttempts = this.outboxMaxAttempts;
+    let retried = 0;
+    let dead = 0;
+    let soonest = Infinity;
+    let fewest = Infinity;
+    let most = 0;
+    rows.forEach((row, index) => {
+      if (!settled.retry.has(envelopes[index]!)) {
+        this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
+        return;
+      }
+      const attempts = row.attempts + 1;
+      if (attempts >= maxAttempts) {
+        if (dead === 0) this.sql.exec(OUTBOX_DEAD_DDL);
+        this.sql.exec(
+          `INSERT INTO ${OUTBOX_DEAD_TABLE} (id, instance_key, message, recorded_at, attempts, last_error, dead_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          row.id,
+          row.instance_key,
+          row.message,
+          row.recorded_at,
+          attempts,
+          lastError,
+          now,
+        );
+        this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
+        dead++;
+        return;
+      }
+      const delay = outboxRetryDelay(attempts);
+      this.sql.exec(
+        `UPDATE ${OUTBOX_TABLE} SET attempts = ?, last_error = ?, next_attempt_at = ? WHERE id = ?`,
+        attempts,
+        lastError,
+        now + delay,
+        row.id,
+      );
+      retried++;
+      soonest = Math.min(soonest, delay);
+      fewest = Math.min(fewest, attempts);
+      most = Math.max(most, attempts);
+    });
+
+    if (retried > 0) {
+      const attempt = fewest === most ? `attempt ${most}` : `attempts ${fewest}–${most}`;
+      console.error(
+        `[db] ${retried} of ${rows.length} outbox message(s) of ${database} not delivered (${attempt} of ${maxAttempts}); retrying in ${soonest / 1000}s:`,
+        settled.error,
+      );
+    }
+    if (dead > 0) {
+      console.error(
+        `[db] ${dead} outbox message(s) of ${database} reached ${maxAttempts} failed deliveries (outbox maxAttempts) and were moved ` +
+          `to the table ${OUTBOX_DEAD_TABLE} of its Durable Object: they are not retried — deliver them from there, then delete them. The last error:`,
+        settled.error,
+      );
+    }
   }
 
   /**
@@ -375,6 +496,8 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   protected resetMigrationState(): void {
     this.migrationsApplied = false;
+    // The outbox went with the storage: created again with the next message.
+    this.outboxReady = false;
     // A run still in flight belongs to the storage that was just wiped: it
     // must neither mark the new storage migrated nor be awaited by new callers.
     this.migrating = undefined;

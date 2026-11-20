@@ -55,6 +55,11 @@ export interface DurableDbOptions {
    * root, or a package specifier) whose default export delivers them — a
    * function `(envelopes, { env }) => …`, or an object with `deliver`. Without
    * it, `ctx.outbox.push()` throws naming this option.
+   *
+   * `maxAttempts` (default 100: about eight hours of retries at the
+   * five-minute ceiling) is how many failed deliveries move a message to the
+   * Durable Object's `__outbox_dead` table, where it is kept and logged but
+   * never retried by itself.
    */
   outbox?: OutboxOption;
 }
@@ -442,7 +447,17 @@ async function findImportedDatabase(
 /** A relative sink module resolves from the project root; a package specifier or an absolute path stays as it is. */
 function resolveOutbox(outbox: OutboxOption | null, projectRoot: string): OutboxOption | null {
   if (!outbox || 'queue' in outbox) return outbox;
-  return outbox.module.startsWith('.') ? { module: path.resolve(projectRoot, outbox.module).split(path.sep).join('/') } : outbox;
+  return outbox.module.startsWith('.') ? { ...outbox, module: path.resolve(projectRoot, outbox.module).split(path.sep).join('/') } : outbox;
+}
+
+/** `outbox.maxAttempts` is a whole number of at least 1, said where the plugin is configured. */
+function checkOutbox(outbox: OutboxOption | undefined): OutboxOption | null {
+  if (!outbox) return null;
+  const { maxAttempts } = outbox;
+  if (maxAttempts !== undefined && !(Number.isInteger(maxAttempts) && maxAttempts >= 1)) {
+    throw new Error(`[durable-db] durableDb({ outbox: { maxAttempts } }) is how many failed deliveries a message gets: a whole number of at least 1, not ${String(maxAttempts)}`);
+  }
+  return outbox;
 }
 
 export function durableDb(options: DurableDbOptions = {}): Plugin {
@@ -452,7 +467,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
     databasesDir: options.databasesDir ?? 'src/databases',
     migrationsDir: options.migrationsDir ?? 'migrations',
     patchWranglerConfig: options.patchWranglerConfig ?? false,
-    outbox: options.outbox ?? null,
+    outbox: checkOutbox(options.outbox),
   });
 
   return {

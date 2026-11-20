@@ -36,6 +36,14 @@ export interface DoContext {
   ctx: RpcContext;
   dbName: string;
   instanceKey: string;
+  /**
+   * The tenant the object worked out from `instanceKey` (`tenantOf()`: null
+   * for a global database, else the key without exactly the dev epoch the
+   * build applied) — what `getTenantId()` answers inside the action. The
+   * generated Durable Objects set it; a store without it (one built by hand)
+   * is read as its key, `'global'` as no tenant.
+   */
+  tenantId?: string | null;
 }
 
 export interface RpcContext {

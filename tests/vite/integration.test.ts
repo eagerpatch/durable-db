@@ -487,6 +487,9 @@ export default { fetch: () => new Response('ok') };
     // The worker exports the new Durable Object class…
     expect(worker.code).toMatch(/\bWishlistDatabaseDO = class extends SqliteDurableObject\b/);
     expect(worker.code).toMatch(/export \{[^}]*\bWishlistDatabaseDO\b/);
+    // Its keys' tenant is worked out from what this build applies to them (the epoch module bundled with it).
+    expect(worker.code).toContain('devEpochSuffix = applyDevEpoch("", "wishlist")');
+    expect(worker.code).toMatch(/function applyDevEpoch\(key, dbName\)/);
     // …and the config this build emits binds it, with its migration.
     expect(config.durable_objects.bindings).toEqual([
       { name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' },

@@ -250,11 +250,48 @@ describe('createTestDatabase: the outbox', () => {
     const deliveries: unknown[] = [];
     const t = await createTestDatabase({ schema: { notes }, tenantId: 'acme', outbox: (envelopes) => void deliveries.push(...envelopes) });
     await t.run(addNote, { id: 'n1', text: 'hello' });
-    expect(t.outbox).toMatchObject([{ message: { job: 'note-added', args: { id: 'n1' } }, instanceKey: 'acme', tenantId: 'acme' }]);
+    expect(t.outbox).toEqual([
+      {
+        message: { job: 'note-added', args: { id: 'n1' } },
+        database: 'test',
+        instanceKey: 'acme',
+        tenantId: 'acme',
+        recordedAt: expect.any(Number),
+        attempts: 0,
+      },
+    ]);
     expect(deliveries).toEqual(t.outbox);
     // Called directly, as app code does, the action runs here too.
     await addNote({ id: 'n2', text: 'again' });
     expect(t.outbox.map((e) => (e.message as { args: { id: string } }).args.id)).toEqual(['n1', 'n2']);
+    t.destroy();
+  });
+
+  it("names the database and its instance as the options say: a tenant named 'global' is a tenant", async () => {
+    const t = await createTestDatabase({ schema: { notes }, tenantId: 'global', database: 'notes' });
+    await t.run(addNote, { id: 'n1', text: 'hello' });
+    expect(t.outbox[0]).toMatchObject({ database: 'notes', instanceKey: 'global', tenantId: 'global' });
+    t.destroy();
+
+    const shared = await createTestDatabase({ schema: { notes }, tenantId: 'acme', database: 'notes', instance: 'global' });
+    await shared.run(addNote, { id: 'n2', text: 'for everyone' });
+    expect(shared.outbox[0]).toMatchObject({ database: 'notes', instanceKey: 'global', tenantId: null });
+    shared.destroy();
+  });
+
+  it("takes a global database's instance from its defineDatabase()", async () => {
+    const shared = table('shared_notes', { id: text().primaryKey() });
+    const { action: sharedAction } = defineDatabase({ schema: { shared }, instance: 'global' });
+    const share = sharedAction({
+      args: { id: 'string' },
+      handler: async (db, args, ctx) => {
+        await db.insertInto('shared_notes').values({ id: args.id }).execute();
+        ctx.outbox.push({ shared: args.id, key: ctx.instanceKey });
+      },
+    });
+    const t = await createTestDatabase({ schema: { shared }, tenantId: 'acme' });
+    await t.run(share, { id: 's1' });
+    expect(t.outbox[0]).toMatchObject({ message: { shared: 's1', key: 'global' }, instanceKey: 'global', tenantId: null });
     t.destroy();
   });
 

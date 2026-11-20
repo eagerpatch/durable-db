@@ -31,6 +31,8 @@ export interface ActionTestMeta {
   validator: ReturnType<typeof type>;
   /** The schema of the action's database (`defineDatabase({ schema })`). */
   schema: Schema;
+  /** The action's database's `instance` (`defineDatabase({ instance })`, per-tenant by default). */
+  instance: 'per-tenant' | 'global';
 }
 
 /**
@@ -169,6 +171,7 @@ export function defineDatabase<TSchema extends Record<string, SQLiteTableWithCol
         handler: actionConfig.handler,
         validator,
         schema,
+        instance: config?.instance ?? 'per-tenant',
       } satisfies ActionTestMeta,
       enumerable: false,
       configurable: true,

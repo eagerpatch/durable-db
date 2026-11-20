@@ -4,20 +4,31 @@ import { env, runDurableObjectAlarm } from 'cloudflare:test';
 /** The outbox in workerd: written with the action, delivered by the alarm, kept and retried when the sink fails. */
 interface OutboxStub {
   record(instanceKey: string, messages: unknown[], fail?: boolean): Promise<number | string>;
+  recordInOldOutbox(instanceKey: string, messages: unknown[]): Promise<void>;
+  makeDue(): Promise<void>;
   outboxRows(): Promise<Array<{ message: string; attempts: number; last_error: string | null }>>;
+  outboxColumns(): Promise<string[]>;
+  deadRows(): Promise<Array<{ message: string; instance_key: string; attempts: number; last_error: string | null }>>;
   notes(): Promise<number>;
   alarmAt(): Promise<number | null>;
 }
 interface TestEnv {
   TEST_OUTBOX_DO: DurableObjectNamespace;
+  TEST_GLOBAL_OUTBOX_DO: DurableObjectNamespace;
   OUTBOX_LOG: KVNamespace;
 }
 const testEnv = env as unknown as TestEnv;
 
-function newStub(): DurableObjectStub & OutboxStub {
-  return testEnv.TEST_OUTBOX_DO.get(testEnv.TEST_OUTBOX_DO.idFromName(`o-${crypto.randomUUID()}`)) as never;
+function newStub(namespace: DurableObjectNamespace = testEnv.TEST_OUTBOX_DO): DurableObjectStub & OutboxStub {
+  return namespace.get(namespace.idFromName(`o-${crypto.randomUUID()}`)) as never;
 }
-const delivered = async () => JSON.parse((await testEnv.OUTBOX_LOG.get('delivered')) ?? '[]') as Array<{ message: unknown; tenantId: string | null }>;
+interface Delivered {
+  message: unknown;
+  database: string;
+  tenantId: string | null;
+  attempts: number;
+}
+const delivered = async () => JSON.parse((await testEnv.OUTBOX_LOG.get('delivered')) ?? '[]') as Delivered[];
 
 /**
  * Runs the alarm until the outbox is empty or `until` holds. The alarm set to
@@ -33,8 +44,7 @@ async function deliver(stub: DurableObjectStub & OutboxStub, until: () => Promis
 
 describe('the outbox (real workerd)', () => {
   beforeEach(async () => {
-    await testEnv.OUTBOX_LOG.delete('delivered');
-    await testEnv.OUTBOX_LOG.delete('fail');
+    for (const key of ['delivered', 'fail', 'poison', 'retry-odd']) await testEnv.OUTBOX_LOG.delete(key);
   });
 
   it("writes an action's messages with its writes, then the alarm delivers and deletes them", async () => {
@@ -45,10 +55,13 @@ describe('the outbox (real workerd)', () => {
     expect(await stub.notes()).toBe(1);
     expect((await stub.outboxRows()).map((row) => JSON.parse(row.message))).toEqual([{ job: 'welcome', args: { id: 1 } }, 'second']);
     await testEnv.OUTBOX_LOG.delete('fail');
+    await stub.makeDue();
     await deliver(stub, async () => (await delivered()).length === 2);
+    // Delivered on the first try, or after the alarm that fired by itself found the sink down.
+    const attempts = (await delivered())[0]!.attempts;
     expect(await delivered()).toEqual([
-      { message: { job: 'welcome', args: { id: 1 } }, tenantId: 'acme' },
-      { message: 'second', tenantId: 'acme' },
+      { message: { job: 'welcome', args: { id: 1 } }, database: 'notes', tenantId: 'acme', attempts },
+      { message: 'second', database: 'notes', tenantId: 'acme', attempts },
     ]);
     expect(await stub.outboxRows()).toEqual([]);
   });
@@ -60,19 +73,28 @@ describe('the outbox (real workerd)', () => {
     expect(await stub.alarmAt()).toBeNull();
   });
 
-  it('keeps a failed delivery with its error and retries it with backoff', async () => {
+  it("keeps a failed delivery with its error and retries it with backoff — a tenant named 'global' is that tenant", async () => {
     const stub = newStub();
     await testEnv.OUTBOX_LOG.put('fail', '1');
     await stub.record('global', ['retry me']);
     await deliver(stub, async () => ((await stub.outboxRows())[0]?.attempts ?? 0) >= 1);
     const [failed] = await stub.outboxRows();
-    expect(failed!.attempts).toBeGreaterThanOrEqual(1);
+    expect(failed!.attempts).toBe(1);
     expect(failed!.last_error).toBe('Error: sink is down');
+    // The alarm waits for the row's own backoff.
     expect((await stub.alarmAt())! - Date.now()).toBeGreaterThan(1000);
     await testEnv.OUTBOX_LOG.delete('fail');
+    await stub.makeDue();
     await deliver(stub, async () => (await delivered()).length === 1);
-    expect(await delivered()).toEqual([{ message: 'retry me', tenantId: null }]);
+    expect(await delivered()).toEqual([{ message: 'retry me', database: 'notes', tenantId: 'global', attempts: 1 }]);
     expect(await stub.outboxRows()).toEqual([]);
+  });
+
+  it("delivers a global database's messages with no tenant, its database named", async () => {
+    const stub = newStub(testEnv.TEST_GLOBAL_OUTBOX_DO);
+    await stub.record('global', ['for everyone']);
+    await deliver(stub, async () => (await delivered()).length === 1);
+    expect(await delivered()).toEqual([{ message: 'for everyone', database: 'catalog', tenantId: null, attempts: 0 }]);
   });
 
   it('delivers more than one batch, in order', async () => {
@@ -81,5 +103,55 @@ describe('the outbox (real workerd)', () => {
     await deliver(stub, async () => (await delivered()).length === 150);
     expect((await delivered()).map((d) => d.message)).toEqual(Array.from({ length: 150 }, (_, i) => i));
     expect(await stub.outboxRows()).toEqual([]);
+  });
+
+  it('upgrades an outbox an older version left (no next_attempt_at) and delivers what waits in it', async () => {
+    const stub = newStub();
+    await stub.recordInOldOutbox('acme', ['left over']);
+    expect(await stub.outboxColumns()).not.toContain('next_attempt_at');
+    await deliver(stub, async () => (await delivered()).length === 1);
+    expect(await delivered()).toEqual([{ message: 'left over', database: 'notes', tenantId: 'acme', attempts: 0 }]);
+    expect(await stub.outboxColumns()).toContain('next_attempt_at');
+    await stub.record('acme', ['new']);
+    await deliver(stub, async () => (await delivered()).length === 2);
+    expect((await delivered()).map((d) => d.message)).toEqual(['left over', 'new']);
+  });
+
+  it('a message the sink cannot take does not hold back the ones recorded after it', async () => {
+    const stub = newStub();
+    await testEnv.OUTBOX_LOG.put('poison', '1');
+    await stub.record('acme', ['poison']);
+    await deliver(stub, async () => ((await stub.outboxRows())[0]?.attempts ?? 0) >= 1);
+    await stub.record('acme', ['fresh']);
+    await deliver(stub, async () => (await delivered()).length === 1);
+    expect(await delivered()).toEqual([{ message: 'fresh', database: 'notes', tenantId: 'acme', attempts: 0 }]);
+    expect(await stub.outboxRows()).toEqual([{ message: '"poison"', attempts: 1, last_error: 'Error: poison' }]);
+  });
+
+  it('settles a delivery one by one: the envelopes answered in { retry } are retried, the others delivered', async () => {
+    const stub = newStub();
+    await testEnv.OUTBOX_LOG.put('retry-odd', '1');
+    await stub.record('acme', [1, 2, 3, 4]);
+    await deliver(stub, async () => (await delivered()).length === 2);
+    expect((await delivered()).map((d) => d.message)).toEqual([2, 4]);
+    expect(await stub.outboxRows()).toEqual([
+      { message: '1', attempts: 1, last_error: 'Error: odd ones bounced' },
+      { message: '3', attempts: 1, last_error: 'Error: odd ones bounced' },
+    ]);
+  });
+
+  it('moves a message that failed maxAttempts deliveries to __outbox_dead and stops retrying it', async () => {
+    const stub = newStub();
+    await testEnv.OUTBOX_LOG.put('fail', '1');
+    await stub.record('acme', ['doomed']);
+    // maxAttempts is 3 on this class: three failed deliveries, each once due.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await deliver(stub, async () => (await stub.deadRows()).length > 0 || ((await stub.outboxRows())[0]?.attempts ?? 0) >= attempt);
+      await stub.makeDue();
+    }
+    expect(await stub.outboxRows()).toEqual([]);
+    expect(await stub.deadRows()).toEqual([{ message: '"doomed"', instance_key: 'acme', attempts: 3, last_error: 'Error: sink is down' }]);
+    expect(await stub.alarmAt()).toBeNull();
+    expect(await delivered()).toEqual([]);
   });
 });

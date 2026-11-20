@@ -37,30 +37,26 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
  * ```
  */
 /**
- * Inside a Durable Object the instance key IS the tenant (per-tenant DBs key
- * their instances by tenant id, plus an optional `__dev_<epoch>` suffix in
- * dev — the database's own epoch after `db reset --database`, else the
- * project's). The registry publishes its DoContext store getter on globalThis
- * — see the note there for why this is not a module import — so getTenantId()
- * works in action handlers without the worker-side resolver, which the DO
- * execution context never registers.
+ * Inside a Durable Object the tenant is the object's own: the generated
+ * classes work it out from the instance key with what the build applied —
+ * null for a global database (its instance kind, not its key), else the key
+ * without exactly its dev epoch suffix (`__dev_<epoch>` in dev, nothing in
+ * production, so a tenant id containing `__dev_` is kept whole) — and hand it
+ * to the action's DoContext store. The registry publishes its store getter
+ * on globalThis — see the note there for why this is not a module import — so
+ * getTenantId() works in action handlers without the worker-side resolver,
+ * which the DO execution context never registers.
  */
 function tenantIdFromDoContext(): string | null {
   const getStore = (globalThis as Record<symbol, unknown>)[
     Symbol.for('durable-db.doContext')
-  ] as (() => { instanceKey?: string } | undefined) | undefined;
-  const key = getStore?.()?.instanceKey;
-  if (!key) return null;
-  const tenant = stripDevEpoch(key);
-  // A global database's instance has no tenant — in dev too, where its key
-  // carries the epoch suffix (`global__dev_<epoch>`).
-  return tenant === 'global' ? null : tenant;
-}
-
-/** An instance key without its dev-epoch suffix (`<key>__dev_<epoch>` → `<key>`). */
-function stripDevEpoch(instanceKey: string): string {
-  const suffixAt = instanceKey.lastIndexOf('__dev_');
-  return suffixAt === -1 ? instanceKey : instanceKey.slice(0, suffixAt);
+  ] as (() => { instanceKey?: string; tenantId?: string | null } | undefined) | undefined;
+  const store = getStore?.();
+  if (!store?.instanceKey) return null;
+  if (store.tenantId !== undefined) return store.tenantId;
+  // A store that does not say (built by hand, not by a generated class): its
+  // key as it is, the key 'global' as no tenant.
+  return store.instanceKey === 'global' ? null : store.instanceKey;
 }
 
 export function getTenantId(): string {

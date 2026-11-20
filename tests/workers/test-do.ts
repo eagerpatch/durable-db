@@ -1,4 +1,5 @@
 import { SqliteDurableObject, type Migrations } from '../../src/db/SqliteDurableObject';
+import type { OutboxEnvelope } from '../../src/db/outbox';
 import { RemovedDatabaseDurableObject } from '../../src/db/RemovedDatabaseDurableObject';
 import { type as actionArgsType, registerAction, registerSharedAction, callAction } from '../../src/registry';
 import { createKyselyFromSql } from '../../src/db/kysely';
@@ -400,12 +401,27 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
   migrations: Migrations = {
     '20240101_notes': { chunks: [['CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL)']] },
   };
+  protected databaseName = 'notes';
+  protected outboxMaxAttempts = 3;
+  /**
+   * The sink, steered from the test through KV: `fail` throws, `poison`
+   * throws for a delivery that holds the message 'poison', `retry-odd`
+   * delivers the even numbers and answers the odd ones for a retry.
+   */
   protected outboxSink = {
-    deliver: async (envelopes: Array<{ message: unknown; tenantId: string | null }>, { env }: { env: { OUTBOX_LOG: KVNamespace } }) => {
-      if (await env.OUTBOX_LOG.get('fail')) throw new Error('sink is down');
-      const log = JSON.parse((await env.OUTBOX_LOG.get('delivered')) ?? '[]') as unknown[];
-      log.push(...envelopes.map((e) => ({ message: e.message, tenantId: e.tenantId })));
-      await env.OUTBOX_LOG.put('delivered', JSON.stringify(log));
+    deliver: async (envelopes: OutboxEnvelope[], { env }: { env: unknown }) => {
+      const log = (env as { OUTBOX_LOG: KVNamespace }).OUTBOX_LOG;
+      if (await log.get('fail')) throw new Error('sink is down');
+      if ((await log.get('poison')) && envelopes.some((e) => e.message === 'poison')) throw new Error('poison');
+      const retry = (await log.get('retry-odd')) ? envelopes.filter((e) => typeof e.message === 'number' && e.message % 2 === 1) : [];
+      const delivered = JSON.parse((await log.get('delivered')) ?? '[]') as unknown[];
+      delivered.push(
+        ...envelopes
+          .filter((e) => !retry.includes(e))
+          .map((e) => ({ message: e.message, database: e.database, tenantId: e.tenantId, attempts: e.attempts })),
+      );
+      await log.put('delivered', JSON.stringify(delivered));
+      return retry.length > 0 ? { retry, error: new Error('odd ones bounced') } : undefined;
     },
   };
 
@@ -429,10 +445,41 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     }
   }
 
+  /** An outbox as durable-db before 0.14 left it: no next_attempt_at, its messages waiting. */
+  async recordInOldOutbox(instanceKey: string, messages: unknown[]): Promise<void> {
+    this.sql.exec(`CREATE TABLE __outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      instance_key TEXT NOT NULL,
+      message TEXT NOT NULL,
+      recorded_at INTEGER NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT
+    )`);
+    for (const message of messages) {
+      this.sql.exec('INSERT INTO __outbox (instance_key, message, recorded_at) VALUES (?, ?, ?)', instanceKey, JSON.stringify(message), Date.now());
+    }
+    await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /** As if every retry's backoff had passed. */
+  async makeDue(): Promise<void> {
+    this.sql.exec('UPDATE __outbox SET next_attempt_at = 0');
+  }
+
   async outboxRows(): Promise<Array<{ message: string; attempts: number; last_error: string | null }>> {
     const exists = this.sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox'`).toArray().length > 0;
     if (!exists) return [];
     return this.sql.exec('SELECT message, attempts, last_error FROM __outbox ORDER BY id').toArray() as never;
+  }
+
+  async outboxColumns(): Promise<string[]> {
+    return (this.sql.exec('PRAGMA table_info(__outbox)').toArray() as Array<{ name: string }>).map((column) => column.name);
+  }
+
+  async deadRows(): Promise<Array<{ message: string; instance_key: string; attempts: number; last_error: string | null }>> {
+    const exists = this.sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox_dead'`).toArray().length > 0;
+    if (!exists) return [];
+    return this.sql.exec('SELECT message, instance_key, attempts, last_error FROM __outbox_dead ORDER BY id').toArray() as never;
   }
 
   async notes(): Promise<number> {
@@ -443,6 +490,12 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
   async alarmAt(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
   }
+}
+
+/** The outbox of a global database: its instance has no tenant, whatever its key. */
+export class TestGlobalOutboxDO extends TestOutboxDO {
+  protected databaseName = 'catalog';
+  protected databaseInstance = 'global' as const;
 }
 
 // ---------------------------------------------------------------------------

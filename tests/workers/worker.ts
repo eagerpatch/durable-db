@@ -1,4 +1,4 @@
-export { TestMigrationDO, TestHappyDO, TestKyselyDO, TestRaceDO, TestDevHandoffDO, TestArgsDO, TestRemovedDatabaseDO, TestOutboxDO, TestSharedDO } from './test-do';
+export { TestMigrationDO, TestHappyDO, TestKyselyDO, TestRaceDO, TestDevHandoffDO, TestArgsDO, TestRemovedDatabaseDO, TestOutboxDO, TestGlobalOutboxDO, TestSharedDO } from './test-do';
 export { TestRelatedDO } from './related-do';
 
 /**

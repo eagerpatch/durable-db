@@ -92,6 +92,18 @@ export interface CreateTestDatabaseOptions {
    */
   tenantId?: string;
   /**
+   * The database name the outbox envelopes carry (`envelope.database`, the
+   * name `db` commands know the database by). Defaults to `'test'`.
+   */
+  database?: string;
+  /**
+   * The database's instance kind: a global database's actions run on the
+   * instance key `'global'` and its envelopes have no tenant. Defaults to
+   * the action's own database's (`defineDatabase({ instance })`), per-tenant
+   * unless it says.
+   */
+  instance?: 'per-tenant' | 'global';
+  /**
    * Delivers what an action pushed to `ctx.outbox`, after the action
    * succeeds, as the Durable Object's sink would (awaited before `run()`
    * returns). Every envelope is also kept in {@link TestDatabase.outbox}.
@@ -187,7 +199,7 @@ async function deriveStatements(schema: Schema): Promise<string[]> {
 export async function createTestDatabase<TSchema = any>(
   options: CreateTestDatabaseOptions
 ): Promise<TestDatabase<TSchema>> {
-  const { schema, statements, tenantId = 'test', env = {} } = options;
+  const { schema, statements, tenantId = 'test', database = 'test', env = {} } = options;
   const recorded: OutboxEnvelope[] = [];
 
   const { DatabaseSync } = loadSqlite();
@@ -215,17 +227,21 @@ export async function createTestDatabase<TSchema = any>(
       throw new Error(`Invalid args for action: ${validated.summary}`);
     }
     // The handler's context, its outbox as the Durable Object's: messages of a successful run only.
+    const instance = options.instance ?? meta.instance ?? 'per-tenant';
+    const instanceKey = instance === 'global' ? 'global' : tenantId;
     const outbox = createActionOutbox(true);
     const result = (await (meta.handler as (db: unknown, args: unknown, ctx: unknown) => Promise<unknown>)(db, validated, {
       env,
-      instanceKey: tenantId,
+      instanceKey,
       outbox,
     })) as TResult;
     const envelopes: OutboxEnvelope[] = outbox.take().map((message) => ({
       message: JSON.parse(message) as OutboxMessage,
-      instanceKey: tenantId,
-      tenantId: tenantOfInstanceKey(tenantId),
+      database,
+      instanceKey,
+      tenantId: tenantOfInstanceKey(instanceKey, { instance }),
       recordedAt: Date.now(),
+      attempts: 0,
     }));
     if (envelopes.length > 0) {
       recorded.push(...envelopes);

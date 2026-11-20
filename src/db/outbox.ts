@@ -9,9 +9,12 @@
 // are due to the sink and deletes what was delivered; a message whose delivery
 // failed stays in the table and is retried with backoff, on its own clock, so
 // it never holds back the messages behind it (and no order is kept across a
-// failure). A message is delivered at least once — make what consumes it
-// idempotent — and one that fails `maxAttempts` deliveries is moved to
-// `__outbox_dead`, logged, and never retried by itself.
+// failure). The messages a failed delivery leaves are split in two for their
+// retry, each half a delivery of its own, so a message that fails every
+// delivery holding it is cut off from the others within a few retries. A
+// message is delivered at least once — make what consumes it idempotent — and
+// one that fails `maxAttempts` deliveries, or that the sink gives up on
+// (`{ dead }`), is moved to `__outbox_dead`, logged, and never retried by itself.
 //
 // The sink is configured once, in the Vite plugin: `durableDb({ outbox: {
 // queue: 'MY_QUEUE' } })` sends each message to a Cloudflare Queue as it is;
@@ -64,14 +67,20 @@ export interface OutboxSinkContext<Env = unknown> {
 
 /**
  * What a delivery answers. Nothing: every envelope of it was delivered.
- * `{ retry }`: those envelopes — the very objects the delivery was handed —
- * are retried, and every other envelope of it counts as delivered; `error`,
- * when given, is kept with them as their last error. A delivery that throws
- * retries every envelope of it.
+ * `{ retry, dead }` — each a list of the very envelope objects the delivery
+ * was handed, either may be left out: those in `retry` are retried, those in
+ * `dead` can never be delivered and are moved to `__outbox_dead` at once, and
+ * every other envelope of it counts as delivered; `error`, when given, is kept
+ * with both as their last error. A delivery that throws retries every
+ * envelope of it.
  */
-export type OutboxDelivery = void | { retry: readonly OutboxEnvelope[]; error?: unknown };
+export type OutboxDelivery = void | { retry?: readonly OutboxEnvelope[]; dead?: readonly OutboxEnvelope[]; error?: unknown };
 
-/** Where the outbox delivers. A delivery that throws is retried, every envelope of it; one may settle them one by one (`{ retry }`). */
+/**
+ * Where the outbox delivers. A delivery that throws is retried, every envelope
+ * of it, split in two for the retry; one may settle them one by one
+ * (`{ retry }`, `{ dead }`).
+ */
 export interface OutboxSink<Env = unknown> {
   deliver(envelopes: OutboxEnvelope[], context: OutboxSinkContext<Env>): OutboxDelivery | Promise<OutboxDelivery>;
 }
@@ -85,58 +94,128 @@ export function outboxSink<Env = unknown>(module: OutboxSinkModule<Env>): Outbox
   throw new TypeError('[db] An outbox module must default-export a deliver function, or an object with one');
 }
 
-/** Cloudflare Queues takes at most 100 messages per sendBatch. */
-const QUEUE_BATCH = 100;
+// What Cloudflare Queues takes (1 KB is 1000 bytes): a message of at most
+// 128 KB, about 100 bytes of it the queue's own, and a sendBatch of at most
+// 100 messages and 256 KB. A message is sent as JSON, so its size is its JSON's.
+const QUEUE_MESSAGE_BYTES = 128_000;
+const QUEUE_MESSAGE_OVERHEAD = 100;
+const QUEUE_BATCH_MESSAGES = 100;
+const QUEUE_BATCH_BYTES = 256_000;
+
+const utf8 = new TextEncoder();
+
+/** What the queue counts of a message: its JSON's bytes and its own. */
+function queueMessageBytes(message: unknown): number {
+  return utf8.encode(JSON.stringify(message)).byteLength + QUEUE_MESSAGE_OVERHEAD;
+}
+
+type QueueBinding = { sendBatch?(messages: Array<{ body: unknown; contentType: 'json' }>): Promise<void> };
 
 /**
- * Each message to the Queue binding `binding`, as it was pushed. A sendBatch
- * that fails answers the envelopes not sent yet for a retry: the batches
- * before it were delivered.
+ * Each message to the Queue binding `binding`, as it was pushed (as JSON), in
+ * as few sendBatch calls as the queue takes: at most 100 messages and 256 KB
+ * each. A message larger than a queue message holds (128 KB) can never be
+ * sent: it is not, and is answered in `{ dead }`. A sendBatch that fails
+ * answers the envelopes not sent yet for a retry: the batches before it were
+ * delivered.
  */
 export function queueOutboxSink(binding: string): OutboxSink {
   return {
     async deliver(envelopes, { env }) {
-      const queue = (env as Record<string, { sendBatch?(messages: Array<{ body: unknown }>): Promise<void> } | undefined>)[binding];
+      const queue = (env as Record<string, QueueBinding | undefined>)[binding];
       if (!queue?.sendBatch) throw new Error(`[db] The outbox sends to the Queue binding ${binding}, which this worker does not have`);
-      for (let i = 0; i < envelopes.length; i += QUEUE_BATCH) {
+      const dead: OutboxEnvelope[] = [];
+      const deadSizes: number[] = [];
+      const batches: OutboxEnvelope[][] = [];
+      let batch: OutboxEnvelope[] = [];
+      let bytes = 0;
+      for (const envelope of envelopes) {
+        const size = queueMessageBytes(envelope.message);
+        if (size > QUEUE_MESSAGE_BYTES) {
+          dead.push(envelope);
+          deadSizes.push(size);
+          continue;
+        }
+        if (batch.length === QUEUE_BATCH_MESSAGES || bytes + size > QUEUE_BATCH_BYTES) {
+          batches.push(batch);
+          batch = [];
+          bytes = 0;
+        }
+        batch.push(envelope);
+        bytes += size;
+      }
+      if (batch.length > 0) batches.push(batch);
+
+      const tooLarge =
+        dead.length > 0
+          ? `${dead.length} message(s) of ${deadSizes.join(', ')} bytes, more than a queue message holds (${QUEUE_MESSAGE_BYTES})`
+          : null;
+      for (let i = 0; i < batches.length; i++) {
         try {
-          await queue.sendBatch(envelopes.slice(i, i + QUEUE_BATCH).map((envelope) => ({ body: envelope.message })));
+          await queue.sendBatch(batches[i]!.map((envelope) => ({ body: envelope.message, contentType: 'json' })));
         } catch (error) {
-          return { retry: envelopes.slice(i), error };
+          const retry = batches.slice(i).flat();
+          if (!tooLarge) return { retry, error };
+          return {
+            retry,
+            dead,
+            error: new Error(`[db] A sendBatch to the Queue binding ${binding} failed (${String(error)}); and ${tooLarge}`, { cause: error }),
+          };
         }
       }
+      if (tooLarge) return { dead, error: new Error(`[db] The Queue binding ${binding} cannot take ${tooLarge}`) };
     },
   };
 }
 
-/** Why an envelope is retried when the sink's `{ retry }` gave no `error`. */
-const RETRY_ASKED = '[db] The outbox sink answered it in { retry }';
+/** Why an envelope is retried, or given up on, when the sink's answer gave no `error`. */
+const ANSWERED_IN = (field: 'retry' | 'dead') => `[db] The outbox sink answered it in { ${field} }`;
+
+/** What a delivery settled: the envelopes to retry and the error kept with them, those to give up on and theirs. */
+export interface SettledOutboxDelivery {
+  retry: ReadonlySet<OutboxEnvelope>;
+  error: unknown;
+  dead: ReadonlySet<OutboxEnvelope>;
+  deadError: unknown;
+}
 
 /**
- * What a delivery settled: the envelopes to retry, and the error kept with
- * them. An answer without `retry` delivered everything (a sink that returns
- * a value — a fetch's Response — did so before `{ retry }` existed). A
- * `{ retry }` that is no list, or names an envelope this delivery was not
- * handed (a copy, say), is the sink's mistake and retries every envelope of
- * it: a message is never counted as delivered that the sink did not say was.
+ * What a delivery settled: the envelopes to retry, those to give up on, and
+ * the errors kept with them (the answer's `error` with both). An answer with
+ * neither `retry` nor `dead` delivered everything (a sink that returns a
+ * value — a fetch's Response — did so before they existed). A `retry` or
+ * `dead` that is no list, names an envelope this delivery was not handed (a
+ * copy, say), or names one envelope in both is the sink's mistake and
+ * retries every envelope of it: a message is never counted as delivered, or
+ * given up on, that the sink did not say was.
  */
 export function settleOutboxDelivery(
   envelopes: readonly OutboxEnvelope[],
   answer: unknown,
-): { retry: ReadonlySet<OutboxEnvelope>; error: unknown } {
-  if (answer === null || typeof answer !== 'object' || !('retry' in answer)) return { retry: new Set(), error: undefined };
-  const { retry, error } = answer as { retry: unknown; error?: unknown };
+): SettledOutboxDelivery {
+  if (answer === null || typeof answer !== 'object' || !('retry' in answer || 'dead' in answer)) {
+    return { retry: new Set(), error: undefined, dead: new Set(), deadError: undefined };
+  }
+  const { retry = [], dead = [], error } = answer as { retry?: unknown; dead?: unknown; error?: unknown };
   const handed = new Set(envelopes);
-  if (!Array.isArray(retry) || retry.some((envelope) => !handed.has(envelope))) {
+  const named = (list: unknown): list is OutboxEnvelope[] => Array.isArray(list) && list.every((envelope) => handed.has(envelope));
+  if (!named(retry) || !named(dead) || retry.some((envelope) => dead.includes(envelope))) {
     return {
       retry: handed,
+      dead: new Set(),
+      deadError: undefined,
       error: new Error(
-        '[db] The outbox sink answered { retry } with something other than envelopes of this delivery: ' +
+        '[db] The outbox sink answered { retry } or { dead } with something other than envelopes of this delivery, or one in both: ' +
           'answer the envelope objects it was handed (every envelope of the delivery is retried)',
       ),
     };
   }
-  return { retry: new Set(retry as OutboxEnvelope[]), error: error ?? new Error(RETRY_ASKED) };
+  return {
+    retry: new Set(retry),
+    error: error ?? new Error(ANSWERED_IN('retry')),
+    dead: new Set(dead),
+    deadError: error ?? new Error(ANSWERED_IN('dead')),
+  };
 }
 
 export const OUTBOX_TABLE = '__outbox';
@@ -145,6 +224,9 @@ export const OUTBOX_TABLE = '__outbox';
  * The outbox. `next_attempt_at` (ms since the epoch; 0, the default, is due
  * at once) is when a row is next handed to the sink — after a failed
  * delivery, its own backoff — and `attempts` how many deliveries of it failed.
+ * `batch` is which rows a delivery hands the sink together: 0 for the rows no
+ * delivery has failed yet, else the id of the first row of a half a failed
+ * delivery left (see {@link outboxBatches}).
  */
 export const OUTBOX_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_TABLE} (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,15 +235,34 @@ export const OUTBOX_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_TABLE} (
   recorded_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
-  next_attempt_at INTEGER NOT NULL DEFAULT 0
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  batch INTEGER NOT NULL DEFAULT 0
 )`;
 
 /**
- * An outbox an older durable-db created has no `next_attempt_at` (and
- * `CREATE TABLE IF NOT EXISTS` leaves a table as it is): added once, every
- * row it holds due at once.
+ * The columns an outbox an older durable-db created lacks (and
+ * `CREATE TABLE IF NOT EXISTS` leaves a table as it is): each added once,
+ * every row it holds due at once and in no batch.
  */
-export const OUTBOX_NEXT_ATTEMPT_COLUMN = `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0`;
+export const OUTBOX_ADDED_COLUMNS: ReadonlyArray<{ column: string; ddl: string }> = [
+  { column: 'next_attempt_at', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0` },
+  { column: 'batch', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN batch INTEGER NOT NULL DEFAULT 0` },
+];
+
+/**
+ * The batches the rows a failed delivery left (in id order) are retried in: a
+ * lone row on its own (its id), more split in two halves, each named by its
+ * first row's id — never the name of another delivery's rows, since a row is
+ * in one batch at a time. A delivery that fails whole does not say which message
+ * failed it; halving cuts one that fails every delivery holding it off from
+ * the others within log2(n) retries, while a whole sink outage costs no more
+ * deliveries than retrying each message alone would.
+ */
+export function outboxBatches(ids: readonly number[]): number[] {
+  if (ids.length <= 1) return [...ids];
+  const half = Math.ceil(ids.length / 2);
+  return ids.map((_, index) => (index < half ? ids[0]! : ids[half]!));
+}
 
 /** Where a message goes that failed `maxAttempts` deliveries: kept, never retried by itself. */
 export const OUTBOX_DEAD_TABLE = '__outbox_dead';
@@ -204,11 +305,17 @@ export interface InstanceKeyOrigin {
   devEpochSuffix?: string;
 }
 
+/** A dev epoch suffix: `__dev_` and a base36 epoch (`Date.now().toString(36)`, a counter appended when two collide). */
+const DEV_EPOCH_SUFFIX = /__dev_[0-9a-z]+$/;
+
 /**
  * The tenant an instance key belongs to: null for a global database's
  * instance, else the key without exactly the dev epoch suffix the build
- * applied, when it ends with it — nothing else is cut, so a tenant id that
- * contains `__dev_` is kept whole.
+ * applied, when it ends with it — so a tenant id that contains `__dev_` is
+ * kept whole. In production (no suffix) the key is the tenant. In dev every
+ * key carries an epoch, so a key that does not end with the current one is
+ * an earlier epoch's — an object `db reset` left behind, whose alarm still
+ * delivers what waits in its outbox — and its trailing `__dev_<epoch>` is cut.
  */
 export function tenantOfInstanceKey(instanceKey: string, origin: InstanceKeyOrigin): string | null {
   if (origin?.instance !== 'per-tenant' && origin?.instance !== 'global') {
@@ -219,7 +326,9 @@ export function tenantOfInstanceKey(instanceKey: string, origin: InstanceKeyOrig
   }
   const { instance, devEpochSuffix = '' } = origin;
   if (instance === 'global') return null;
-  return devEpochSuffix && instanceKey.endsWith(devEpochSuffix) ? instanceKey.slice(0, -devEpochSuffix.length) : instanceKey;
+  if (!devEpochSuffix) return instanceKey;
+  if (instanceKey.endsWith(devEpochSuffix)) return instanceKey.slice(0, -devEpochSuffix.length);
+  return instanceKey.replace(DEV_EPOCH_SUFFIX, '');
 }
 
 /**

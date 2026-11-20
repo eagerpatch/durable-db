@@ -111,7 +111,7 @@ describe('the outbox (real workerd)', () => {
     expect(await stub.outboxColumns()).not.toContain('next_attempt_at');
     await deliver(stub, async () => (await delivered()).length === 1);
     expect(await delivered()).toEqual([{ message: 'left over', database: 'notes', tenantId: 'acme', attempts: 0 }]);
-    expect(await stub.outboxColumns()).toContain('next_attempt_at');
+    expect(await stub.outboxColumns()).toEqual(expect.arrayContaining(['next_attempt_at', 'batch']));
     await stub.record('acme', ['new']);
     await deliver(stub, async () => (await delivered()).length === 2);
     expect((await delivered()).map((d) => d.message)).toEqual(['left over', 'new']);
@@ -126,6 +126,21 @@ describe('the outbox (real workerd)', () => {
     await deliver(stub, async () => (await delivered()).length === 1);
     expect(await delivered()).toEqual([{ message: 'fresh', database: 'notes', tenantId: 'acme', attempts: 0 }]);
     expect(await stub.outboxRows()).toEqual([{ message: '"poison"', attempts: 1, last_error: 'Error: poison' }]);
+  });
+
+  it('cuts a message that fails every delivery holding it off from the one it was delivered with', async () => {
+    const stub = newStub();
+    await testEnv.OUTBOX_LOG.put('poison', '1');
+    await stub.record('acme', ['innocent', 'poison']);
+    await deliver(stub, async () => ((await stub.outboxRows())[0]?.attempts ?? 0) >= 1);
+    expect(await delivered()).toEqual([]);
+    await stub.makeDue();
+    await deliver(stub, async () => (await delivered()).length === 1);
+    expect(await delivered()).toEqual([{ message: 'innocent', database: 'notes', tenantId: 'acme', attempts: 1 }]);
+    const [poison, ...rest] = await stub.outboxRows();
+    expect(rest).toEqual([]);
+    expect(poison).toMatchObject({ message: '"poison"', last_error: 'Error: poison' });
+    expect(poison!.attempts).toBeGreaterThanOrEqual(1);
   });
 
   it('settles a delivery one by one: the envelopes answered in { retry } are retried, the others delivered', async () => {

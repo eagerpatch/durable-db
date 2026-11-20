@@ -3,10 +3,11 @@ import {
   OUTBOX_DEAD_DDL,
   OUTBOX_DEAD_TABLE,
   OUTBOX_DELIVERY_SIZE,
+  OUTBOX_ADDED_COLUMNS,
   OUTBOX_MAX_ATTEMPTS,
-  OUTBOX_NEXT_ATTEMPT_COLUMN,
   OUTBOX_TABLE,
   createActionOutbox,
+  outboxBatches,
   outboxRetryDelay,
   settleOutboxDelivery,
   tenantOfInstanceKey,
@@ -14,6 +15,7 @@ import {
   type OutboxEnvelope,
   type OutboxMessage,
   type OutboxSink,
+  type SettledOutboxDelivery,
 } from './outbox';
 import { DurableObject } from 'cloudflare:workers';
 import { Kysely } from 'kysely';
@@ -109,6 +111,16 @@ function databaseNameFromClass(className: string): string | null {
     .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
     .toLowerCase();
 }
+
+/** A row of `__outbox`, as the alarm reads it. */
+type OutboxRow = {
+  id: number;
+  instance_key: string;
+  message: string;
+  recorded_at: number;
+  attempts: number;
+  batch: number;
+};
 
 /**
  * Migration attempt info returned by getMigrationAttempts()
@@ -333,9 +345,9 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   private ensureOutboxTable(): void {
     if (this.outboxReady) return;
     this.sql.exec(OUTBOX_DDL);
-    // An outbox an older durable-db created: CREATE TABLE IF NOT EXISTS left it without next_attempt_at.
-    const columns = this.sql.exec(`PRAGMA table_info(${OUTBOX_TABLE})`).toArray() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === 'next_attempt_at')) this.sql.exec(OUTBOX_NEXT_ATTEMPT_COLUMN);
+    // An outbox an older durable-db created: CREATE TABLE IF NOT EXISTS left it without the columns added since.
+    const columns = new Set((this.sql.exec(`PRAGMA table_info(${OUTBOX_TABLE})`).toArray() as Array<{ name: string }>).map(({ name }) => name));
+    for (const { column, ddl } of OUTBOX_ADDED_COLUMNS) if (!columns.has(column)) this.sql.exec(ddl);
     this.outboxReady = true;
   }
 
@@ -365,35 +377,42 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Delivers the outbox: up to OUTBOX_DELIVERY_SIZE of the messages that are
-   * due, oldest first, to the sink. What was delivered is deleted; a message
-   * the sink did not take (a delivery that throws: all of it; `{ retry }`:
-   * those) is retried on its own backoff (5 s, doubling, at most 5 minutes),
-   * so it never holds back the messages behind it — which also means no order
-   * is kept across a failure. One that failed `outboxMaxAttempts` deliveries
+   * Delivers the outbox, one delivery an alarm: the batch of the oldest
+   * message due — the messages no delivery has failed yet, up to
+   * OUTBOX_DELIVERY_SIZE, or one half a failed delivery left — to the sink.
+   * What was delivered is deleted; a message the sink did not take (a
+   * delivery that throws: all of it; `{ retry }`: those) is retried on its own
+   * backoff (5 s, doubling, at most 5 minutes), so it never holds back the
+   * messages behind it — which also means no order is kept across a failure —
+   * and the messages one delivery left are split in two halves, each its own
+   * delivery (`outboxBatches()`), so one that fails every delivery holding it
+   * is cut off from the others within a few retries. One that failed
+   * `outboxMaxAttempts` deliveries, or that the sink answered in `{ dead }`,
    * is moved to `__outbox_dead`, logged, and never retried by itself. The
-   * alarm is then set to the earliest row due. A message arrives at least
-   * once. A subclass with an alarm of its own calls `super.alarm()`.
+   * alarm is then set to the earliest row due (now, when more are). A message
+   * arrives at least once. A subclass with an alarm of its own calls
+   * `super.alarm()`.
    */
   async alarm(): Promise<void> {
     if (!this.outboxSink) return;
     this.ensureOutboxTable();
-    const rows = this.sql
+    const due = this.sql
       .exec(
-        `SELECT id, instance_key, message, recorded_at, attempts FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY id LIMIT ?`,
+        `SELECT id, instance_key, message, recorded_at, attempts, batch FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY id LIMIT ?`,
         Date.now(),
         OUTBOX_DELIVERY_SIZE,
       )
-      .toArray() as Array<{ id: number; instance_key: string; message: string; recorded_at: number; attempts: number }>;
-    if (rows.length > 0) await this.deliverOutbox(rows);
-    // The earliest row due — pushed while this delivery ran, beyond this batch, or waiting for its retry.
+      .toArray() as OutboxRow[];
+    if (due.length > 0) {
+      const batch = due[0]!.batch;
+      await this.deliverOutbox(due.filter((row) => row.batch === batch));
+    }
+    // The earliest row due — another batch, pushed while this delivery ran, beyond this one, or waiting for its retry.
     const next = (this.sql.exec(`SELECT min(next_attempt_at) AS at FROM ${OUTBOX_TABLE}`).toArray()[0] as { at: number | null } | undefined)?.at;
     if (next !== null && next !== undefined) await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
   }
 
-  private async deliverOutbox(
-    rows: Array<{ id: number; instance_key: string; message: string; recorded_at: number; attempts: number }>,
-  ): Promise<void> {
+  private async deliverOutbox(rows: OutboxRow[]): Promise<void> {
     const database = this.knownDatabaseName();
     const envelopes: OutboxEnvelope[] = rows.map((row) => ({
       message: JSON.parse(row.message) as OutboxMessage,
@@ -403,71 +422,86 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       recordedAt: row.recorded_at,
       attempts: row.attempts,
     }));
-    let settled: ReturnType<typeof settleOutboxDelivery>;
+    let settled: SettledOutboxDelivery;
     try {
       settled = settleOutboxDelivery(envelopes, await this.outboxSink!.deliver(envelopes, { env: this.env }));
     } catch (error) {
-      settled = { retry: new Set(envelopes), error };
+      settled = { retry: new Set(envelopes), error, dead: new Set(), deadError: undefined };
     }
 
     // Settled together: one synchronous block, committed as one.
     const now = Date.now();
-    const lastError = settled.retry.size > 0 ? String(settled.error) : null;
     const maxAttempts = this.outboxMaxAttempts;
-    let retried = 0;
-    let dead = 0;
+    let deadTable = false;
+    const bury = (row: OutboxRow, attempts: number, error: unknown) => {
+      if (!deadTable) this.sql.exec(OUTBOX_DEAD_DDL);
+      deadTable = true;
+      this.sql.exec(
+        `INSERT INTO ${OUTBOX_DEAD_TABLE} (id, instance_key, message, recorded_at, attempts, last_error, dead_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        row.id,
+        row.instance_key,
+        row.message,
+        row.recorded_at,
+        attempts,
+        String(error),
+        now,
+      );
+      this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
+    };
+    let exhausted = 0;
+    let givenUp = 0;
+    const retried: OutboxRow[] = [];
+    rows.forEach((row, index) => {
+      const envelope = envelopes[index]!;
+      if (settled.dead.has(envelope)) {
+        bury(row, row.attempts + 1, settled.deadError);
+        givenUp++;
+      } else if (!settled.retry.has(envelope)) {
+        this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
+      } else if (row.attempts + 1 >= maxAttempts) {
+        bury(row, row.attempts + 1, settled.error);
+        exhausted++;
+      } else {
+        retried.push(row);
+      }
+    });
+    // The retried rows in two halves, each a batch — a delivery — of its own.
+    const batches = outboxBatches(retried.map(({ id }) => id));
     let soonest = Infinity;
     let fewest = Infinity;
     let most = 0;
-    rows.forEach((row, index) => {
-      if (!settled.retry.has(envelopes[index]!)) {
-        this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
-        return;
-      }
+    retried.forEach((row, index) => {
       const attempts = row.attempts + 1;
-      if (attempts >= maxAttempts) {
-        if (dead === 0) this.sql.exec(OUTBOX_DEAD_DDL);
-        this.sql.exec(
-          `INSERT INTO ${OUTBOX_DEAD_TABLE} (id, instance_key, message, recorded_at, attempts, last_error, dead_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          row.id,
-          row.instance_key,
-          row.message,
-          row.recorded_at,
-          attempts,
-          lastError,
-          now,
-        );
-        this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
-        dead++;
-        return;
-      }
       const delay = outboxRetryDelay(attempts);
       this.sql.exec(
-        `UPDATE ${OUTBOX_TABLE} SET attempts = ?, last_error = ?, next_attempt_at = ? WHERE id = ?`,
+        `UPDATE ${OUTBOX_TABLE} SET attempts = ?, last_error = ?, next_attempt_at = ?, batch = ? WHERE id = ?`,
         attempts,
-        lastError,
+        String(settled.error),
         now + delay,
+        batches[index]!,
         row.id,
       );
-      retried++;
       soonest = Math.min(soonest, delay);
       fewest = Math.min(fewest, attempts);
       most = Math.max(most, attempts);
     });
 
-    if (retried > 0) {
+    if (retried.length > 0) {
       const attempt = fewest === most ? `attempt ${most}` : `attempts ${fewest}–${most}`;
       console.error(
-        `[db] ${retried} of ${rows.length} outbox message(s) of ${database} not delivered (${attempt} of ${maxAttempts}); retrying in ${soonest / 1000}s:`,
+        `[db] ${retried.length} of ${rows.length} outbox message(s) of ${database} not delivered (${attempt} of ${maxAttempts}); retrying in ${soonest / 1000}s:`,
         settled.error,
       );
     }
-    if (dead > 0) {
+    const aside = `to the table ${OUTBOX_DEAD_TABLE} of its Durable Object: they are not retried — deliver them from there, then delete them.`;
+    if (exhausted > 0) {
       console.error(
-        `[db] ${dead} outbox message(s) of ${database} reached ${maxAttempts} failed deliveries (outbox maxAttempts) and were moved ` +
-          `to the table ${OUTBOX_DEAD_TABLE} of its Durable Object: they are not retried — deliver them from there, then delete them. The last error:`,
+        `[db] ${exhausted} outbox message(s) of ${database} reached ${maxAttempts} failed deliveries (outbox maxAttempts) and were moved ${aside} The last error:`,
         settled.error,
       );
+    }
+    if (givenUp > 0) {
+      console.error(`[db] ${givenUp} outbox message(s) of ${database} the sink answered in { dead } were moved ${aside} The error:`, settled.deadError);
     }
   }
 

@@ -11,6 +11,21 @@ import {
 import { generateDurableObjectsModule } from '../../src/vite/modules/generator';
 import type { DatabaseInfo } from '../../src/db';
 
+/** A Queue binding that refuses what Cloudflare Queues refuses: a sendBatch of more than 100 messages or 256 KB, a message over 128 KB (about 100 bytes of each the queue's own). */
+function strictQueue() {
+  const sent: unknown[][] = [];
+  const bytes = (body: unknown) => new TextEncoder().encode(JSON.stringify(body)).byteLength + 100;
+  const sendBatch = vi.fn(async (messages: Array<{ body: unknown; contentType?: string }>) => {
+    if (messages.some((m) => m.contentType !== 'json')) throw new Error('sent as something other than JSON');
+    if (messages.length > 100) throw new Error('Too many messages in the batch');
+    const sizes = messages.map((m) => bytes(m.body));
+    if (sizes.some((size) => size > 128_000)) throw new Error('Message too large');
+    if (sizes.reduce((sum, size) => sum + size, 0) > 256_000) throw new Error('Batch too large');
+    sent.push(messages.map((m) => m.body));
+  });
+  return { sent, sendBatch };
+}
+
 const envelope = (message: unknown, rest: Partial<OutboxEnvelope> = {}): OutboxEnvelope => ({
   message,
   database: 'main',
@@ -37,7 +52,7 @@ describe('the outbox', () => {
     const envelopes = Array.from({ length: 150 }, (_, i) => envelope({ n: i }));
     expect(await queueOutboxSink('JOBS').deliver(envelopes, { env: { JOBS: { sendBatch } } })).toBeUndefined();
     expect(sendBatch.mock.calls.map(([batch]) => (batch as unknown[]).length)).toEqual([100, 50]);
-    expect((sendBatch.mock.calls[0] as unknown as [Array<{ body: unknown }>])[0][0]).toEqual({ body: { n: 0 } });
+    expect((sendBatch.mock.calls[0] as unknown as [Array<{ body: unknown }>])[0][0]).toEqual({ body: { n: 0 }, contentType: 'json' });
     await expect(queueOutboxSink('NOPE').deliver(envelopes, { env: {} })).rejects.toThrow('Queue binding NOPE');
   });
 
@@ -60,6 +75,51 @@ describe('the outbox', () => {
     });
   });
 
+  it("packs a Queue's sendBatch by its bytes as well as its count: at most 100 messages and 256 KB a call", async () => {
+    const queue = strictQueue();
+    // 100 email jobs of about 3 KB: one sendBatch of them would be 310 KB.
+    const emails = Array.from({ length: 100 }, (_, i) => envelope({ job: 'email', html: 'x'.repeat(3_000), i }));
+    expect(await queueOutboxSink('JOBS').deliver(emails, { env: { JOBS: queue } })).toBeUndefined();
+    expect(queue.sent.flat()).toEqual(emails.map((e) => e.message));
+    expect(queue.sent.length).toBeGreaterThan(1);
+    // Bytes, not characters: three messages of 50 000 'å' are 150 KB of text and 300 KB of UTF-8.
+    const wide = strictQueue();
+    const letters = Array.from({ length: 3 }, () => envelope('å'.repeat(50_000)));
+    expect(await queueOutboxSink('JOBS').deliver(letters, { env: { JOBS: wide } })).toBeUndefined();
+    expect(wide.sent.map((batch) => batch.length)).toEqual([2, 1]);
+  });
+
+  it('answers a message too large for a queue message in { dead } at once, and sends the others', async () => {
+    const queue = strictQueue();
+    const small = Array.from({ length: 99 }, (_, i) => envelope(i));
+    const large = envelope({ job: 'import', rows: 'x'.repeat(200_000) });
+    const answer = (await queueOutboxSink('JOBS').deliver([...small.slice(0, 50), large, ...small.slice(50)], { env: { JOBS: queue } })) as {
+      retry?: OutboxEnvelope[];
+      dead: OutboxEnvelope[];
+      error: unknown;
+    };
+    expect(queue.sent.flat()).toEqual(small.map((e) => e.message));
+    expect(answer.retry).toBeUndefined();
+    expect(answer.dead).toEqual([large]);
+    expect(answer.dead[0]).toBe(large);
+    expect(String(answer.error)).toMatch(/1 message\(s\) of 200\d{3} bytes, more than a queue message holds \(128000\)/);
+
+    // Both at once: the unsent ones retried, the large one given up on, the error saying both.
+    const down = new Error('queue is down');
+    const failing = vi.fn(async () => {
+      throw down;
+    });
+    const both = (await queueOutboxSink('JOBS').deliver([small[0]!, large], { env: { JOBS: { sendBatch: failing } } })) as {
+      retry: OutboxEnvelope[];
+      dead: OutboxEnvelope[];
+      error: unknown;
+    };
+    expect(both.retry).toEqual([small[0]]);
+    expect(both.dead).toEqual([large]);
+    expect(String(both.error)).toContain('queue is down');
+    expect(String(both.error)).toContain('more than a queue message holds');
+  });
+
   it('settles a delivery: nothing answered delivered all, { retry } retries exactly those', () => {
     const [a, b, c] = [envelope('a'), envelope('b'), envelope('c')];
     expect(settleOutboxDelivery([a, b, c], undefined).retry.size).toBe(0);
@@ -71,6 +131,26 @@ describe('the outbox', () => {
     expect([...settled.retry]).toEqual([b]);
     expect(settled.error).toBe(why);
     expect(String(settleOutboxDelivery([a, b, c], { retry: [c] }).error)).toContain('answered it in { retry }');
+  });
+
+  it('settles the envelopes a delivery answers in { dead }: given up on, the others delivered', () => {
+    const [a, b, c] = [envelope('a'), envelope('b'), envelope('c')];
+    const gone = new Error('410 for c');
+    const settled = settleOutboxDelivery([a, b, c], { retry: [a], dead: [c], error: gone });
+    expect([...settled.retry]).toEqual([a]);
+    expect([...settled.dead]).toEqual([c]);
+    expect(settled.error).toBe(gone);
+    expect(settled.deadError).toBe(gone);
+    const alone = settleOutboxDelivery([a, b, c], { dead: [b] });
+    expect([...alone.retry]).toEqual([]);
+    expect([...alone.dead]).toEqual([b]);
+    expect(String(alone.deadError)).toContain('answered it in { dead }');
+    // An envelope both retried and given up on is the sink's mistake: every envelope is retried.
+    for (const answer of [{ retry: [a], dead: [a] }, { dead: 'c' }, { dead: [{ ...c }] }]) {
+      const mistaken = settleOutboxDelivery([a, b, c], answer);
+      expect(mistaken.retry).toEqual(new Set([a, b, c]));
+      expect(mistaken.dead.size).toBe(0);
+    }
   });
 
   it('retries every envelope of a delivery whose { retry } names one it was not handed', () => {
@@ -107,8 +187,15 @@ describe('the outbox', () => {
     expect(tenantOfInstanceKey('acme__dev_mw20', dev)).toBe('acme');
     expect(tenantOfInstanceKey('team__dev_ops__dev_mw20', dev)).toBe('team__dev_ops');
     expect(tenantOfInstanceKey('global__dev_mw20', dev)).toBe('global');
-    // A key of another epoch (an object `db reset` left behind) is not cut at a guess.
-    expect(tenantOfInstanceKey('acme__dev_old', dev)).toBe('acme__dev_old');
+  });
+
+  it("in dev, reads a key of an earlier epoch (an object `db reset` left behind) without that epoch: every dev key has one", () => {
+    const dev = { instance: 'per-tenant', devEpochSuffix: '__dev_mw20' } as const;
+    expect(tenantOfInstanceKey('acme__dev_mw1z', dev)).toBe('acme');
+    expect(tenantOfInstanceKey('team__dev_ops__dev_mw1z', dev)).toBe('team__dev_ops');
+    // A key without an epoch is kept whole; in production a key is the tenant whole.
+    expect(tenantOfInstanceKey('acme', dev)).toBe('acme');
+    expect(tenantOfInstanceKey('acme__dev_mw1z', { instance: 'per-tenant' })).toBe('acme__dev_mw1z');
   });
 
   it('refuses a key alone: the instance kind decides', () => {

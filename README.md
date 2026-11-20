@@ -807,7 +807,7 @@ Epochs are base36-encoded timestamps stored in `node_modules/.cache/durable-db/s
 
 **How the epoch reaches the worker**: the Vite plugin serves a virtual module (`virtual:durable-db/__devEpoch`) exporting `applyDevEpoch(key, dbName)`, and every generated stub routes its instance key through it with its database's name. In dev the plugin embeds the epochs from `state.json`; in production builds the epoch is `null` and `applyDevEpoch` is the identity function, so production keys are never suffixed. The dev server watches durable-db's dev cache directory and reloads on change, so both `db reset` (new epoch → fresh instances) and `db push` (new dev migration → re-embedded into the DO module) take effect on the next request without restarting.
 
-**The tenant inside the object** is worked out from what the build applied, never by cutting the key at a guess: each generated class knows its database's `instance` and its own suffix (`applyDevEpoch('', name)`: `__dev_<epoch>` in dev, nothing in production). A global database's instance has no tenant, whatever its key; a per-tenant one's tenant is its key without exactly that suffix — so a tenant named `global` is a tenant, and a tenant id that contains `__dev_` is kept whole. That is what `getTenantId()` answers in an action and what an outbox envelope's `tenantId` says; `tenantOfInstanceKey(key, { instance, devEpochSuffix })` (`durable-db/db`) does the same for a key you hold.
+**The tenant inside the object** is worked out from what the build applied, never by cutting the key at a guess: each generated class knows its database's `instance` and its own suffix (`applyDevEpoch('', name)`: `__dev_<epoch>` in dev, nothing in production). A global database's instance has no tenant, whatever its key; a per-tenant one's tenant is its key without exactly that suffix — so a tenant named `global` is a tenant, and a tenant id that contains `__dev_` is kept whole. In dev every key carries an epoch, so a key that does not end with the current one is an earlier epoch's — an object `db reset` left behind, whose alarm still delivers what waits in its outbox — and its trailing `__dev_<epoch>` is cut; in production the key is the tenant, whole. That is what `getTenantId()` answers in an action and what an outbox envelope's `tenantId` says; `tenantOfInstanceKey(key, { instance, devEpochSuffix })` (`durable-db/db`) does the same for a key you hold.
 
 ### Dev State Structure
 
@@ -1152,24 +1152,27 @@ export default async function deliver(envelopes: OutboxEnvelope[], { env }: { en
 }
 ```
 
-A sink may also settle a delivery one envelope at a time: answer `{ retry }` with the envelopes it could not deliver — the very objects it was handed — and every other one counts as delivered.
+A sink may also settle a delivery one envelope at a time: answer `{ retry }` with the envelopes it could not deliver now and `{ dead }` with those it never can — the very objects it was handed, either list may be left out — and every other one counts as delivered.
 
 ```ts
 export default async function deliver(envelopes: OutboxEnvelope[], { env }: { env: Env }) {
   const retry: OutboxEnvelope[] = [];
+  const dead: OutboxEnvelope[] = [];
   for (const envelope of envelopes) {
     const response = await fetch(env.WEBHOOK_URL, { method: 'POST', body: JSON.stringify(envelope.message) });
-    if (!response.ok) retry.push(envelope);
+    if (response.status >= 500) retry.push(envelope);
+    else if (!response.ok) dead.push(envelope); // a 4xx: sending it again changes nothing
   }
-  return { retry, error: retry.length > 0 ? new Error('the webhook refused some') : undefined };
+  return { retry, dead, error: retry.length + dead.length > 0 ? new Error('the webhook refused some') : undefined };
 }
 ```
 
 - **With the action's writes.** The messages are written to the object's `__outbox` table when the handler resolves, in the same synchronous block as its last writes — the Durable Object commits them together — and the alarm that delivers them is set with them. A handler that throws records none. An action called from another action of the same database shares its outbox.
 - **At least once, each on its own clock.** The alarm hands the sink the messages that are due, oldest first, up to 100 per delivery, and deletes what was delivered. A message the sink did not take — every envelope of a delivery that throws, the ones answered in `{ retry }` — stays in the table with its error and is retried on its own backoff (5 s, doubling, at most 5 minutes); the alarm is set to the earliest message due. A failing message never holds back the ones behind it, which also means **no order is kept across a failure**: a message recorded later may be delivered before one recorded earlier that is waiting for its retry. A message may arrive twice — make what consumes it idempotent.
-- **Not forever.** A message that failed `maxAttempts` deliveries (default 100, about eight hours at the five-minute ceiling; `durableDb({ outbox: { queue: 'EVENTS', maxAttempts: 20 } })`) is moved to the object's `__outbox_dead` table — its message, instance key, `recorded_at`, attempts, last error and `dead_at` — and logged with `console.error`. It is never retried by itself and never dropped: deliver it from there, then delete it.
+- **Cut off from the ones it was delivered with.** A delivery that throws does not say which message failed it, so the messages a failed delivery leaves are split in two for their retry, each half a delivery of its own (one per alarm), until the one that fails every delivery holding it is alone: of 100 messages pushed together, one of them bad, the other 99 are delivered within seven retries (about ten minutes), and only the bad one goes on failing. A message recorded later is never put into a retried delivery. Answering the bad one in `{ retry }` or `{ dead }` cuts it off at once.
+- **Not forever.** A message that failed `maxAttempts` deliveries (default 100, about eight hours at the five-minute ceiling; `durableDb({ outbox: { queue: 'EVENTS', maxAttempts: 20 } })`), or that the sink answered in `{ dead }`, is moved to the object's `__outbox_dead` table — its message, instance key, `recorded_at`, attempts, last error and `dead_at` — and logged with `console.error`. It is never retried by itself and never dropped: deliver it from there, then delete it.
 - **Envelopes.** The sink gets `{ message, database, instanceKey, tenantId, recordedAt, attempts }`: `database` is the name the database is known by (`db` commands use it), `tenantId` a per-tenant instance's tenant — null for a global database, by its instance kind, so a per-tenant database's tenant named `global` is that tenant (see [the tenant inside the object](#epoch-system)) — and `attempts` how many deliveries of it failed before this one.
-- **The Queue sink** sends each message as it is, 100 to a `sendBatch`; when one fails, the batches before it count as delivered and the rest are retried.
+- **The Queue sink** sends each message as it is, as JSON, in as few `sendBatch` calls as Cloudflare Queues takes: at most 100 messages and 256 KB a call. When one fails, the batches before it count as delivered and the rest are retried. A message larger than a queue message holds (128 KB, about 100 bytes of it the queue's own) is never sent: it is answered in `{ dead }`, so it goes to `__outbox_dead` at once instead of failing the batch it would be in.
 - **JSON.** A message is a JSON value, checked when it is pushed.
 - **Typed.** `push()` takes any JSON value until you declare the message: `declare global { interface DurableDbOutbox { message: { type: 'welcome-email'; userId: string } } }`.
 - **Without a sink** `ctx.outbox.push()` throws, naming the option. The generated classes use the alarm for the outbox; a hand-written subclass with an alarm of its own calls `super.alarm()`.

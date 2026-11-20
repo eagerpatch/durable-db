@@ -172,6 +172,24 @@ describe('the outbox delivery', () => {
     expect(dev.handed[0]![0]).toMatchObject({ instanceKey: 'team__dev_ops__dev_mw20', tenantId: 'team__dev_ops' });
   });
 
+  it('reads the tenant of a key an earlier dev epoch made (an object `db reset` left behind) without that epoch', async () => {
+    // Rows recorded under the epoch k1 wait for their retry; `db reset` moved the build to k2.
+    const dev = outboxDatabase({ name: 'main', devEpochSuffix: '__dev_k2' });
+    await dev.database.record('acme__dev_k1', ['x']);
+    await dev.database.record('team__dev_ops__dev_k1', ['y']);
+    await dev.database.alarm();
+    expect(dev.handed.flat().map(({ instanceKey, tenantId }) => ({ instanceKey, tenantId }))).toEqual([
+      { instanceKey: 'acme__dev_k1', tenantId: 'acme' },
+      { instanceKey: 'team__dev_ops__dev_k1', tenantId: 'team__dev_ops' },
+    ]);
+
+    // In production nothing is cut: the key is the tenant.
+    const production = outboxDatabase({ name: 'main' });
+    await production.database.record('acme__dev_k1', ['x']);
+    await production.database.alarm();
+    expect(production.handed[0]![0]!.tenantId).toBe('acme__dev_k1');
+  });
+
   it('upgrades an outbox an older version created (no next_attempt_at) and delivers what it holds', async () => {
     const t = outboxDatabase({ name: 'main' });
     t.sqlite.exec(`CREATE TABLE __outbox (
@@ -186,7 +204,7 @@ describe('the outbox delivery', () => {
     await t.database.alarm();
     expect(t.handed).toEqual([[expect.objectContaining({ message: 'left over', recordedAt: 5, attempts: 2 })]]);
     const columns = (t.sqlite.prepare('PRAGMA table_info(__outbox)').all() as Array<{ name: string }>).map((c) => c.name);
-    expect(columns).toContain('next_attempt_at');
+    expect(columns).toEqual(expect.arrayContaining(['next_attempt_at', 'batch']));
     // Once is enough: a new message is recorded and delivered on the upgraded table.
     await t.database.record('acme', ['new']);
     await t.database.alarm();
@@ -219,6 +237,114 @@ describe('the outbox delivery', () => {
     expect(t.rows()).toMatchObject([{ attempts: 2, next_attempt_at: 1_015_000 }]);
   });
 
+  it('cuts a message that fails every delivery holding it off from the ones it was delivered with', async () => {
+    // The webhook answers 400 for P, and the sink throws for the delivery: A must not go down with it.
+    const t = outboxDatabase({ name: 'main', maxAttempts: 5 });
+    const delivered: unknown[] = [];
+    t.sink((envelopes) => {
+      if (envelopes.some((e) => e.message === 'P')) throw new Error('400 for P');
+      delivered.push(...envelopes.map((e) => e.message));
+    });
+    await t.database.record('acme', ['A', 'P']);
+    for (let alarm = 0; alarm < 20 && t.rows().length > 0; alarm++) {
+      await t.database.alarm();
+      now = Math.max(now, t.alarmAt() ?? now);
+    }
+    expect(delivered).toEqual(['A']);
+    // A went at the first retry, alone; P failed alone from then on.
+    expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['A', 'P'], ['A'], ['P'], ['P'], ['P'], ['P']]);
+    expect(t.rows('__outbox_dead').map(({ message, attempts }) => ({ message, attempts }))).toEqual([{ message: '"P"', attempts: 5 }]);
+  });
+
+  it('splits a failed delivery in two for its retry, each half a delivery of its own, until the failing message is alone', async () => {
+    const t = outboxDatabase({ name: 'main' });
+    t.sink((envelopes) => {
+      if (envelopes.some((e) => e.message === 5)) throw new Error('5 bounced');
+    });
+    await t.database.record('acme', [0, 1, 2, 3, 4, 5, 6, 7]);
+    for (let alarm = 0; alarm < 8; alarm++) {
+      await t.database.alarm();
+      now = Math.max(now, t.alarmAt() ?? now);
+    }
+    // One delivery an alarm; every message but 5 delivered within three retries.
+    expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([
+      [0, 1, 2, 3, 4, 5, 6, 7],
+      [0, 1, 2, 3],
+      [4, 5, 6, 7],
+      [4, 5],
+      [6, 7],
+      [4],
+      [5],
+      [5],
+    ]);
+    expect(t.rows().map(({ message, attempts }) => ({ message, attempts }))).toEqual([{ message: '5', attempts: 5 }]);
+
+    // Messages recorded while 5 is due again are not taken into its delivery: they go with the other new ones.
+    await t.database.record('acme', [8, 9]);
+    await t.database.alarm();
+    await t.database.alarm();
+    expect(t.handed.slice(-2).map((envelopes) => envelopes.map((e) => e.message))).toEqual([[5], [8, 9]]);
+  });
+
+  it('of 100 messages pushed together, one of them bad, delivers the other 99 within seven retries (about ten minutes)', async () => {
+    const t = outboxDatabase({ name: 'main' });
+    const deliveredAt: Array<{ message: unknown; attempts: number; at: number }> = [];
+    t.sink((envelopes) => {
+      if (envelopes.some((e) => e.message === 63)) throw new Error('63 bounced');
+      deliveredAt.push(...envelopes.map(({ message, attempts }) => ({ message, attempts, at: now })));
+    });
+    await t.database.record('acme', Array.from({ length: 100 }, (_, i) => i));
+    for (let alarm = 0; alarm < 100 && deliveredAt.length < 99; alarm++) {
+      await t.database.alarm();
+      now = Math.max(now, t.alarmAt() ?? now);
+    }
+    expect(deliveredAt.map((d) => d.message).sort((a, b) => (a as number) - (b as number))).toEqual(
+      Array.from({ length: 100 }, (_, i) => i).filter((i) => i !== 63),
+    );
+    expect(Math.max(...deliveredAt.map((d) => d.attempts))).toBe(7);
+    expect(Math.max(...deliveredAt.map((d) => d.at)) - 1_000_000).toBe(5_000 + 10_000 + 20_000 + 40_000 + 80_000 + 160_000 + 300_000);
+    // Fifteen deliveries, not one a message.
+    expect(t.handed.length).toBe(15);
+  });
+
+  it('splits the envelopes a { retry } answers too, and moves the ones answered in { dead } aside at once', async () => {
+    const t = outboxDatabase({ name: 'main' });
+    await t.database.record('acme', [1, 2, 3, 4, 5]);
+    const refused = new Error('the webhook answered 410 for 5');
+    t.sink((envelopes) => ({
+      retry: envelopes.filter((e) => e.message === 1 || e.message === 3),
+      dead: envelopes.filter((e) => e.message === 5),
+      error: refused,
+    }));
+    await t.database.alarm();
+    expect(t.rows().map(({ message, attempts }) => ({ message, attempts }))).toEqual([
+      { message: '1', attempts: 1 },
+      { message: '3', attempts: 1 },
+    ]);
+    expect(t.rows('__outbox_dead')).toEqual([
+      {
+        id: 5,
+        instance_key: 'acme',
+        message: '5',
+        recorded_at: 1_000_000,
+        attempts: 1,
+        last_error: 'Error: the webhook answered 410 for 5',
+        dead_at: 1_000_000,
+      },
+    ]);
+    const logged = errors.mock.calls.map(([text]) => String(text));
+    expect(logged.some((text) => text.includes('1 outbox message(s) of main the sink answered in { dead }') && text.includes('__outbox_dead'))).toBe(
+      true,
+    );
+    // 1 and 3 are retried each on its own.
+    now += 5_000;
+    t.sink(() => {});
+    await t.database.alarm();
+    await t.database.alarm();
+    expect(t.handed.slice(1).map((envelopes) => envelopes.map((e) => e.message))).toEqual([[1], [3]]);
+    expect(t.rows()).toEqual([]);
+  });
+
   it('settles a delivery one by one: { retry } keeps exactly those, every other envelope of it delivered', async () => {
     const t = outboxDatabase({ name: 'main' });
     await t.database.record('acme', [1, 2, 3, 4]);
@@ -231,9 +357,10 @@ describe('the outbox delivery', () => {
     ]);
     expect(String(errors.mock.calls[0]![0])).toContain('2 of 4 outbox message(s) of main not delivered (attempt 1 of 100); retrying in 5s');
 
-    // A sink answering envelopes it was not handed delivered nothing: all of it is retried.
+    // A sink answering envelopes it was not handed delivered nothing: all of it is retried (1 and 3, each its own delivery now).
     now += 5_000;
     t.sink((envelopes) => ({ retry: envelopes.map((e) => ({ ...e })) }));
+    await t.database.alarm();
     await t.database.alarm();
     expect(t.rows().map(({ message, attempts }) => ({ message, attempts }))).toEqual([
       { message: '1', attempts: 2 },

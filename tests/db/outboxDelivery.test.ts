@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { loadSqlite } from '../../src/testing';
-import type { OutboxDelivery, OutboxEnvelope, OutboxSink } from '../../src/db/outbox';
+import { queueOutboxSink, type OutboxDelivery, type OutboxEnvelope, type OutboxSink } from '../../src/db/outbox';
 
 // The outbox's delivery (SqliteDurableObject's alarm) over a real in-memory
 // SQLite: what the sink is handed, and what is kept, retried and moved aside.
@@ -30,11 +30,19 @@ function createState() {
   const { DatabaseSync } = loadSqlite();
   const sqlite = new DatabaseSync(':memory:');
   let alarm: number | null = null;
+  /** Rows written (INSERT, UPDATE, DELETE), and the reads of `__outbox` itself, since the test began. */
+  const counted = { written: 0, outboxReads: 0 };
   const state = {
     storage: {
       sql: {
         exec(query: string, ...params: unknown[]) {
-          const rows = sqlite.prepare(query).all(...(params as never[]));
+          const statement = sqlite.prepare(query);
+          if (/^\s*(INSERT|UPDATE|DELETE)/i.test(query)) {
+            counted.written += Number(statement.run(...(params as never[])).changes);
+            return { toArray: () => [] };
+          }
+          if (/^\s*SELECT\b[\s\S]*\bFROM __outbox\b/i.test(query)) counted.outboxReads++;
+          const rows = statement.all(...(params as never[]));
           return { toArray: () => rows };
         },
       },
@@ -50,7 +58,16 @@ function createState() {
   };
   const rows = (table = '__outbox') =>
     sqlite.prepare(`SELECT * FROM ${table} ORDER BY id`).all() as Array<Record<string, unknown>>;
-  return { state, sqlite, rows, alarmAt: () => alarm };
+  return {
+    state,
+    sqlite,
+    rows,
+    alarmAt: () => alarm,
+    clearAlarm: () => {
+      alarm = null;
+    },
+    counted,
+  };
 }
 
 type Deliver = (envelopes: readonly OutboxEnvelope[]) => OutboxDelivery | Promise<OutboxDelivery>;
@@ -81,7 +98,7 @@ function outboxDatabase(options: {
     }
   }
   if (options.className) Object.defineProperty(Database, 'name', { value: options.className });
-  const { state, sqlite, rows, alarmAt } = createState();
+  const { state, sqlite, rows, alarmAt, clearAlarm, counted } = createState();
   const database = new Database(state as never, {});
   const settings = database as unknown as Record<string, unknown>;
   if (options.name !== undefined) settings.databaseName = options.name;
@@ -93,7 +110,34 @@ function outboxDatabase(options: {
     sqlite,
     rows,
     alarmAt,
+    counted,
     handed,
+    /**
+     * Runs every alarm due until `ms` from now, recording a message each
+     * `every` ms when given; answers how many alarms ran. The clock moves to
+     * each alarm's time.
+     */
+    async run(ms: number, every?: { ms: number; record: (at: number) => unknown[] }): Promise<number> {
+      const end = now + ms;
+      let push = every ? now + every.ms : Infinity;
+      let alarms = 0;
+      for (;;) {
+        const at = alarmAt();
+        const next = Math.min(at === null ? Infinity : Math.max(at, now), push);
+        if (next > end) break;
+        now = next;
+        if (next === push) {
+          await database.record('acme', every!.record(now));
+          push += every!.ms;
+          continue;
+        }
+        clearAlarm();
+        alarms++;
+        await database.alarm();
+      }
+      now = end;
+      return alarms;
+    },
     /** `__outbox_dead`'s rows, none while nothing was moved there. */
     dead: () =>
       sqlite.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox_dead'`).all().length > 0
@@ -270,14 +314,24 @@ describe('the outbox delivery', () => {
       delivered.push(...envelopes.map((e) => e.message));
     });
     await t.database.record('acme', ['A', 'P']);
-    for (let alarm = 0; alarm < 20 && t.rows().length > 0; alarm++) {
+    for (let alarm = 0; alarm < 6; alarm++) {
       await t.database.alarm();
       now = Math.max(now, t.alarmAt() ?? now);
     }
     expect(delivered).toEqual(['A']);
     // A went at the first retry, alone; P failed alone from then on.
-    expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['A', 'P'], ['A'], ['P'], ['P'], ['P'], ['P']]);
-    expect(t.rows('__outbox_dead').map(({ message, attempts }) => ({ message, attempts }))).toEqual([{ message: '"P"', attempts: 5 }]);
+    expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['A', 'P'], ['A'], ['P'], ['P'], ['P'], ['P'], ['P']]);
+    // Past the cap, but buried only for a failure while something else gets through: alone, P may be failing for the sink.
+    expect(t.dead()).toEqual([]);
+    expect(t.rows()).toMatchObject([{ message: '"P"', attempts: 6 }]);
+
+    // Something else is delivered: P's next failure alone is its own, and buries it.
+    await t.database.record('acme', ['B']);
+    await t.database.alarm();
+    now = t.alarmAt()!;
+    await t.database.alarm();
+    expect(delivered).toEqual(['A', 'B']);
+    expect(t.dead().map(({ message, attempts }) => ({ message, attempts }))).toEqual([{ message: '"P"', attempts: 7 }]);
   });
 
   it('splits a failed delivery in two for its retry, each half a delivery of its own, until the failing message is alone', async () => {
@@ -305,10 +359,11 @@ describe('the outbox delivery', () => {
     // Every message but 5 delivered within three retries; 5 failed alone from the fourth on.
     expect(t.rows().map(({ message, attempts }) => ({ message, attempts }))).toEqual([{ message: '5', attempts: 5 }]);
 
-    // Messages recorded while 5 is due again are not taken into its delivery: they go with the other new ones.
+    // Messages recorded while 5 is due again are not taken into its delivery: they go with the other new ones, first —
+    // and 5, which failed while others went through, in a delivery of its own after them.
     await t.database.record('acme', [8, 9]);
     await t.database.alarm();
-    expect(t.handed.slice(-2).map((envelopes) => envelopes.map((e) => e.message))).toEqual([[5], [8, 9]]);
+    expect(t.handed.slice(-2).map((envelopes) => envelopes.map((e) => e.message))).toEqual([[8, 9], [5]]);
   });
 
   it('of 100 messages pushed together, one of them bad, delivers the other 99 within seven retries (about ten minutes)', async () => {
@@ -413,17 +468,21 @@ describe('the outbox delivery', () => {
     expect(t.rows().map((row) => row.message)).toEqual(['"after"']);
   });
 
-  it('moves a message that failed maxAttempts deliveries to __outbox_dead, logged, and never retries it', async () => {
+  it('moves a message that failed maxAttempts deliveries of its own to __outbox_dead, logged, and never retries it', async () => {
     const t = outboxDatabase({ name: 'main', maxAttempts: 3 });
-    await t.database.record('acme', ['doomed']);
-    t.sink(() => {
-      throw new Error('sink is down');
+    t.sink((envelopes) => {
+      if (envelopes.some((e) => e.message === 'doomed')) throw new Error('doomed bounced');
     });
-    for (let attempt = 0; attempt < 3; attempt++) {
+    await t.database.record('acme', ['doomed']);
+    // Alone, with nothing else delivered: it may be the sink that fails — the attempt is counted, not as its own.
+    await t.database.alarm();
+    // Each time it is due again, something else is recorded: delivered first, so its failure is its own.
+    for (const fine of ['fine 1', 'fine 2']) {
+      now = t.alarmAt()!;
+      await t.database.record('acme', [fine]);
       await t.database.alarm();
-      now += 60_000;
     }
-    expect(t.handed).toHaveLength(3);
+    expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['doomed'], ['fine 1'], ['doomed'], ['fine 2'], ['doomed']]);
     expect(t.rows()).toEqual([]);
     expect(t.rows('__outbox_dead')).toEqual([
       {
@@ -432,8 +491,8 @@ describe('the outbox delivery', () => {
         message: '"doomed"',
         recorded_at: 1_000_000,
         attempts: 3,
-        last_error: 'Error: sink is down',
-        dead_at: 1_120_000,
+        last_error: 'Error: doomed bounced',
+        dead_at: 1_015_000,
       },
     ]);
     const logged = errors.mock.calls.map(([text]) => String(text));
@@ -442,8 +501,29 @@ describe('the outbox delivery', () => {
     // Nothing left to deliver: no alarm, and another alarm hands the sink nothing.
     const scheduled = t.alarmAt();
     await t.database.alarm();
-    expect(t.handed).toHaveLength(3);
+    expect(t.handed).toHaveLength(5);
     expect(t.alarmAt()).toBe(scheduled);
+  });
+
+  it('buries no message that fails while nothing else gets through: alone, it is retried on its backoff, one delivery a round', async () => {
+    const t = outboxDatabase({ name: 'main', maxAttempts: 3 });
+    await t.database.record('acme', ['alone']);
+    t.sink(() => {
+      throw new Error('sink is down');
+    });
+    const rounds: number[] = [];
+    for (let round = 0; round < 10; round++) {
+      const before = t.handed.length;
+      await t.database.alarm();
+      rounds.push(t.handed.length - before);
+      now = t.alarmAt()!;
+    }
+    expect(rounds).toEqual(Array.from({ length: 10 }, () => 1));
+    expect(t.dead()).toEqual([]);
+    expect(t.rows()).toMatchObject([{ message: '"alone"', attempts: 10 }]);
+    // A lone message failing again says nothing of the sink: a message recorded now is tried at once.
+    await t.database.record('acme', ['new']);
+    expect(t.alarmAt()).toBe(now);
   });
 
   describe('what the sink does to its list', () => {
@@ -547,58 +627,105 @@ describe('the outbox delivery', () => {
       expect(t.dead().map(({ message, attempts }) => ({ message, attempts }))).toEqual([{ message: '"poison"', attempts: 4 }]);
     });
 
-    it('buries a message the sink named in { retry } at the cap, others with it', async () => {
-      const t = outboxDatabase({ name: 'main', maxAttempts: 2 });
+    it('buries at the cap a message the sink names in { retry } while it delivers the others', async () => {
+      const t = outboxDatabase({ name: 'main', maxAttempts: 1 });
       await t.database.record('acme', ['a', 'b', 'c']);
       t.sink((envelopes) => ({ retry: envelopes.filter((e) => e.message !== 'c'), error: new Error('429') }));
       await t.database.alarm();
-      now += 5_000;
-      await t.database.alarm();
       expect(t.rows()).toEqual([]);
       expect(t.dead().map(({ message, attempts }) => ({ message, attempts }))).toEqual([
-        { message: '"a"', attempts: 2 },
-        { message: '"b"', attempts: 2 },
+        { message: '"a"', attempts: 1 },
+        { message: '"b"', attempts: 1 },
+      ]);
+    });
+
+    it('reads a { retry } of everything it did not give up on as a delivery that failed whole: split, no message buried for it', async () => {
+      const t = outboxDatabase({ name: 'main', maxAttempts: 1 });
+      await t.database.record('acme', ['a', 'b', 'c']);
+      t.sink((envelopes) => ({ retry: [...envelopes], error: new Error('the queue refused the batch') }));
+      await t.database.alarm();
+      expect(t.dead()).toEqual([]);
+      expect(t.rows().map(({ message, attempts, batch }) => ({ message, attempts, batch }))).toEqual([
+        { message: '"a"', attempts: 1, batch: 1 },
+        { message: '"b"', attempts: 1, batch: 1 },
+        { message: '"c"', attempts: 1, batch: 3 },
       ]);
     });
   });
 
   describe('one alarm, at most three deliveries', () => {
-    it('delivers the rest due in one delivery once one went through: the second batch when the first fails', async () => {
+    it('tries what no delivery has failed yet first, the rest in one once it went through, and a suspect batch alone after them', async () => {
       const t = outboxDatabase({ name: 'main' });
-      // P failed alone; x and y were retried together; z is new — all due at once.
+      // P failed while others went through (its batch negated: suspect); x and y were retried together; z and w are new.
       await t.database.record('acme', ['P', 'x', 'y', 'z', 'w']);
-      t.sqlite.exec(`UPDATE __outbox SET batch = CASE id WHEN 1 THEN 1 WHEN 2 THEN 2 WHEN 3 THEN 2 ELSE 0 END, attempts = CASE WHEN id <= 3 THEN 1 ELSE 0 END`);
+      t.sqlite.exec(
+        `UPDATE __outbox SET batch = CASE id WHEN 1 THEN -1 WHEN 2 THEN 2 WHEN 3 THEN 2 ELSE 0 END, ` +
+          `attempts = CASE WHEN id <= 3 THEN 1 ELSE 0 END, failed_at = CASE WHEN id <= 3 THEN 995000 ELSE 0 END`,
+      );
       t.sink((envelopes) => {
         if (envelopes.some((e) => e.message === 'P')) throw new Error('P bounced');
       });
       await t.database.alarm();
-      expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['P'], ['x', 'y'], ['z', 'w']]);
-      expect(t.rows()).toMatchObject([{ message: '"P"', attempts: 2 }]);
+      expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['z', 'w'], ['x', 'y'], ['P']]);
+      expect(t.rows()).toMatchObject([{ message: '"P"', attempts: 2, batch: -1 }]);
     });
 
-    it('a sink that is down costs two failing deliveries a round; what else is due waits, its attempts not counted', async () => {
+    it('tries the second batch when the first takes nothing; the first, failing while the second went through, is suspect from then on', async () => {
+      const t = outboxDatabase({ name: 'main' });
+      // P and a failed together long ago; x and y failed together since; nothing new.
+      await t.database.record('acme', ['P', 'a', 'x', 'y']);
+      t.sqlite.exec(
+        `UPDATE __outbox SET batch = CASE WHEN id <= 2 THEN 1 ELSE 3 END, attempts = 1, failed_at = CASE WHEN id <= 2 THEN 900000 ELSE 990000 END`,
+      );
+      const delivered: unknown[] = [];
+      t.sink((envelopes) => {
+        if (envelopes.some((e) => e.message === 'P')) throw new Error('P bounced');
+        delivered.push(...envelopes.map((e) => e.message));
+      });
+      await t.database.alarm();
+      expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['P', 'a'], ['x', 'y']]);
+      expect(t.rows().map(({ message, batch }) => ({ message, batch }))).toEqual([
+        { message: '"P"', batch: -1 },
+        { message: '"a"', batch: -2 },
+      ]);
+      // Its halves are never merged into another delivery: each is one of its own.
+      now = t.alarmAt()!;
+      await t.database.record('acme', ['new']);
+      await t.database.alarm();
+      expect(t.handed.slice(2).map((envelopes) => envelopes.map((e) => e.message))).toEqual([['new'], ['P'], ['a']]);
+      expect(delivered).toEqual(['x', 'y', 'new', 'a']);
+    });
+
+    it('a sink that is down costs two failing deliveries a round, however much waits; recovery delivers 100 an alarm', async () => {
       const t = outboxDatabase({ name: 'main' });
       for (let i = 0; i < 2_000; i += 100) await t.database.record('acme', Array.from({ length: 100 }, (_, j) => i + j));
       t.sink(() => {
         throw new Error('sink is down');
       });
-      const rounds: Array<{ alarms: number; deliveries: number }> = [];
+      const rounds: Array<{ alarms: number; deliveries: number; written: number }> = [];
       for (let round = 0; round < 12; round++) {
-        const handed = t.handed.length;
+        const [handed, written] = [t.handed.length, t.counted.written];
         let alarms = 0;
         while ((t.alarmAt() ?? Infinity) <= now && alarms < 1_000) {
           await t.database.alarm();
           alarms++;
         }
-        rounds.push({ alarms, deliveries: t.handed.length - handed });
+        rounds.push({ alarms, deliveries: t.handed.length - handed, written: t.counted.written - written });
         now = t.alarmAt()!;
       }
-      // One alarm a round: the first delivers the 100 oldest (one batch), each later one the two oldest batches.
-      expect(rounds[0]).toEqual({ alarms: 1, deliveries: 1 });
-      for (const round of rounds.slice(1)) expect(round).toEqual({ alarms: 1, deliveries: 2 });
-      // The messages no delivery took are as they were: no attempt counted, not split.
-      const untouched = t.sqlite.prepare('SELECT count(*) AS n FROM __outbox WHERE attempts = 0 AND batch = 0').get() as { n: number };
-      expect(untouched.n).toBe(1_900);
+      // Two telling deliveries that take nothing — the 100 oldest, then the next 100 — and the sink is taken for down;
+      // from then on one alarm a round, trying two batches of the 100 oldest.
+      expect(rounds[0]).toMatchObject({ alarms: 2, deliveries: 2 });
+      for (const round of rounds.slice(1)) {
+        expect(round).toMatchObject({ alarms: 1, deliveries: 2 });
+        // What the round tried (at most 100 messages) and the one row of what the outbox knows of its sink.
+        expect(round.written).toBeLessThanOrEqual(101);
+      }
+      // The messages no delivery took are as they were: no attempt counted, not split, their time not touched.
+      const untouched = t.sqlite.prepare('SELECT count(*) AS n FROM __outbox WHERE attempts = 0 AND batch = 0 AND next_attempt_at = 0').get() as {
+        n: number;
+      };
+      expect(untouched.n).toBe(1_800);
       expect(t.dead()).toEqual([]);
 
       // The sink is back: the backlog goes 100 messages an alarm, in at most three deliveries each.
@@ -616,6 +743,185 @@ describe('the outbox delivery', () => {
       expect(new Set(delivered).size).toBe(2_000);
       expect(recovery.map((alarm) => alarm.delivered)).toEqual(Array.from({ length: 20 }, () => 100));
       for (const alarm of recovery) expect(alarm.deliveries).toBeLessThanOrEqual(3);
+    });
+
+    it('a message recorded while the sink is down waits for its next try: no alarm or delivery of its own, no attempt counted', async () => {
+      const t = outboxDatabase({ name: 'main', maxAttempts: 100 });
+      t.sink(() => {
+        throw new Error('sink is down');
+      });
+      await t.database.record('acme', Array.from({ length: 300 }, (_, n) => `backlog ${n}`));
+      // Ten hours down, a message recorded every seven minutes.
+      const calls: number[] = [];
+      t.sink(() => {
+        calls.push(now);
+        throw new Error('sink is down');
+      });
+      const start = now;
+      const alarms: number[] = [];
+      let recorded = 0;
+      const record = (at: number) => [`during ${(recorded++, at)}`];
+      for (let hour = 0; hour < 10; hour++) alarms.push(await t.run(3_600_000, { ms: 7 * 60_000, record }));
+      // At the five-minute ceiling: twelve rounds an hour, each one alarm and two failing deliveries.
+      expect(alarms.at(-1)).toBe(12);
+      expect(calls.filter((at) => at >= start + 9 * 3_600_000)).toHaveLength(24);
+      // The messages recorded meanwhile were not tried (beyond the 100 oldest read), nor counted, nor buried.
+      expect(t.dead()).toEqual([]);
+      const during = t.rows().filter((row) => String(row.message).startsWith('"during'));
+      expect(during).toHaveLength(recorded);
+      expect(recorded).toBe(80);
+      for (const row of during) expect(row).toMatchObject({ attempts: 0, next_attempt_at: 0 });
+      // Recording one sets the alarm to the sink's next try, not to now.
+      const next = t.alarmAt()!;
+      expect(next).toBeGreaterThan(now);
+      await t.database.record('acme', ['one more']);
+      expect(t.alarmAt()).toBe(next);
+    });
+
+    it('buries nothing while the sink is down, however many rounds: a throwing sink and a Queue that refuses every sendBatch', async () => {
+      for (const kind of ['throws', 'queue'] as const) {
+        const t = outboxDatabase({ name: 'main', maxAttempts: 5 });
+        let down = true;
+        const queue = queueOutboxSink('EVENTS');
+        const env = {
+          EVENTS: {
+            async sendBatch() {
+              if (down) throw new Error('Queue send failed: Too Many Requests');
+            },
+          },
+        };
+        t.sink((envelopes) => {
+          if (kind === 'queue') return queue.deliver(envelopes, { env });
+          if (down) throw new Error('webhook is down');
+        });
+        for (let i = 0; i < 2_000; i += 100) await t.database.record('acme', Array.from({ length: 100 }, (_, j) => i + j));
+        // Eight hours: about a hundred rounds, twenty times maxAttempts.
+        await t.run(8 * 3_600_000);
+        expect({ kind, dead: t.dead().length }).toEqual({ kind, dead: 0 });
+        expect(Math.max(...t.rows().map((row) => row.attempts as number))).toBeLessThan(5);
+        down = false;
+        await t.run(3_600_000);
+        expect({ kind, left: t.rows().length }).toEqual({ kind, left: 0 });
+      }
+    });
+
+    it('a message known to fail on its own costs no delivery of its own while the sink is down', async () => {
+      const t = outboxDatabase({ name: 'main' });
+      t.sink((envelopes) => {
+        if (envelopes.some((e) => e.message === 'poison')) throw new Error('cannot take it');
+      });
+      // The poison fails beside a message that goes through: suspect, on its own clock.
+      await t.database.record('acme', ['poison', 'fine']);
+      await t.database.alarm();
+      now = t.alarmAt()!;
+      await t.database.alarm();
+      expect(t.rows()).toMatchObject([{ message: '"poison"', batch: -1 }]);
+      // Then the sink goes down, 300 messages waiting.
+      t.sink(() => {
+        throw new Error('sink is down');
+      });
+      await t.database.record('acme', Array.from({ length: 300 }, (_, i) => i));
+      await t.run(3_600_000);
+      const handed = t.handed.length;
+      const alarms = await t.run(3_600_000);
+      expect({ alarms, deliveries: t.handed.length - handed }).toEqual({ alarms: 12, deliveries: 24 });
+      expect(t.dead()).toEqual([]);
+    });
+
+    it("at the sink's next try, two messages that take nothing end the alarm: a suspect one due with them is not tried", async () => {
+      const t = outboxDatabase({ name: 'main' });
+      await t.database.record('acme', ['a', 'b', 'poison']);
+      // a and b failed alone while the sink was down; the poison failed while others went through; the sink's next try is due.
+      t.sqlite.exec(`UPDATE __outbox SET attempts = 1, failed_at = 990000, batch = CASE id WHEN 3 THEN -3 ELSE id END`);
+      t.sqlite.exec(`INSERT INTO __outbox_sink (id, failing, down_until, down_rounds) VALUES (1, 4, 999000, 3)`);
+      t.sink(() => {
+        throw new Error('sink is down');
+      });
+      await t.database.alarm();
+      expect(t.handed.map((envelopes) => envelopes.map((e) => e.message))).toEqual([['a'], ['b']]);
+      // Still down, the next try backed off further; nothing counted.
+      expect(t.alarmAt()).toBe(now + 40_000);
+      expect(t.rows().map(({ attempts }) => attempts)).toEqual([1, 1, 1]);
+    });
+
+    it('two messages that fail on their own are no outage: a message due with them is delivered in that alarm', async () => {
+      const t = outboxDatabase({ name: 'main' });
+      // A sink that refuses them without any I/O (a validation): in a Worker the clock stands still, so their retries keep step.
+      t.sink((envelopes) => {
+        if (envelopes.some((e) => String(e.message).startsWith('poison'))) throw new Error('cannot take it');
+      });
+      await t.database.record('acme', ['poison 1', 'poison 2']);
+      for (let alarm = 0; alarm < 10; alarm++) {
+        await t.database.alarm();
+        now = t.alarmAt()!;
+      }
+      expect(t.rows().map(({ message, next_attempt_at }) => ({ message, next_attempt_at }))).toEqual([
+        { message: '"poison 1"', next_attempt_at: now },
+        { message: '"poison 2"', next_attempt_at: now },
+      ]);
+      // Recorded just before their alarm runs: delivered by it.
+      await t.database.record('acme', ['healthy']);
+      const before = t.handed.length;
+      await t.database.alarm();
+      expect(t.handed.slice(before).map((envelopes) => envelopes.map((e) => e.message))).toEqual([['healthy'], ['poison 1', 'poison 2']]);
+      expect(t.rows().map((row) => row.message)).toEqual(['"poison 1"', '"poison 2"']);
+
+      // Recorded while their delivery is in flight: delivered by the next alarm, at once.
+      now = t.alarmAt()!;
+      t.sink(async (envelopes) => {
+        if (envelopes.some((e) => e.message === 'poison 1')) await t.database.record('acme', ['in flight']);
+        if (envelopes.some((e) => String(e.message).startsWith('poison'))) throw new Error('cannot take it');
+      });
+      await t.database.alarm();
+      expect(t.alarmAt()).toBe(now);
+      await t.database.alarm();
+      expect(t.handed.at(-1)!.map((e) => e.message)).toEqual(['in flight']);
+      expect(t.rows().map((row) => row.message)).toEqual(['"poison 1"', '"poison 2"']);
+    });
+
+    it('of four messages pushed together, two of them bad, the two good ones are delivered within a minute', async () => {
+      const t = outboxDatabase({ name: 'main' });
+      const deliveredAt = new Map<unknown, number>();
+      t.sink((envelopes) => {
+        if (envelopes.some((e) => String(e.message).startsWith('p'))) throw new Error('cannot take it');
+        for (const e of envelopes) deliveredAt.set(e.message, now);
+      });
+      await t.database.record('acme', ['p1', 'x', 'p2', 'y']);
+      await t.run(60_000);
+      expect([...deliveredAt.keys()].sort()).toEqual(['x', 'y']);
+      expect(Math.max(...deliveredAt.values()) - 1_000_000).toBeLessThan(60_000);
+    });
+
+    it('reads the table at most twice an alarm, once when the sink is down, and not at all before its next try', async () => {
+      const t = outboxDatabase({ name: 'main' });
+      await t.database.record('acme', Array.from({ length: 100 }, (_, i) => i));
+      // 5 000 more wait for their retry.
+      const wait = t.sqlite.prepare(`INSERT INTO __outbox (instance_key, message, recorded_at, attempts, next_attempt_at, batch) VALUES ('acme', '"w"', 1, 1, ?, 9)`);
+      for (let i = 0; i < 5_000; i++) wait.run(now + 60_000);
+      let reads = t.counted.outboxReads;
+      // A full read the sink took: the messages due, then the earliest waiting.
+      await t.database.alarm();
+      expect(t.counted.outboxReads - reads).toBe(2);
+      expect(t.alarmAt()).toBe(now + 60_000);
+
+      // Down: the messages due, nothing after.
+      now += 60_000;
+      t.sink(() => {
+        throw new Error('sink is down');
+      });
+      reads = t.counted.outboxReads;
+      await t.database.alarm();
+      await t.database.alarm();
+      expect(t.counted.outboxReads - reads).toBe(3);
+      const next = t.alarmAt()!;
+      expect(next).toBeGreaterThan(now);
+      // An alarm before its next try (one a message recorded earlier set) reads one row of what the outbox knows of its sink.
+      reads = t.counted.outboxReads;
+      const handed = t.handed.length;
+      await t.database.alarm();
+      expect(t.counted.outboxReads - reads).toBe(0);
+      expect(t.handed).toHaveLength(handed);
+      expect(t.alarmAt()).toBe(next);
     });
   });
 

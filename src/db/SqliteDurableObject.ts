@@ -2,9 +2,12 @@ import {
   OUTBOX_DDL,
   OUTBOX_DEAD_DDL,
   OUTBOX_DEAD_TABLE,
+  OUTBOX_DELIVERIES_PER_ALARM,
   OUTBOX_DELIVERY_SIZE,
   OUTBOX_ADDED_COLUMNS,
   OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_SINK_DDL,
+  OUTBOX_SINK_TABLE,
   OUTBOX_TABLE,
   createActionOutbox,
   failedOutboxDelivery,
@@ -122,16 +125,43 @@ type OutboxRow = {
   recorded_at: number;
   attempts: number;
   batch: number;
+  failed_at: number;
 };
 
-/** What one delivery of the alarm did: how many of its rows the sink took, and the earliest retry it set (null: none). */
-type OutboxDeliveryResult = { delivered: number; retryAt: number | null };
+/** What the outbox knows of its sink: the row of `__outbox_sink` (all 0 before anything failed). */
+type OutboxSinkState = { delivered_at: number; failing: number; down_until: number; down_rounds: number };
 
-/** The earlier of two times, either of which may be missing. */
-function earliest(a: number | null, b: number | null): number | null {
-  if (a === null) return b;
-  if (b === null) return a;
-  return Math.min(a, b);
+/**
+ * One sink call of an alarm: what it delivered and buried is settled at once;
+ * what it left to retry is settled when the alarm knows whether the sink is down.
+ */
+type OutboxTry = {
+  rows: OutboxRow[];
+  retried: OutboxRow[];
+  error: unknown;
+  /** The sink named the rows to retry in `{ retry }` and delivered others. */
+  named: boolean;
+  /** It delivered anything. */
+  took: boolean;
+  /** Its failure would say the sink is down: a batch with no message known to fail on its own, of more than one message or of one no delivery has failed yet. */
+  telling: boolean;
+};
+
+/** What the logs say of `__outbox_dead`. */
+const OUTBOX_ASIDE = `to the table ${OUTBOX_DEAD_TABLE} of its Durable Object: they are not retried — deliver them from there, then delete them.`;
+
+/** A batch that failed while others of its alarm went through: it holds a message that fails on its own. */
+function suspect(group: readonly OutboxRow[]): boolean {
+  return group[0]!.batch < 0;
+}
+
+/**
+ * The order an alarm tries its batches in: the ones with no message known to
+ * fail on its own first — what no delivery has failed yet, then by when they
+ * last failed, the oldest batch first — then the suspect ones, oldest first.
+ */
+function tryOrder(a: readonly OutboxRow[], b: readonly OutboxRow[]): number {
+  return Number(suspect(a)) - Number(suspect(b)) || a[0]!.failed_at - b[0]!.failed_at || a[0]!.id - b[0]!.id;
 }
 
 /**
@@ -370,16 +400,46 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     for (const { ddl } of missing) this.sql.exec(ddl);
     // 0.13 retried the 100 oldest together and counted every failure on each of them: its attempts were its batch's, not the row's.
     if (missing.length > 0) this.sql.exec(`UPDATE ${OUTBOX_TABLE} SET attempts = 0`);
+    this.sql.exec(OUTBOX_SINK_DDL);
     this.outboxReady = true;
+  }
+
+  /** What the outbox knows of its sink (one row by its key; all 0 before anything failed). */
+  private outboxSinkState(): OutboxSinkState {
+    const row = this.sql
+      .exec(`SELECT delivered_at, failing, down_until, down_rounds FROM ${OUTBOX_SINK_TABLE} WHERE id = 1`)
+      .toArray()[0] as OutboxSinkState | undefined;
+    return row ?? { delivered_at: 0, failing: 0, down_until: 0, down_rounds: 0 };
+  }
+
+  private writeOutboxSinkState(was: OutboxSinkState, state: OutboxSinkState): void {
+    if (
+      was.delivered_at === state.delivered_at &&
+      was.failing === state.failing &&
+      was.down_until === state.down_until &&
+      was.down_rounds === state.down_rounds
+    ) {
+      return;
+    }
+    this.sql.exec(
+      `INSERT INTO ${OUTBOX_SINK_TABLE} (id, delivered_at, failing, down_until, down_rounds) VALUES (1, ?, ?, ?, ?) ` +
+        'ON CONFLICT(id) DO UPDATE SET delivered_at = excluded.delivered_at, failing = excluded.failing, ' +
+        'down_until = excluded.down_until, down_rounds = excluded.down_rounds',
+      state.delivered_at,
+      state.failing,
+      state.down_until,
+      state.down_rounds,
+    );
   }
 
   /**
    * Runs an action with `ctx.outbox`. The messages it pushed are written when
    * it resolves — in the same synchronous block as its last writes, which the
    * Durable Object commits together — and the alarm that delivers them is set
-   * with them. A handler that throws records nothing. An action called from
-   * another action of this database runs on the caller's context, and so on
-   * its outbox.
+   * with them: now, or — while the sink is taken for down — its next try, so a
+   * message recorded during an outage costs no alarm and no delivery of its
+   * own. A handler that throws records nothing. An action called from another
+   * action of this database runs on the caller's context, and so on its outbox.
    */
   protected async runWithOutbox<T>(ctx: { instanceKey: string; outbox?: Outbox }, run: () => Promise<T>): Promise<T> {
     if (ctx.outbox) return run();
@@ -393,94 +453,162 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       for (const message of messages) {
         this.sql.exec(`INSERT INTO ${OUTBOX_TABLE} (instance_key, message, recorded_at) VALUES (?, ?, ?)`, ctx.instanceKey, message, now);
       }
-      await this.ctx.storage.setAlarm(now);
+      const { down_until } = this.outboxSinkState();
+      await this.ctx.storage.setAlarm(down_until > now ? down_until : now);
     }
     return result;
   }
 
   /**
-   * Delivers the outbox: at most three deliveries an alarm. It reads the rows
-   * due (oldest first, at most OUTBOX_DELIVERY_SIZE) and delivers them by
-   * their batch — the rows no delivery has failed yet, or what a failed
-   * delivery left to retry together — the oldest batch first. Once a delivery
-   * has delivered anything, the sink works: the rest of the rows read go in
-   * ONE more delivery. When the first delivers nothing, the second batch is
-   * tried; when that delivers nothing too (or there was no second batch to
-   * try and the read was full), the sink is down: every row still due waits
-   * for the earliest retry this alarm set, its attempts not counted and its
-   * batch kept — so an outage costs two failing deliveries a round of
-   * retries, not one a batch.
+   * Delivers the outbox: at most three deliveries (sink calls) an alarm. It
+   * reads the rows due (oldest first, at most OUTBOX_DELIVERY_SIZE) and tries
+   * them by their batch — the rows no delivery has failed yet, or what a failed
+   * delivery left to retry together — in {@link tryOrder}: what no delivery
+   * has failed yet first, then the batches that failed longest ago. When the
+   * first takes nothing, the second is tried. Once a delivery has taken
+   * anything, the sink works: the rest of the batches read go in ONE more
+   * delivery — all but the suspect ones, which failed while others of their
+   * alarm went through and so hold a message failing on its own: those are
+   * never merged, each is a delivery of its own in the calls left (none when
+   * the alarm's tries took nothing and the sink may be down: this is its next
+   * try, or a try that says something of the sink failed).
    *
-   * What was delivered is deleted. A row the sink did not take is retried on
-   * its own backoff (5 s, doubling, at most 5 minutes), so it never holds back
-   * the rows behind it — which also means no order is kept across a failure.
-   * The rows of a delivery that threw are split in two halves, each a batch of
-   * its own (`outboxBatches()`), so one that fails every delivery holding it
-   * is cut off from the others within a few retries; the rows the sink named
-   * in `{ retry }` stay one batch. A row is moved to `__outbox_dead`, logged
-   * and never retried by itself when the sink answered it in `{ dead }`, or
-   * when a failure of its own — a delivery of it alone, or `{ retry }` naming
-   * it — makes `outboxMaxAttempts` (a delivery that threw with others in it
-   * only counts the attempt). The alarm is then set to the earliest row due
-   * (now, when more are). A message arrives at least once. A subclass with an
-   * alarm of its own calls `super.alarm()`.
+   * What was delivered is deleted, and what the sink answered in `{ dead }`
+   * moved to `__outbox_dead`, as each delivery returns. A row the sink did not
+   * take is retried on its own backoff (5 s, doubling, at most 5 minutes), so
+   * it never holds back the rows behind it — which also means no order is kept
+   * across a failure. The rows of a delivery that failed whole (it threw, or
+   * retried everything it did not give up on) are split in two halves, each a
+   * batch of its own (`outboxBatches()`), so one that fails every delivery
+   * holding it is cut off from the others within a few retries; the rows the
+   * sink named in `{ retry }` while delivering others stay one batch. A batch
+   * that failed while the alarm delivered something else is marked suspect
+   * (its batch negated).
+   *
+   * The sink is taken for down when two deliveries in a row that say something
+   * of it — a batch with no suspect in it, of more than one row or of one no
+   * delivery has failed yet — take nothing (a lone message that fails again
+   * says nothing: it may be its own). Then nothing is tried until its next try
+   * (`down_until`, the backoff of the tries that found it down), messages
+   * recorded meanwhile wait for it with the rest, and the rows tried keep
+   * their attempts and their place: only split, never counted, never buried.
+   * A try that takes nothing keeps it down; one that takes anything ends it.
+   *
+   * A row is moved to `__outbox_dead`, logged and never retried by itself when
+   * the sink answered it in `{ dead }`, or when a failure of its own makes
+   * `outboxMaxAttempts`: a delivery of it alone, or `{ retry }` naming it,
+   * while the sink delivered something else in this alarm or since the row
+   * last failed — a message that fails while nothing gets through may be
+   * failing because of the sink. A delivery that failed whole with others in
+   * it only counts the attempt. The alarm is then set to the earliest row due
+   * (now, when more are), or to the sink's next try. A message arrives at least
+   * once. A subclass with an alarm of its own calls `super.alarm()`.
    */
   async alarm(): Promise<void> {
     if (!this.outboxSink) return;
     this.ensureOutboxTable();
     const generation = this.storageGeneration;
+    const sink = this.outboxSinkState();
     const readAt = Date.now();
+    // The sink is taken for down: nothing is tried before its next try (what was recorded meanwhile waits for it).
+    if (sink.down_until > readAt) {
+      await this.ctx.storage.setAlarm(sink.down_until);
+      return;
+    }
     const due = this.sql
       .exec(
-        `SELECT id, instance_key, message, recorded_at, attempts, batch FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY id LIMIT ?`,
+        `SELECT id, instance_key, message, recorded_at, attempts, batch, failed_at FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY id LIMIT ?`,
         readAt,
         OUTBOX_DELIVERY_SIZE,
       )
       .toArray() as OutboxRow[];
-    const full = due.length === OUTBOX_DELIVERY_SIZE;
-    // Whether due rows may be left beyond this read once it is delivered.
-    let more = false;
-    if (due.length > 0) {
-      const [first, ...rest] = outboxGroups(due);
-      const answered = await this.deliverOutbox(first!, generation);
+    const tries: OutboxTry[] = [];
+    const took = () => tries.some((attempt) => attempt.took);
+    const deliver = async (rows: OutboxRow[]): Promise<boolean> => {
+      const attempt = await this.tryOutbox(rows, generation);
       // The storage was wiped while the sink ran: nothing here is ours to settle; a later alarm reads what is there.
-      if (!answered) return;
-      let { delivered, retryAt } = answered;
-      let triedSecond = false;
-      if (delivered === 0 && rest.length > 0) {
-        const second = await this.deliverOutbox(rest.shift()!, generation);
-        if (!second) return;
-        delivered = second.delivered;
-        retryAt = earliest(retryAt, second.retryAt);
-        triedSecond = true;
-      }
-      if (delivered > 0) {
-        // The sink works: what else this alarm read goes in one delivery, oldest first.
+      if (!attempt) return false;
+      tries.push(attempt);
+      return true;
+    };
+    if (due.length > 0) {
+      const order = outboxGroups(due).sort(tryOrder);
+      const untried = new Set(order);
+      const next = (group: OutboxRow[]) => {
+        untried.delete(group);
+        return deliver(group);
+      };
+      if (!(await next(order[0]!))) return;
+      if (!took() && order.length > 1 && !(await next(order[1]!))) return;
+      if (took()) {
+        // The sink works: what else this alarm read goes in one delivery, oldest first — but no suspect batch.
+        const rest = [...untried].filter((group) => !suspect(group));
+        for (const group of rest) untried.delete(group);
         const merged = rest.flat().sort((a, b) => a.id - b.id);
-        if (merged.length > 0 && !(await this.deliverOutbox(merged, generation))) return;
-        more = full;
-      } else if (retryAt !== null && (triedSecond || full)) {
-        // The sink is down: what is still due waits for the earliest retry, its attempts not counted and its batch kept.
-        this.sql.exec(`UPDATE ${OUTBOX_TABLE} SET next_attempt_at = ? WHERE next_attempt_at <= ?`, retryAt, readAt);
+        if (merged.length > 0 && !(await deliver(merged))) return;
+      }
+      // The suspect batches, each a delivery of its own in the calls left — none when the sink may be down: this is
+      // its next try, or a telling try took nothing.
+      const mayBeDown = () => sink.down_until > 0 || tries.some((attempt) => attempt.telling && attempt.retried.length > 0);
+      for (const group of order) {
+        if (tries.length >= OUTBOX_DELIVERIES_PER_ALARM) break;
+        if (!untried.has(group) || !suspect(group)) continue;
+        if (!took() && mayBeDown()) break;
+        if (!(await next(group))) return;
       }
     }
-    // The earliest row due — beyond this read, pushed while a delivery ran, or waiting for its retry. A full read
-    // the sink took leaves more due as a rule: one row found due answers it without reading the whole table again.
+
+    // Settled together: one synchronous block, committed as one.
     const now = Date.now();
-    const next =
-      more && this.sql.exec(`SELECT id FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? LIMIT 1`, now).toArray().length > 0
-        ? now
-        : (this.sql.exec(`SELECT min(next_attempt_at) AS at FROM ${OUTBOX_TABLE}`).toArray()[0] as { at: number | null } | undefined)?.at;
-    if (next !== null && next !== undefined) await this.ctx.storage.setAlarm(Math.max(next, now));
+    const failed = tries.filter((attempt) => attempt.retried.length > 0);
+    const state = { ...sink };
+    let down = false;
+    if (took()) {
+      state.failing = 0;
+      state.down_until = 0;
+      state.down_rounds = 0;
+    } else if (failed.length > 0) {
+      const telling = failed.filter((attempt) => attempt.telling).length;
+      state.failing = sink.failing + telling;
+      // Down: two telling deliveries in a row took nothing — or it was down and this try took nothing either.
+      down = sink.down_until > 0 || (telling > 0 && state.failing >= 2);
+      if (down) {
+        state.down_rounds = sink.down_rounds + 1;
+        state.down_until = now + outboxRetryDelay(state.down_rounds);
+      }
+    }
+    for (const attempt of failed) this.settleOutboxFailure(attempt, { now, down, took: took(), deliveredAt: sink.delivered_at });
+    if (down) {
+      const database = this.knownDatabaseName();
+      const waiting = failed.reduce((sum, attempt) => sum + attempt.retried.length, 0);
+      console.error(
+        `[db] The outbox sink of ${database} is taken for down: ${failed.length} delivery(ies) of ${waiting} message(s) took nothing. ` +
+          `Nothing is tried for ${(state.down_until - now) / 1000}s, and no attempt is counted meanwhile. The last error:`,
+        failed.at(-1)!.error,
+      );
+      this.writeOutboxSinkState(sink, state);
+      await this.ctx.storage.setAlarm(state.down_until);
+      return;
+    }
+    // The earliest row due — beyond this read, recorded while a delivery ran, or waiting for its retry — and, in
+    // the same scan, whether a row that failed waits: then a delivery that took anything is kept as the sink working.
+    const { at, last } = this.sql
+      .exec(`SELECT min(next_attempt_at) AS at, max(failed_at) AS last FROM ${OUTBOX_TABLE}`)
+      .toArray()[0] as { at: number | null; last: number | null };
+    if (took() && last !== null && last > sink.delivered_at) state.delivered_at = now;
+    this.writeOutboxSinkState(sink, state);
+    if (at !== null) await this.ctx.storage.setAlarm(Math.max(at, now));
   }
 
   /**
-   * One delivery: `rows` handed to the sink as envelopes, and settled per row.
-   * Null when the storage was wiped while the sink ran (`storageGeneration`
-   * moved on): nothing is written then — the rows are gone, and an id now
-   * names another row.
+   * One delivery: `rows` handed to the sink as envelopes; what it delivered is
+   * deleted and what it gave up on (`{ dead }`) buried at once, what it left is
+   * returned to settle once the alarm knows whether the sink is down. Null
+   * when the storage was wiped while the sink ran (`storageGeneration` moved
+   * on): nothing is written then — the rows are gone, and an id now names
+   * another row.
    */
-  private async deliverOutbox(rows: OutboxRow[], generation: number): Promise<OutboxDeliveryResult | null> {
+  private async tryOutbox(rows: OutboxRow[], generation: number): Promise<OutboxTry | null> {
     const database = this.knownDatabaseName();
     // Each envelope with its row, paired before the sink sees them: the sink is handed a frozen copy of the list,
     // and what it answers is matched by the envelope objects, never by their places.
@@ -510,87 +638,126 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       return null;
     }
 
-    // Settled together: one synchronous block, committed as one.
-    const now = Date.now();
-    const maxAttempts = this.outboxMaxAttempts;
-    // A failure is a row's own when the sink named it in { retry } or the delivery held it alone: only then does
-    // it count towards moving the row aside. A delivery that threw with others in it says nothing of this one.
-    const own = settled.named || rows.length === 1;
-    let deadTable = false;
-    const bury = (row: OutboxRow, attempts: number, error: unknown) => {
-      if (!deadTable) this.sql.exec(OUTBOX_DEAD_DDL);
-      deadTable = true;
-      this.sql.exec(
-        `INSERT INTO ${OUTBOX_DEAD_TABLE} (id, instance_key, message, recorded_at, attempts, last_error, dead_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        row.id,
-        row.instance_key,
-        row.message,
-        row.recorded_at,
-        attempts,
-        String(error),
-        now,
-      );
-      this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
-    };
-    let delivered = 0;
-    let exhausted = 0;
-    let givenUp = 0;
     const retried: OutboxRow[] = [];
+    let givenUp = 0;
     for (const [envelope, row] of rowOf) {
       if (settled.dead.has(envelope)) {
-        bury(row, row.attempts + 1, settled.deadError);
+        this.buryOutboxRow(row, row.attempts + 1, settled.deadError, Date.now());
         givenUp++;
-      } else if (!settled.retry.has(envelope)) {
-        this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
-        delivered++;
-      } else if (own && row.attempts + 1 >= maxAttempts) {
-        bury(row, row.attempts + 1, settled.error);
-        exhausted++;
-      } else {
+      } else if (settled.retry.has(envelope)) {
         retried.push(row);
+      } else {
+        this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
       }
     }
-    // The rows of a delivery that threw in two halves, each a batch — a delivery — of its own; the ones the sink
-    // named in { retry } together, as one.
+    if (givenUp > 0) {
+      console.error(
+        `[db] ${givenUp} outbox message(s) of ${database} the sink answered in { dead } were moved ${OUTBOX_ASIDE} The error:`,
+        settled.deadError,
+      );
+    }
+    return {
+      rows,
+      retried,
+      error: settled.error,
+      named: settled.named,
+      took: settled.delivered > 0,
+      telling: !suspect(rows) && (rows.length > 1 || rows[0]!.failed_at === 0),
+    };
+  }
+
+  /** A row to `__outbox_dead`, as it was in `__outbox` (its id kept), with its last error. */
+  private buryOutboxRow(row: OutboxRow, attempts: number, error: unknown, now: number): void {
+    this.sql.exec(OUTBOX_DEAD_DDL);
+    this.sql.exec(
+      `INSERT INTO ${OUTBOX_DEAD_TABLE} (id, instance_key, message, recorded_at, attempts, last_error, dead_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      row.id,
+      row.instance_key,
+      row.message,
+      row.recorded_at,
+      attempts,
+      String(error),
+      now,
+    );
+    this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
+  }
+
+  /**
+   * What a delivery left to retry, once the alarm knows whether the sink is
+   * down. Down: each row keeps its attempts and its place (due, it waits for
+   * the sink's next try), a delivery of several is split in two. Else: each
+   * row gets `attempts + 1` and its own backoff, or — for a failure of its own
+   * at the cap — `__outbox_dead`; a delivery that failed whole is split, the
+   * rows the sink named stay one batch, and a batch that failed while the
+   * alarm delivered something else is suspect from then on.
+   */
+  private settleOutboxFailure(
+    attempt: OutboxTry,
+    { now, down, took, deliveredAt }: { now: number; down: boolean; took: boolean; deliveredAt: number },
+  ): void {
+    const { rows, retried, error, named } = attempt;
+    const database = this.knownDatabaseName();
+    const maxAttempts = this.outboxMaxAttempts;
     const ids = retried.map(({ id }) => id);
-    const batches = settled.named ? ids.map(() => ids[0]!) : outboxBatches(ids);
+    const halves = named ? ids.map(() => ids[0]!) : outboxBatches(ids);
+    const sign = suspect(rows) || (took && !down) ? -1 : 1;
+    if (down) {
+      retried.forEach((row, index) => {
+        this.sql.exec(
+          `UPDATE ${OUTBOX_TABLE} SET last_error = ?, failed_at = ?, batch = ? WHERE id = ?`,
+          String(error),
+          now,
+          sign * halves[index]!,
+          row.id,
+        );
+      });
+      return;
+    }
+    // A failure is a row's own when the delivery held it alone or the sink named it in { retry } — and the sink
+    // delivered something else in this alarm or since the row last failed: a failure while nothing gets through
+    // may be the sink's. Only then does it count towards moving the row aside.
+    const ownable = rows.length === 1 || named;
+    let exhausted = 0;
+    const kept: OutboxRow[] = [];
     let soonest = Infinity;
     let fewest = Infinity;
     let most = 0;
     retried.forEach((row, index) => {
       const attempts = row.attempts + 1;
+      const own = ownable && (took || deliveredAt > (row.failed_at || row.recorded_at));
+      if (own && attempts >= maxAttempts) {
+        this.buryOutboxRow(row, attempts, error, now);
+        exhausted++;
+        return;
+      }
       const delay = outboxRetryDelay(attempts);
       this.sql.exec(
-        `UPDATE ${OUTBOX_TABLE} SET attempts = ?, last_error = ?, next_attempt_at = ?, batch = ? WHERE id = ?`,
+        `UPDATE ${OUTBOX_TABLE} SET attempts = ?, last_error = ?, next_attempt_at = ?, failed_at = ?, batch = ? WHERE id = ?`,
         attempts,
-        String(settled.error),
+        String(error),
         now + delay,
-        batches[index]!,
+        now,
+        sign * halves[index]!,
         row.id,
       );
+      kept.push(row);
       soonest = Math.min(soonest, delay);
       fewest = Math.min(fewest, attempts);
       most = Math.max(most, attempts);
     });
-
-    if (retried.length > 0) {
-      const attempt = fewest === most ? `attempt ${most}` : `attempts ${fewest}–${most}`;
+    if (kept.length > 0) {
+      const counted = fewest === most ? `attempt ${most}` : `attempts ${fewest}–${most}`;
       console.error(
-        `[db] ${retried.length} of ${rows.length} outbox message(s) of ${database} not delivered (${attempt} of ${maxAttempts}); retrying in ${soonest / 1000}s:`,
-        settled.error,
+        `[db] ${kept.length} of ${rows.length} outbox message(s) of ${database} not delivered (${counted} of ${maxAttempts}); retrying in ${soonest / 1000}s:`,
+        error,
       );
     }
-    const aside = `to the table ${OUTBOX_DEAD_TABLE} of its Durable Object: they are not retried — deliver them from there, then delete them.`;
     if (exhausted > 0) {
       console.error(
-        `[db] ${exhausted} outbox message(s) of ${database} reached ${maxAttempts} failed deliveries (outbox maxAttempts) and were moved ${aside} The last error:`,
-        settled.error,
+        `[db] ${exhausted} outbox message(s) of ${database} reached ${maxAttempts} failed deliveries (outbox maxAttempts) and were moved ${OUTBOX_ASIDE} The last error:`,
+        error,
       );
     }
-    if (givenUp > 0) {
-      console.error(`[db] ${givenUp} outbox message(s) of ${database} the sink answered in { dead } were moved ${aside} The error:`, settled.deadError);
-    }
-    return { delivered, retryAt: retried.length > 0 ? now + soonest : null };
   }
 
   /**

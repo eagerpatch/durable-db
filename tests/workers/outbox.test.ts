@@ -6,6 +6,7 @@ interface OutboxStub {
   record(instanceKey: string, messages: unknown[], fail?: boolean): Promise<number | string>;
   recordInOldOutbox(instanceKey: string, messages: unknown[]): Promise<void>;
   makeDue(): Promise<void>;
+  sinkDown(): Promise<boolean>;
   outboxRows(): Promise<Array<{ message: string; attempts: number; last_error: string | null }>>;
   outboxColumns(): Promise<string[]>;
   deadRows(): Promise<Array<{ message: string; instance_key: string; attempts: number; last_error: string | null }>>;
@@ -158,19 +159,49 @@ describe('the outbox (real workerd)', () => {
     ]);
   });
 
-  it('moves a message that failed maxAttempts deliveries to __outbox_dead and stops retrying it', async () => {
+  it('moves a message that failed maxAttempts deliveries of its own to __outbox_dead and stops retrying it', async () => {
     const stub = newStub();
-    await testEnv.OUTBOX_LOG.put('fail', '1');
-    await stub.record('acme', ['doomed']);
-    // maxAttempts is 3 on this class: three failed deliveries, each once due.
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      await deliver(stub, async () => (await stub.deadRows()).length > 0 || ((await stub.outboxRows())[0]?.attempts ?? 0) >= attempt);
+    await testEnv.OUTBOX_LOG.put('poison', '1');
+    await stub.record('acme', ['poison']);
+    await deliver(stub, async () => ((await stub.outboxRows())[0]?.attempts ?? 0) >= 1);
+    // maxAttempts is 3 on this class: each time it is due again, something else goes through first, so the failure is its own.
+    for (const fine of ['fine 1', 'fine 2']) {
+      await stub.record('acme', [fine]);
       await stub.makeDue();
+      await deliver(stub, async () => (await delivered()).some((d) => d.message === fine) && (await stub.outboxRows()).every((row) => row.message !== JSON.stringify(fine)));
+      await deliver(stub, async () => (await stub.deadRows()).length > 0 || ((await stub.outboxRows())[0]?.attempts ?? 0) >= (fine === 'fine 1' ? 2 : 3));
     }
     expect(await stub.outboxRows()).toEqual([]);
-    expect(await stub.deadRows()).toEqual([{ message: '"doomed"', instance_key: 'acme', attempts: 3, last_error: 'Error: sink is down' }]);
+    expect(await stub.deadRows()).toEqual([{ message: '"poison"', instance_key: 'acme', attempts: 3, last_error: 'Error: poison' }]);
     expect(await stub.alarmAt()).toBeNull();
-    expect(await delivered()).toEqual([]);
+    expect((await delivered()).map((d) => d.message)).toEqual(['fine 1', 'fine 2']);
+  });
+
+  it('takes a sink that fails two deliveries in a row for down: what is recorded meanwhile waits for its next try, and nothing is buried', async () => {
+    const stub = newStub();
+    await testEnv.OUTBOX_LOG.put('fail', '1');
+    await stub.record('acme', ['a', 'b']);
+    await deliver(stub, async () => ((await stub.outboxRows())[0]?.attempts ?? 0) >= 1);
+    await stub.record('acme', ['c']);
+    await deliver(stub, async () => stub.sinkDown());
+    // Recorded while it is down: the alarm stays at the sink's next try.
+    await stub.record('acme', ['d']);
+    expect((await stub.alarmAt())! - Date.now()).toBeGreaterThan(1000);
+    // Tried again and again, past maxAttempts (3): nothing counted, nothing buried.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await stub.makeDue();
+      await runDurableObjectAlarm(stub);
+      expect(await stub.sinkDown()).toBe(true);
+    }
+    expect(await stub.deadRows()).toEqual([]);
+    expect(Math.max(...(await stub.outboxRows()).map((row) => row.attempts))).toBeLessThanOrEqual(1);
+    // Back: everything delivered.
+    await testEnv.OUTBOX_LOG.delete('fail');
+    await stub.makeDue();
+    await deliver(stub, async () => (await delivered()).length === 4);
+    expect((await delivered()).map((d) => d.message).sort()).toEqual(['a', 'b', 'c', 'd']);
+    expect(await stub.outboxRows()).toEqual([]);
+    expect(await stub.sinkDown()).toBe(false);
   });
 
   it('settles nothing on the storage deleteAll() left while the delivery was in flight: the new message with the old id is kept', async () => {

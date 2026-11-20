@@ -130,9 +130,15 @@ describe('the outbox', () => {
     const settled = settleOutboxDelivery([a, b, c], { retry: [b, b], error: why });
     expect([...settled.retry]).toEqual([b]);
     expect(settled.error).toBe(why);
-    // The sink said which: b's failure is its own.
+    // The sink said which, and delivered the others: b's failure is its own.
     expect(settled.named).toBe(true);
+    expect(settled.delivered).toBe(2);
     expect(String(settleOutboxDelivery([a, b, c], { retry: [c] }).error)).toContain('answered it in { retry }');
+    // A { retry } of everything it did not give up on — a Queue whose first sendBatch failed — says no more than a
+    // throw: the delivery failed whole, no envelope's own.
+    for (const answer of [{ retry: [a, b, c] }, { retry: [a, b], dead: [c] }]) {
+      expect(settleOutboxDelivery([a, b, c], answer)).toMatchObject({ named: false, delivered: 0 });
+    }
   });
 
   it('settles the envelopes a delivery answers in { dead }: given up on, the others delivered', () => {

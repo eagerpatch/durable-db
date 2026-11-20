@@ -59,7 +59,9 @@ export interface DurableDbOptions {
    * `maxAttempts` (default 100: about eight hours of retries at the
    * five-minute ceiling) is how many failed deliveries move a message to the
    * Durable Object's `__outbox_dead` table, where it is kept and logged but
-   * never retried by itself.
+   * never retried by itself — once a failure of its own reaches it: a
+   * delivery of it alone, or `{ retry }` naming it, while the sink delivered
+   * something else. Nothing is moved there while the sink is down.
    */
   outbox?: OutboxOption;
 }

@@ -523,9 +523,19 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     }
   }
 
-  /** As if every retry's backoff had passed. */
+  /** As if every retry's backoff had passed — and, when the sink is taken for down, the wait for its next try. */
   async makeDue(): Promise<void> {
     this.sql.exec('UPDATE __outbox SET next_attempt_at = 0');
+    const sink = this.sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox_sink'`).toArray().length > 0;
+    if (sink) this.sql.exec('UPDATE __outbox_sink SET down_until = 1 WHERE down_until > 0');
+  }
+
+  /** Whether the outbox takes its sink for down now. */
+  async sinkDown(): Promise<boolean> {
+    const sink = this.sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox_sink'`).toArray().length > 0;
+    if (!sink) return false;
+    const row = this.sql.exec('SELECT down_until FROM __outbox_sink WHERE id = 1').toArray()[0] as { down_until: number } | undefined;
+    return (row?.down_until ?? 0) > Date.now();
   }
 
   async outboxRows(): Promise<Array<{ message: string; attempts: number; last_error: string | null }>> {

@@ -106,7 +106,8 @@ export interface CreateTestDatabaseOptions {
   /**
    * Delivers what an action pushed to `ctx.outbox`, after the action
    * succeeds, as the Durable Object's sink would (awaited before `run()`
-   * returns). Every envelope is also kept in {@link TestDatabase.outbox}.
+   * returns), handed a frozen list of its own as the sink is. Every envelope
+   * is also kept in {@link TestDatabase.outbox}.
    */
   outbox?: OutboxSink['deliver'];
   /** The `ctx.env` handlers see. Defaults to `{}`. */
@@ -245,7 +246,7 @@ export async function createTestDatabase<TSchema = any>(
     }));
     if (envelopes.length > 0) {
       recorded.push(...envelopes);
-      await options.outbox?.(envelopes, { env });
+      await options.outbox?.(Object.freeze(envelopes.slice()), { env });
     }
     return result;
   }

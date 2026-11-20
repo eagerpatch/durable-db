@@ -1,7 +1,8 @@
 import { SqliteDurableObject, type Migrations } from '../../src/db/SqliteDurableObject';
-import type { OutboxEnvelope } from '../../src/db/outbox';
+import { OUTBOX_DDL, type OutboxEnvelope } from '../../src/db/outbox';
+import { getTenantId, setTenantIdResolver } from '../../src/context';
 import { RemovedDatabaseDurableObject } from '../../src/db/RemovedDatabaseDurableObject';
-import { type as actionArgsType, registerAction, registerSharedAction, callAction } from '../../src/registry';
+import { type as actionArgsType, registerAction, registerSharedAction, callAction, runWithDoContext } from '../../src/registry';
 import { createKyselyFromSql } from '../../src/db/kysely';
 import { blob, integer, table, text } from '../../src/schema';
 
@@ -408,8 +409,17 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
    * throws for a delivery that holds the message 'poison', `retry-odd`
    * delivers the even numbers and answers the odd ones for a retry.
    */
+  /** Set by `startHeldDelivery()`: the next delivery waits for `release`. */
+  private holding = false;
+  private release: (() => void) | null = null;
+  private inFlight: Promise<void> | null = null;
+
   protected outboxSink = {
-    deliver: async (envelopes: OutboxEnvelope[], { env }: { env: unknown }) => {
+    deliver: async (envelopes: readonly OutboxEnvelope[], { env }: { env: unknown }) => {
+      if (this.holding) {
+        this.holding = false;
+        await new Promise<void>((resolve) => (this.release = resolve));
+      }
       const log = (env as { OUTBOX_LOG: KVNamespace }).OUTBOX_LOG;
       if (await log.get('fail')) throw new Error('sink is down');
       if ((await log.get('poison')) && envelopes.some((e) => e.message === 'poison')) throw new Error('poison');
@@ -459,6 +469,58 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
       this.sql.exec('INSERT INTO __outbox (instance_key, message, recorded_at) VALUES (?, ?, ?)', instanceKey, JSON.stringify(message), Date.now());
     }
     await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /**
+   * Records `message` and starts delivering it, the delivery held until
+   * `destroyAndRecord()` releases it (no alarm left set: this is the alarm).
+   */
+  async startHeldDelivery(instanceKey: string, message: unknown): Promise<void> {
+    await this.record(instanceKey, [message]);
+    await this.ctx.storage.deleteAlarm();
+    this.holding = true;
+    this.inFlight = this.alarm();
+  }
+
+  /**
+   * What `sys('destroyDatabase')` does — `deleteAll()`, then
+   * `resetMigrationState()` — while the held delivery waits; then a message
+   * written into the new outbox (AUTOINCREMENT starts again: it has the id
+   * the held one had), the delivery released and settled. Answers the outbox
+   * after it, and whether the alarm threw.
+   */
+  async destroyAndRecord(instanceKey: string, message: unknown): Promise<{ rows: Array<{ id: number; message: string; attempts: number }>; threw: string | null }> {
+    await this.ctx.storage.deleteAll();
+    this.resetMigrationState();
+    this.sql.exec(OUTBOX_DDL);
+    this.sql.exec('INSERT INTO __outbox (instance_key, message, recorded_at) VALUES (?, ?, ?)', instanceKey, JSON.stringify(message), Date.now());
+    this.release!();
+    let threw: string | null = null;
+    try {
+      await this.inFlight;
+    } catch (error) {
+      threw = (error as Error).message;
+    }
+    return { rows: this.sql.exec('SELECT id, message, attempts FROM __outbox ORDER BY id').toArray() as never, threw };
+  }
+
+  /**
+   * `getTenantId()` inside an action of this object — its DoContext store as
+   * the generated `rpc` builds it — with a resolver installed that reads a
+   * request, as an app's worker module installs it in every isolate.
+   */
+  async tenantInside(instanceKey: string): Promise<string> {
+    setTenantIdResolver(() => {
+      throw new Error('no request in this context');
+    });
+    try {
+      const ctx = { env: {}, dbName: this.databaseName, dbBindingNames: {}, instanceKey };
+      return runWithDoContext({ db: null, ctx, dbName: this.databaseName, instanceKey, tenantId: this.tenantOf(instanceKey) }, () => getTenantId());
+    } catch (error) {
+      return `threw: ${(error as Error).message}`;
+    } finally {
+      setTenantIdResolver(null);
+    }
   }
 
   /** As if every retry's backoff had passed. */

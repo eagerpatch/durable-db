@@ -7,7 +7,9 @@ import {
   OUTBOX_MAX_ATTEMPTS,
   OUTBOX_TABLE,
   createActionOutbox,
+  failedOutboxDelivery,
   outboxBatches,
+  outboxGroups,
   outboxRetryDelay,
   settleOutboxDelivery,
   tenantOfInstanceKey,
@@ -121,6 +123,16 @@ type OutboxRow = {
   attempts: number;
   batch: number;
 };
+
+/** What one delivery of the alarm did: how many of its rows the sink took, and the earliest retry it set (null: none). */
+type OutboxDeliveryResult = { delivered: number; retryAt: number | null };
+
+/** The earlier of two times, either of which may be missing. */
+function earliest(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
 
 /**
  * Migration attempt info returned by getMigrationAttempts()
@@ -342,12 +354,22 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
   private outboxReady = false;
 
+  /**
+   * Which storage this instance is on: `resetMigrationState()` (after
+   * `deleteAll()`) counts it up, so an alarm whose sink was still running
+   * when the storage was wiped settles nothing on the storage that replaced it.
+   */
+  private storageGeneration = 0;
+
   private ensureOutboxTable(): void {
     if (this.outboxReady) return;
     this.sql.exec(OUTBOX_DDL);
     // An outbox an older durable-db created: CREATE TABLE IF NOT EXISTS left it without the columns added since.
     const columns = new Set((this.sql.exec(`PRAGMA table_info(${OUTBOX_TABLE})`).toArray() as Array<{ name: string }>).map(({ name }) => name));
-    for (const { column, ddl } of OUTBOX_ADDED_COLUMNS) if (!columns.has(column)) this.sql.exec(ddl);
+    const missing = OUTBOX_ADDED_COLUMNS.filter(({ column }) => !columns.has(column));
+    for (const { ddl } of missing) this.sql.exec(ddl);
+    // 0.13 retried the 100 oldest together and counted every failure on each of them: its attempts were its batch's, not the row's.
+    if (missing.length > 0) this.sql.exec(`UPDATE ${OUTBOX_TABLE} SET attempts = 0`);
     this.outboxReady = true;
   }
 
@@ -377,61 +399,123 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Delivers the outbox, one delivery an alarm: the batch of the oldest
-   * message due — the messages no delivery has failed yet, up to
-   * OUTBOX_DELIVERY_SIZE, or one half a failed delivery left — to the sink.
-   * What was delivered is deleted; a message the sink did not take (a
-   * delivery that throws: all of it; `{ retry }`: those) is retried on its own
-   * backoff (5 s, doubling, at most 5 minutes), so it never holds back the
-   * messages behind it — which also means no order is kept across a failure —
-   * and the messages one delivery left are split in two halves, each its own
-   * delivery (`outboxBatches()`), so one that fails every delivery holding it
-   * is cut off from the others within a few retries. One that failed
-   * `outboxMaxAttempts` deliveries, or that the sink answered in `{ dead }`,
-   * is moved to `__outbox_dead`, logged, and never retried by itself. The
-   * alarm is then set to the earliest row due (now, when more are). A message
-   * arrives at least once. A subclass with an alarm of its own calls
-   * `super.alarm()`.
+   * Delivers the outbox: at most three deliveries an alarm. It reads the rows
+   * due (oldest first, at most OUTBOX_DELIVERY_SIZE) and delivers them by
+   * their batch — the rows no delivery has failed yet, or what a failed
+   * delivery left to retry together — the oldest batch first. Once a delivery
+   * has delivered anything, the sink works: the rest of the rows read go in
+   * ONE more delivery. When the first delivers nothing, the second batch is
+   * tried; when that delivers nothing too (or there was no second batch to
+   * try and the read was full), the sink is down: every row still due waits
+   * for the earliest retry this alarm set, its attempts not counted and its
+   * batch kept — so an outage costs two failing deliveries a round of
+   * retries, not one a batch.
+   *
+   * What was delivered is deleted. A row the sink did not take is retried on
+   * its own backoff (5 s, doubling, at most 5 minutes), so it never holds back
+   * the rows behind it — which also means no order is kept across a failure.
+   * The rows of a delivery that threw are split in two halves, each a batch of
+   * its own (`outboxBatches()`), so one that fails every delivery holding it
+   * is cut off from the others within a few retries; the rows the sink named
+   * in `{ retry }` stay one batch. A row is moved to `__outbox_dead`, logged
+   * and never retried by itself when the sink answered it in `{ dead }`, or
+   * when a failure of its own — a delivery of it alone, or `{ retry }` naming
+   * it — makes `outboxMaxAttempts` (a delivery that threw with others in it
+   * only counts the attempt). The alarm is then set to the earliest row due
+   * (now, when more are). A message arrives at least once. A subclass with an
+   * alarm of its own calls `super.alarm()`.
    */
   async alarm(): Promise<void> {
     if (!this.outboxSink) return;
     this.ensureOutboxTable();
+    const generation = this.storageGeneration;
+    const readAt = Date.now();
     const due = this.sql
       .exec(
         `SELECT id, instance_key, message, recorded_at, attempts, batch FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY id LIMIT ?`,
-        Date.now(),
+        readAt,
         OUTBOX_DELIVERY_SIZE,
       )
       .toArray() as OutboxRow[];
+    const full = due.length === OUTBOX_DELIVERY_SIZE;
+    // Whether due rows may be left beyond this read once it is delivered.
+    let more = false;
     if (due.length > 0) {
-      const batch = due[0]!.batch;
-      await this.deliverOutbox(due.filter((row) => row.batch === batch));
+      const [first, ...rest] = outboxGroups(due);
+      const answered = await this.deliverOutbox(first!, generation);
+      // The storage was wiped while the sink ran: nothing here is ours to settle; a later alarm reads what is there.
+      if (!answered) return;
+      let { delivered, retryAt } = answered;
+      let triedSecond = false;
+      if (delivered === 0 && rest.length > 0) {
+        const second = await this.deliverOutbox(rest.shift()!, generation);
+        if (!second) return;
+        delivered = second.delivered;
+        retryAt = earliest(retryAt, second.retryAt);
+        triedSecond = true;
+      }
+      if (delivered > 0) {
+        // The sink works: what else this alarm read goes in one delivery, oldest first.
+        const merged = rest.flat().sort((a, b) => a.id - b.id);
+        if (merged.length > 0 && !(await this.deliverOutbox(merged, generation))) return;
+        more = full;
+      } else if (retryAt !== null && (triedSecond || full)) {
+        // The sink is down: what is still due waits for the earliest retry, its attempts not counted and its batch kept.
+        this.sql.exec(`UPDATE ${OUTBOX_TABLE} SET next_attempt_at = ? WHERE next_attempt_at <= ?`, retryAt, readAt);
+      }
     }
-    // The earliest row due — another batch, pushed while this delivery ran, beyond this one, or waiting for its retry.
-    const next = (this.sql.exec(`SELECT min(next_attempt_at) AS at FROM ${OUTBOX_TABLE}`).toArray()[0] as { at: number | null } | undefined)?.at;
-    if (next !== null && next !== undefined) await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+    // The earliest row due — beyond this read, pushed while a delivery ran, or waiting for its retry. A full read
+    // the sink took leaves more due as a rule: one row found due answers it without reading the whole table again.
+    const now = Date.now();
+    const next =
+      more && this.sql.exec(`SELECT id FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? LIMIT 1`, now).toArray().length > 0
+        ? now
+        : (this.sql.exec(`SELECT min(next_attempt_at) AS at FROM ${OUTBOX_TABLE}`).toArray()[0] as { at: number | null } | undefined)?.at;
+    if (next !== null && next !== undefined) await this.ctx.storage.setAlarm(Math.max(next, now));
   }
 
-  private async deliverOutbox(rows: OutboxRow[]): Promise<void> {
+  /**
+   * One delivery: `rows` handed to the sink as envelopes, and settled per row.
+   * Null when the storage was wiped while the sink ran (`storageGeneration`
+   * moved on): nothing is written then — the rows are gone, and an id now
+   * names another row.
+   */
+  private async deliverOutbox(rows: OutboxRow[], generation: number): Promise<OutboxDeliveryResult | null> {
     const database = this.knownDatabaseName();
-    const envelopes: OutboxEnvelope[] = rows.map((row) => ({
-      message: JSON.parse(row.message) as OutboxMessage,
-      database,
-      instanceKey: row.instance_key,
-      tenantId: this.tenantOf(row.instance_key),
-      recordedAt: row.recorded_at,
-      attempts: row.attempts,
-    }));
+    // Each envelope with its row, paired before the sink sees them: the sink is handed a frozen copy of the list,
+    // and what it answers is matched by the envelope objects, never by their places.
+    const rowOf = new Map<OutboxEnvelope, OutboxRow>();
+    for (const row of rows) {
+      rowOf.set(
+        {
+          message: JSON.parse(row.message) as OutboxMessage,
+          database,
+          instanceKey: row.instance_key,
+          tenantId: this.tenantOf(row.instance_key),
+          recordedAt: row.recorded_at,
+          attempts: row.attempts,
+        },
+        row,
+      );
+    }
+    const envelopes = [...rowOf.keys()];
     let settled: SettledOutboxDelivery;
     try {
-      settled = settleOutboxDelivery(envelopes, await this.outboxSink!.deliver(envelopes, { env: this.env }));
+      settled = settleOutboxDelivery(envelopes, await this.outboxSink!.deliver(Object.freeze(envelopes.slice()), { env: this.env }));
     } catch (error) {
-      settled = { retry: new Set(envelopes), error, dead: new Set(), deadError: undefined };
+      settled = failedOutboxDelivery(envelopes, error);
+    }
+    if (this.storageGeneration !== generation) {
+      debugMigrations('The storage was wiped while the outbox sink ran: %d message(s) not settled', rows.length);
+      return null;
     }
 
     // Settled together: one synchronous block, committed as one.
     const now = Date.now();
     const maxAttempts = this.outboxMaxAttempts;
+    // A failure is a row's own when the sink named it in { retry } or the delivery held it alone: only then does
+    // it count towards moving the row aside. A delivery that threw with others in it says nothing of this one.
+    const own = settled.named || rows.length === 1;
     let deadTable = false;
     const bury = (row: OutboxRow, attempts: number, error: unknown) => {
       if (!deadTable) this.sql.exec(OUTBOX_DEAD_DDL);
@@ -448,25 +532,28 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       );
       this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
     };
+    let delivered = 0;
     let exhausted = 0;
     let givenUp = 0;
     const retried: OutboxRow[] = [];
-    rows.forEach((row, index) => {
-      const envelope = envelopes[index]!;
+    for (const [envelope, row] of rowOf) {
       if (settled.dead.has(envelope)) {
         bury(row, row.attempts + 1, settled.deadError);
         givenUp++;
       } else if (!settled.retry.has(envelope)) {
         this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);
-      } else if (row.attempts + 1 >= maxAttempts) {
+        delivered++;
+      } else if (own && row.attempts + 1 >= maxAttempts) {
         bury(row, row.attempts + 1, settled.error);
         exhausted++;
       } else {
         retried.push(row);
       }
-    });
-    // The retried rows in two halves, each a batch — a delivery — of its own.
-    const batches = outboxBatches(retried.map(({ id }) => id));
+    }
+    // The rows of a delivery that threw in two halves, each a batch — a delivery — of its own; the ones the sink
+    // named in { retry } together, as one.
+    const ids = retried.map(({ id }) => id);
+    const batches = settled.named ? ids.map(() => ids[0]!) : outboxBatches(ids);
     let soonest = Infinity;
     let fewest = Infinity;
     let most = 0;
@@ -503,6 +590,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     if (givenUp > 0) {
       console.error(`[db] ${givenUp} outbox message(s) of ${database} the sink answered in { dead } were moved ${aside} The error:`, settled.deadError);
     }
+    return { delivered, retryAt: retried.length > 0 ? now + soonest : null };
   }
 
   /**
@@ -530,8 +618,10 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   protected resetMigrationState(): void {
     this.migrationsApplied = false;
-    // The outbox went with the storage: created again with the next message.
+    // The outbox went with the storage: created again with the next message. A delivery still in flight
+    // belongs to the storage that was wiped: it settles nothing on this one.
     this.outboxReady = false;
+    this.storageGeneration++;
     // A run still in flight belongs to the storage that was just wiped: it
     // must neither mark the new storage migrated nor be awaited by new callers.
     this.migrating = undefined;

@@ -6,15 +6,19 @@
 // written to `__outbox` when the handler resolves, in the same synchronous
 // block as the action's last writes, so the Durable Object commits them as one
 // (and a handler that throws records none). An alarm then hands the ones that
-// are due to the sink and deletes what was delivered; a message whose delivery
-// failed stays in the table and is retried with backoff, on its own clock, so
-// it never holds back the messages behind it (and no order is kept across a
-// failure). The messages a failed delivery leaves are split in two for their
-// retry, each half a delivery of its own, so a message that fails every
-// delivery holding it is cut off from the others within a few retries. A
+// are due to the sink — at most three deliveries an alarm — and deletes what
+// was delivered; a message whose delivery failed stays in the table and is
+// retried with backoff, on its own clock, so it never holds back the messages
+// behind it (and no order is kept across a failure). The messages a delivery
+// that threw leaves are split in two for their retry, each half a delivery of
+// its own, so a message that fails every delivery holding it is cut off from
+// the others within a few retries; once a delivery has gone through, the rest
+// due goes in one. When two deliveries in a row take nothing, the sink is
+// down: what is due waits for the earliest retry, its attempts not counted. A
 // message is delivered at least once — make what consumes it idempotent — and
-// one that fails `maxAttempts` deliveries, or that the sink gives up on
-// (`{ dead }`), is moved to `__outbox_dead`, logged, and never retried by itself.
+// one that fails `maxAttempts` deliveries of its own (alone, or named in
+// `{ retry }`), or that the sink gives up on (`{ dead }`), is moved to
+// `__outbox_dead`, logged, and never retried by itself.
 //
 // The sink is configured once, in the Vite plugin: `durableDb({ outbox: {
 // queue: 'MY_QUEUE' } })` sends each message to a Cloudflare Queue as it is;
@@ -68,21 +72,23 @@ export interface OutboxSinkContext<Env = unknown> {
 /**
  * What a delivery answers. Nothing: every envelope of it was delivered.
  * `{ retry, dead }` — each a list of the very envelope objects the delivery
- * was handed, either may be left out: those in `retry` are retried, those in
- * `dead` can never be delivered and are moved to `__outbox_dead` at once, and
- * every other envelope of it counts as delivered; `error`, when given, is kept
- * with both as their last error. A delivery that throws retries every
- * envelope of it.
+ * was handed, either may be left out: those in `retry` are retried (together,
+ * in one delivery of their own), those in `dead` can never be delivered and
+ * are moved to `__outbox_dead` at once, and every other envelope of it counts
+ * as delivered; `error`, when given, is kept with both as their last error. A
+ * delivery that throws retries every envelope of it.
  */
 export type OutboxDelivery = void | { retry?: readonly OutboxEnvelope[]; dead?: readonly OutboxEnvelope[]; error?: unknown };
 
 /**
- * Where the outbox delivers. A delivery that throws is retried, every envelope
- * of it, split in two for the retry; one may settle them one by one
- * (`{ retry }`, `{ dead }`).
+ * Where the outbox delivers. `envelopes` is the delivery's own list, frozen:
+ * copy it (`[...envelopes]`) to chunk or sort it — what settles the delivery
+ * is the envelope objects, never their places in the list. A delivery that
+ * throws is retried, every envelope of it, split in two for the retry; one
+ * may settle them one by one (`{ retry }`, `{ dead }`).
  */
 export interface OutboxSink<Env = unknown> {
-  deliver(envelopes: OutboxEnvelope[], context: OutboxSinkContext<Env>): OutboxDelivery | Promise<OutboxDelivery>;
+  deliver(envelopes: readonly OutboxEnvelope[], context: OutboxSinkContext<Env>): OutboxDelivery | Promise<OutboxDelivery>;
 }
 
 export type OutboxSinkModule<Env = unknown> = OutboxSink<Env> | OutboxSink<Env>['deliver'];
@@ -177,6 +183,12 @@ export interface SettledOutboxDelivery {
   error: unknown;
   dead: ReadonlySet<OutboxEnvelope>;
   deadError: unknown;
+  /**
+   * Whether the sink said which envelopes to retry (`{ retry }`). False when
+   * the delivery failed whole without saying — it threw, or answered something
+   * other than its own envelopes — so a failure is no envelope's own.
+   */
+  named: boolean;
 }
 
 /**
@@ -194,7 +206,7 @@ export function settleOutboxDelivery(
   answer: unknown,
 ): SettledOutboxDelivery {
   if (answer === null || typeof answer !== 'object' || !('retry' in answer || 'dead' in answer)) {
-    return { retry: new Set(), error: undefined, dead: new Set(), deadError: undefined };
+    return { retry: new Set(), error: undefined, dead: new Set(), deadError: undefined, named: true };
   }
   const { retry = [], dead = [], error } = answer as { retry?: unknown; dead?: unknown; error?: unknown };
   const handed = new Set(envelopes);
@@ -204,6 +216,7 @@ export function settleOutboxDelivery(
       retry: handed,
       dead: new Set(),
       deadError: undefined,
+      named: false,
       error: new Error(
         '[db] The outbox sink answered { retry } or { dead } with something other than envelopes of this delivery, or one in both: ' +
           'answer the envelope objects it was handed (every envelope of the delivery is retried)',
@@ -215,7 +228,13 @@ export function settleOutboxDelivery(
     error: error ?? new Error(ANSWERED_IN('retry')),
     dead: new Set(dead),
     deadError: error ?? new Error(ANSWERED_IN('dead')),
+    named: true,
   };
+}
+
+/** What a delivery that threw is settled as: every envelope of it retried, none of them named. */
+export function failedOutboxDelivery(envelopes: readonly OutboxEnvelope[], error: unknown): SettledOutboxDelivery {
+  return { retry: new Set(envelopes), error, dead: new Set(), deadError: undefined, named: false };
 }
 
 export const OUTBOX_TABLE = '__outbox';
@@ -225,8 +244,12 @@ export const OUTBOX_TABLE = '__outbox';
  * at once) is when a row is next handed to the sink — after a failed
  * delivery, its own backoff — and `attempts` how many deliveries of it failed.
  * `batch` is which rows a delivery hands the sink together: 0 for the rows no
- * delivery has failed yet, else the id of the first row of a half a failed
- * delivery left (see {@link outboxBatches}).
+ * delivery has failed yet, else the id of the first row of what a failed
+ * delivery left to retry together (see {@link outboxBatches}). No index, on
+ * purpose: every index write is a billed row written per message, and the
+ * outbox is near-empty but for an outage, when there is about one alarm a
+ * round of retries, reading the table twice and updating what waits once
+ * (see `SqliteDurableObject.alarm()`).
  */
 export const OUTBOX_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_TABLE} (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -242,7 +265,10 @@ export const OUTBOX_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_TABLE} (
 /**
  * The columns an outbox an older durable-db created lacks (and
  * `CREATE TABLE IF NOT EXISTS` leaves a table as it is): each added once,
- * every row it holds due at once and in no batch.
+ * every row it holds due at once and in no batch. The block that adds them
+ * also sets every row's `attempts` to 0: 0.13 retried the 100 oldest
+ * together and counted each failure on all of them, so its counts were its
+ * batch's, never the row's.
  */
 export const OUTBOX_ADDED_COLUMNS: ReadonlyArray<{ column: string; ddl: string }> = [
   { column: 'next_attempt_at', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0` },
@@ -250,18 +276,31 @@ export const OUTBOX_ADDED_COLUMNS: ReadonlyArray<{ column: string; ddl: string }
 ];
 
 /**
- * The batches the rows a failed delivery left (in id order) are retried in: a
- * lone row on its own (its id), more split in two halves, each named by its
- * first row's id — never the name of another delivery's rows, since a row is
- * in one batch at a time. A delivery that fails whole does not say which message
+ * The batches the rows a delivery that threw left (in id order) are retried
+ * in: a lone row on its own (its id), more split in two halves, each named by
+ * its first row's id. A delivery that fails whole does not say which message
  * failed it; halving cuts one that fails every delivery holding it off from
- * the others within log2(n) retries, while a whole sink outage costs no more
- * deliveries than retrying each message alone would.
+ * the others within log2(n) retries. (The rows a sink names in `{ retry }`
+ * are not split: they stay one batch, named by the first of them.)
  */
 export function outboxBatches(ids: readonly number[]): number[] {
   if (ids.length <= 1) return [...ids];
   const half = Math.ceil(ids.length / 2);
   return ids.map((_, index) => (index < half ? ids[0]! : ids[half]!));
+}
+
+/**
+ * The due rows (in id order) by the delivery each belongs to — their
+ * `batch` — in the order of each one's first row.
+ */
+export function outboxGroups<R extends { batch: number }>(rows: readonly R[]): R[][] {
+  const groups = new Map<number, R[]>();
+  for (const row of rows) {
+    const group = groups.get(row.batch);
+    if (group) group.push(row);
+    else groups.set(row.batch, [row]);
+  }
+  return [...groups.values()];
 }
 
 /** Where a message goes that failed `maxAttempts` deliveries: kept, never retried by itself. */
@@ -278,13 +317,15 @@ export const OUTBOX_DEAD_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_DEAD_TABLE} 
   dead_at INTEGER NOT NULL
 )`;
 
-/** How many envelopes one delivery hands the sink. */
+/** How many due rows one alarm reads, and so the most one delivery hands the sink. */
 export const OUTBOX_DELIVERY_SIZE = 100;
 
 /**
  * How many failed deliveries move a message to `__outbox_dead`
  * (`durableDb({ outbox: { maxAttempts } })`): 100 is about eight hours of
- * retries at the five-minute ceiling of {@link outboxRetryDelay}.
+ * retries at the five-minute ceiling of {@link outboxRetryDelay}. A message
+ * is moved only for a failure of its own — a delivery of it alone, or one
+ * that named it in `{ retry }` — never for one that threw with others in it.
  */
 export const OUTBOX_MAX_ATTEMPTS = 100;
 

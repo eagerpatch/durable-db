@@ -130,6 +130,8 @@ describe('the outbox', () => {
     const settled = settleOutboxDelivery([a, b, c], { retry: [b, b], error: why });
     expect([...settled.retry]).toEqual([b]);
     expect(settled.error).toBe(why);
+    // The sink said which: b's failure is its own.
+    expect(settled.named).toBe(true);
     expect(String(settleOutboxDelivery([a, b, c], { retry: [c] }).error)).toContain('answered it in { retry }');
   });
 
@@ -159,6 +161,8 @@ describe('the outbox', () => {
       const settled = settleOutboxDelivery([a, b], answer);
       expect(settled.retry).toEqual(new Set([a, b]));
       expect(String(settled.error)).toContain('answer the envelope objects it was handed');
+      // Retried whole, as a throw is: no envelope's own failure.
+      expect(settled.named).toBe(false);
     }
   });
 

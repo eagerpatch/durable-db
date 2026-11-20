@@ -11,6 +11,9 @@ interface OutboxStub {
   deadRows(): Promise<Array<{ message: string; instance_key: string; attempts: number; last_error: string | null }>>;
   notes(): Promise<number>;
   alarmAt(): Promise<number | null>;
+  startHeldDelivery(instanceKey: string, message: unknown): Promise<void>;
+  destroyAndRecord(instanceKey: string, message: unknown): Promise<{ rows: Array<{ id: number; message: string; attempts: number }>; threw: string | null }>;
+  tenantInside(instanceKey: string): Promise<string>;
 }
 interface TestEnv {
   TEST_OUTBOX_DO: DurableObjectNamespace;
@@ -168,5 +171,20 @@ describe('the outbox (real workerd)', () => {
     expect(await stub.deadRows()).toEqual([{ message: '"doomed"', instance_key: 'acme', attempts: 3, last_error: 'Error: sink is down' }]);
     expect(await stub.alarmAt()).toBeNull();
     expect(await delivered()).toEqual([]);
+  });
+
+  it('settles nothing on the storage deleteAll() left while the delivery was in flight: the new message with the old id is kept', async () => {
+    const stub = newStub();
+    await stub.startHeldDelivery('acme', 'old');
+    const { rows, threw } = await stub.destroyAndRecord('acme', 'new');
+    expect(threw).toBeNull();
+    expect(rows).toEqual([{ id: 1, message: '"new"', attempts: 0 }]);
+  });
+
+  it("answers getTenantId() inside a per-tenant object with its own tenant, never asking a resolver that reads a request", async () => {
+    expect(await newStub().tenantInside('acme')).toBe('acme');
+    expect(await newStub().tenantInside('global')).toBe('global');
+    // A global database's object has no tenant of its own: the resolver is asked, as in the worker.
+    expect(await newStub(testEnv.TEST_GLOBAL_OUTBOX_DO).tenantInside('global')).toBe('threw: no request in this context');
   });
 });

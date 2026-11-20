@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { getTenantId, hasTenantId, setTenantIdResolver } from '../../src/context';
 
 /**
@@ -99,6 +99,27 @@ describe('context', () => {
       expect(insideDurableObject('acme', () => getTenantId())).toBe('acme');
       expect(insideDurableObject('team__dev_ops', () => getTenantId())).toBe('team__dev_ops');
       expect(insideDurableObject('global', () => hasTenantId())).toBe(false);
+    });
+
+    it("answers a per-tenant object's own tenant before an installed resolver, which is never asked there", () => {
+      // The worker module's top level runs in every object's isolate: its resolver is installed there too, and reads a request there is none of.
+      const resolver = vi.fn((): string => {
+        throw new Error('no request in this context');
+      });
+      setTenantIdResolver(resolver);
+      expect(insideDurableObject('acme__dev_mw20xi9e', () => getTenantId(), { tenantId: 'acme' })).toBe('acme');
+      expect(insideDurableObject('acme', () => hasTenantId(), { tenantId: 'acme' })).toBe(true);
+      expect(resolver).not.toHaveBeenCalled();
+      // Nor can a resolver answer another tenant for code running in the object.
+      setTenantIdResolver(() => 'other');
+      expect(insideDurableObject('acme', () => getTenantId(), { tenantId: 'acme' })).toBe('acme');
+    });
+
+    it("asks the resolver in a global database's object, and in a store built by hand, as outside an object", () => {
+      setTenantIdResolver(() => 'from-the-request');
+      expect(insideDurableObject('global', () => getTenantId(), { tenantId: null })).toBe('from-the-request');
+      expect(insideDurableObject('acme', () => getTenantId())).toBe('from-the-request');
+      expect(getTenantId()).toBe('from-the-request');
     });
   });
 });

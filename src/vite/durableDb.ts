@@ -56,11 +56,12 @@ export interface DurableDbOptions {
    * function `(envelopes, { env }) => …`, or an object with `deliver`. Without
    * it, `ctx.outbox.push()` throws naming this option.
    *
-   * `maxAttempts` (default 100) is how many counted failures move a message
-   * to the Durable Object's `__outbox_dead` table, where it is kept and logged
-   * but never retried by itself. A failure counts when the message failed
-   * alone and the sink settled some other message since its previous one, so
-   * an outage counts nothing past one failure a message.
+   * `maxAttempts` (default 100, at least 2) is how many counted failures
+   * move a message to the Durable Object's `__outbox_dead` table, where it is
+   * kept and logged but never retried by itself. A failure counts when the
+   * message failed alone and the sink settled some other message since its
+   * previous one, so an outage counts at most one failure a message: it buries
+   * only a message that already had `maxAttempts - 1`.
    */
   outbox?: OutboxOption;
 }
@@ -451,12 +452,20 @@ function resolveOutbox(outbox: OutboxOption | null, projectRoot: string): Outbox
   return outbox.module.startsWith('.') ? { ...outbox, module: path.resolve(projectRoot, outbox.module).split(path.sep).join('/') } : outbox;
 }
 
-/** `outbox.maxAttempts` is a whole number of at least 1, said where the plugin is configured. */
+/**
+ * `outbox.maxAttempts` is a whole number of at least 2, said where the plugin
+ * is configured: an outage can count one failure of a message — its first,
+ * when the sink delivered something since its previous one — so with 1 an
+ * outage would bury what it found waiting.
+ */
 function checkOutbox(outbox: OutboxOption | undefined): OutboxOption | null {
   if (!outbox) return null;
   const { maxAttempts } = outbox;
-  if (maxAttempts !== undefined && !(Number.isInteger(maxAttempts) && maxAttempts >= 1)) {
-    throw new Error(`[durable-db] durableDb({ outbox: { maxAttempts } }) is how many counted failures move a message to __outbox_dead: a whole number of at least 1, not ${String(maxAttempts)}`);
+  if (maxAttempts !== undefined && !(Number.isInteger(maxAttempts) && maxAttempts >= 2)) {
+    throw new Error(
+      `[durable-db] durableDb({ outbox: { maxAttempts } }) is how many counted failures move a message to __outbox_dead: a whole number of at least 2, not ${String(maxAttempts)}. ` +
+        'An outage counts the first failure of a message that waited while the sink last delivered something, so with 1 an outage would bury it.',
+    );
   }
   return outbox;
 }

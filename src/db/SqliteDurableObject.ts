@@ -10,6 +10,7 @@ import {
   OUTBOX_SINK_TABLE,
   OUTBOX_TABLE,
   createActionOutbox,
+  outboxErrorText,
   outboxRetryDelay,
   settleOutboxDelivery,
   tenantOfInstanceKey,
@@ -129,7 +130,15 @@ type OutboxRow = {
 const OUTBOX_ROW = 'id, instance_key, message, recorded_at, attempts, tries, failed_after';
 
 /** What the outbox knows of its sink: the row of `__outbox_sink` (all 0 before it was written). */
-type OutboxSinkState = { settled: number; down_until: number; down_rounds: number };
+type OutboxSinkState = { settled: number; down_until: number; down_rounds: number; down_tried: number };
+
+/**
+ * The alarm in flight, which an action can run beside while a sink call is
+ * awaited: its `settled` count, ahead of the stored one until the alarm writes
+ * it, and whether an action recorded a message meanwhile. For the storage it
+ * read (`generation`).
+ */
+type OutboxAlarm = { generation: number; settled: number; recorded: boolean };
 
 /** One sink call: the rows it did not deliver (in the order it was handed them), their error, and whether it settled any. */
 type OutboxCall = { failed: OutboxRow[]; error: unknown; settled: boolean };
@@ -360,6 +369,9 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
   private outboxReady = false;
 
+  /** The alarm delivering the outbox now, if one is (see {@link OutboxAlarm}). */
+  private outboxAlarm: OutboxAlarm | null = null;
+
   /**
    * Which storage this instance is on: `resetMigrationState()` (after
    * `deleteAll()`) counts it up, so an alarm whose sink was still running
@@ -391,9 +403,9 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   /** What the outbox knows of its sink (one row by its key; all 0 before it was written). */
   private outboxSinkState(): OutboxSinkState {
     const row = this.sql
-      .exec(`SELECT settled, down_until, down_rounds FROM ${OUTBOX_SINK_TABLE} WHERE id = 1`)
+      .exec(`SELECT settled, down_until, down_rounds, down_tried FROM ${OUTBOX_SINK_TABLE} WHERE id = 1`)
       .toArray()[0] as OutboxSinkState | undefined;
-    return row ?? { settled: 0, down_until: 0, down_rounds: 0 };
+    return row ?? { settled: 0, down_until: 0, down_rounds: 0, down_tried: 0 };
   }
 
   /**
@@ -403,24 +415,36 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    */
   private writeOutboxSinkState(was: OutboxSinkState, state: OutboxSinkState, waiting = true): void {
     const settled = waiting ? state.settled : was.settled;
-    if (settled === was.settled && state.down_until === was.down_until && state.down_rounds === was.down_rounds) return;
+    if (
+      settled === was.settled &&
+      state.down_until === was.down_until &&
+      state.down_rounds === was.down_rounds &&
+      state.down_tried === was.down_tried
+    ) {
+      return;
+    }
     this.sql.exec(
-      `INSERT INTO ${OUTBOX_SINK_TABLE} (id, settled, down_until, down_rounds) VALUES (1, ?, ?, ?) ` +
-        'ON CONFLICT(id) DO UPDATE SET settled = excluded.settled, down_until = excluded.down_until, down_rounds = excluded.down_rounds',
+      `INSERT INTO ${OUTBOX_SINK_TABLE} (id, settled, down_until, down_rounds, down_tried) VALUES (1, ?, ?, ?, ?) ` +
+        'ON CONFLICT(id) DO UPDATE SET settled = excluded.settled, down_until = excluded.down_until, ' +
+        'down_rounds = excluded.down_rounds, down_tried = excluded.down_tried',
       settled,
       state.down_until,
       state.down_rounds,
+      state.down_tried,
     );
   }
 
   /**
    * Runs an action with `ctx.outbox`. The messages it pushed are written when
    * it resolves — in the same synchronous block as its last writes, which the
-   * Durable Object commits together — each with the sink's `settled` count,
+   * Durable Object commits together — each with the sink's `settled` count
+   * (that of an alarm in flight, which writes its count only when it ends),
    * and the alarm that delivers them is set with them: now, or — while the
    * sink is taken for down — its next try, so a message recorded during an
-   * outage costs no alarm and no sink call of its own. A handler that throws
-   * records nothing. An action called from another action of this database
+   * outage costs no alarm and no sink call of its own. Except when the
+   * message that took the sink for down, or that its last try handed it, had
+   * failed alone before (`down_tried`): that failure may be the message's
+   * own, and the next try comes now. A handler that throws records nothing. An action called from another action of this database
    * runs on the caller's context, and so on its outbox.
    */
   protected async runWithOutbox<T>(ctx: { instanceKey: string; outbox?: Outbox }, run: () => Promise<T>): Promise<T> {
@@ -432,7 +456,10 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     if (messages.length > 0) {
       this.ensureOutboxTable();
       const now = Date.now();
-      const { settled, down_until } = this.outboxSinkState();
+      const sink = this.outboxSinkState();
+      const alarm = this.outboxAlarm?.generation === this.storageGeneration ? this.outboxAlarm : null;
+      const settled = Math.max(sink.settled, alarm?.settled ?? 0);
+      if (alarm) alarm.recorded = true;
       for (const message of messages) {
         this.sql.exec(
           `INSERT INTO ${OUTBOX_TABLE} (instance_key, message, recorded_at, failed_after) VALUES (?, ?, ?, ?)`,
@@ -442,7 +469,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           settled,
         );
       }
-      await this.ctx.storage.setAlarm(Math.max(now, down_until));
+      await this.ctx.storage.setAlarm(sink.down_tried ? now : Math.max(now, sink.down_until));
     }
     return result;
   }
@@ -452,10 +479,14 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    *
    * While the sink is taken for down (`down_until` later than now) it calls
    * nothing and sets the alarm to that time. At the sink's next try it hands
-   * the sink one message: the one that failed alone least often, the newest
-   * of those, whatever its own clock says. If that call settles anything the
-   * outage is over and the alarm goes on; else the message failed alone and
-   * the next try backs off (5 s, doubling, at most 5 minutes).
+   * the sink one message, whatever its own clock says: one of those that
+   * failed alone least often, the newest of them at one try and the oldest at
+   * the next. If that call settles anything the outage is over and the alarm
+   * goes on; else the message failed alone and the next try backs off (5 s,
+   * doubling, at most 5 minutes). When the message that took the sink for
+   * down, or that the last try handed it, had failed alone before
+   * (`down_tried`), a message recorded since brings the next try forward, and
+   * that try hands the sink one of those that never failed alone.
    *
    * Then it reads the oldest rows due (at most 100), those that never failed
    * alone first, and hands them to the sink in one call. What a call did not
@@ -474,51 +505,73 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   async alarm(): Promise<void> {
     if (!this.outboxSink) return;
     this.ensureOutboxTable();
-    const generation = this.storageGeneration;
     const was = this.outboxSinkState();
-    const state = { ...was };
     const now = Date.now();
-    // Taken for down: nothing is tried before its next try (what was recorded meanwhile waits for it).
-    if (state.down_until > now) {
-      await this.ctx.storage.setAlarm(state.down_until);
+    // Taken for down: nothing is tried before its next try (what was recorded meanwhile waits for it), unless
+    // the last failure may have been the message's own and a message recorded since brought the try forward.
+    if (was.down_until > now && !was.down_tried) {
+      await this.ctx.storage.setAlarm(was.down_until);
       return;
     }
+    const alarm: OutboxAlarm = { generation: this.storageGeneration, settled: was.settled, recorded: false };
+    this.outboxAlarm = alarm;
+    try {
+      await this.deliverOutbox(was, now, alarm);
+    } finally {
+      if (this.outboxAlarm === alarm) this.outboxAlarm = null;
+    }
+  }
+
+  /** The alarm's delivery (see {@link alarm}), its count kept in `alarm` as each call settles. */
+  private async deliverOutbox(was: OutboxSinkState, now: number, alarm: OutboxAlarm): Promise<void> {
+    const { generation } = alarm;
+    const state = { ...was };
     const failures: OutboxFailures = { retried: 0, buried: 0, error: undefined };
     let settled = false;
     let calls = 0;
     if (state.down_until > 0) {
-      // The sink's next try: one message, the least-tried and the newest of those, its own clock ignored.
-      const probe = this.sql.exec(`SELECT ${OUTBOX_ROW} FROM ${OUTBOX_TABLE} ORDER BY tries, id DESC LIMIT 1`).toArray()[0] as
-        | OutboxRow
-        | undefined;
+      // The sink's next try: one message of those that failed alone least often, the newest and the oldest by
+      // turns, its own clock ignored. Brought forward by a message recorded since: one that never failed alone.
+      const early = state.down_until > now;
+      const order = state.down_rounds % 2 === 1 ? 'DESC' : 'ASC';
+      const probe = this.sql
+        .exec(`SELECT ${OUTBOX_ROW} FROM ${OUTBOX_TABLE}${early ? ' WHERE tries = 0' : ''} ORDER BY tries, id ${order} LIMIT 1`)
+        .toArray()[0] as OutboxRow | undefined;
+      if (!probe && early) {
+        await this.ctx.storage.setAlarm(state.down_until);
+        return;
+      }
       if (!probe) {
-        state.down_until = 0;
-        state.down_rounds = 0;
-        this.writeOutboxSinkState(was, state);
+        this.writeOutboxSinkState(was, { ...state, down_until: 0, down_rounds: 0, down_tried: 0 });
         return;
       }
       const call = await this.callOutboxSink([probe], generation);
       if (!call) return;
       calls++;
-      if (!call.settled) return this.takeOutboxSinkForDown(was, state, probe, call.error, failures);
-      state.settled++;
+      if (!call.settled) return this.takeOutboxSinkForDown(was, state, probe, call.error, failures, alarm);
+      alarm.settled = ++state.settled;
       state.down_until = 0;
       state.down_rounds = 0;
+      state.down_tried = 0;
       settled = true;
     }
 
-    const due = this.sql
-      .exec(`SELECT ${OUTBOX_ROW} FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY id LIMIT ?`, now, OUTBOX_DELIVERY_SIZE)
+    // The oldest due, those that never failed alone first: messages that failed before, however many, never
+    // keep one that did not out of the read.
+    const rows = this.sql
+      .exec(
+        `SELECT ${OUTBOX_ROW} FROM ${OUTBOX_TABLE} WHERE next_attempt_at <= ? ORDER BY tries > 0, id LIMIT ?`,
+        now,
+        OUTBOX_DELIVERY_SIZE,
+      )
       .toArray() as OutboxRow[];
-    // What never failed alone first, then the rest, each in id order.
-    const rows = [...due.filter((row) => row.tries === 0), ...due.filter((row) => row.tries > 0)];
     const groups = rows.length > 0 ? [rows] : [];
     while (groups.length > 0 && calls < OUTBOX_CALLS_PER_ALARM) {
       const call = await this.callOutboxSink(groups.shift()!, generation);
       if (!call) return;
       calls++;
       if (call.settled) {
-        state.settled++;
+        alarm.settled = ++state.settled;
         settled = true;
       }
       const { failed } = call;
@@ -526,7 +579,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
         const half = Math.ceil(failed.length / 2);
         groups.unshift(failed.slice(0, half), failed.slice(half));
       } else if (failed.length === 1) {
-        if (!settled) return this.takeOutboxSinkForDown(was, state, failed[0]!, call.error, failures);
+        if (!settled) return this.takeOutboxSinkForDown(was, state, failed[0]!, call.error, failures, alarm);
         this.failOutboxRowAlone(failed[0]!, call.error, state, failures);
       }
     }
@@ -541,7 +594,10 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   /**
    * A message failed alone in an alarm that settled nothing: it cannot be
    * told from an outage, so the sink is taken for down until its next try
-   * (its backoff counted by the tries in a row that found it down).
+   * (its backoff counted by the tries in a row that found it down). When the
+   * message had failed alone before, the failure may be its own
+   * (`down_tried`): the next message recorded brings the try forward — at
+   * once when one was recorded while this alarm ran.
    */
   private async takeOutboxSinkForDown(
     was: OutboxSinkState,
@@ -549,14 +605,16 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     row: OutboxRow,
     error: unknown,
     failures: OutboxFailures,
+    alarm: OutboxAlarm,
   ): Promise<void> {
     const now = Date.now();
     this.failOutboxRowAlone(row, error, state, failures, now);
     state.down_rounds++;
     state.down_until = now + outboxRetryDelay(state.down_rounds);
+    state.down_tried = row.tries > 0 ? 1 : 0;
     this.writeOutboxSinkState(was, state);
     this.logOutboxFailures(failures, state.down_until - now);
-    await this.ctx.storage.setAlarm(state.down_until);
+    await this.ctx.storage.setAlarm(state.down_tried && alarm.recorded ? now : state.down_until);
   }
 
   /**
@@ -640,7 +698,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       attempts,
       state.settled,
       now + outboxRetryDelay(tries),
-      String(error),
+      outboxErrorText(error),
       row.id,
     );
     failures.retried++;
@@ -679,7 +737,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
       row.message,
       row.recorded_at,
       attempts,
-      String(error),
+      outboxErrorText(error),
       now,
     );
     this.sql.exec(`DELETE FROM ${OUTBOX_TABLE} WHERE id = ?`, row.id);

@@ -163,7 +163,7 @@ export function queueOutboxSink(binding: string): OutboxSink {
           return {
             retry,
             dead,
-            error: new Error(`[db] A sendBatch to the Queue binding ${binding} failed (${String(error)}); and ${tooLarge}`, { cause: error }),
+            error: new Error(`[db] A sendBatch to the Queue binding ${binding} failed (${outboxErrorText(error)}); and ${tooLarge}`, { cause: error }),
           };
         }
       }
@@ -252,12 +252,16 @@ export const OUTBOX_SINK_TABLE = '__outbox_sink';
  * while later than now, the sink is taken for down and nothing is tried
  * before it; once past, the next alarm is its next try (0: it is not down).
  * `down_rounds`: how many tries in a row found it down, the backoff of the next.
+ * `down_tried`: 1 when the message that took the sink for down, or that its
+ * last try handed it, had failed alone before — its failure may be its own —
+ * and the next message recorded brings the next try forward.
  */
 export const OUTBOX_SINK_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_SINK_TABLE} (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   settled INTEGER NOT NULL DEFAULT 0,
   down_until INTEGER NOT NULL DEFAULT 0,
-  down_rounds INTEGER NOT NULL DEFAULT 0
+  down_rounds INTEGER NOT NULL DEFAULT 0,
+  down_tried INTEGER NOT NULL DEFAULT 0
 )`;
 
 /**
@@ -272,6 +276,7 @@ export const OUTBOX_ADDED_COLUMNS: ReadonlyArray<{ table: string; column: string
   { table: OUTBOX_TABLE, column: 'next_attempt_at', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0` },
   { table: OUTBOX_TABLE, column: 'failed_after', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN failed_after INTEGER NOT NULL DEFAULT 0` },
   { table: OUTBOX_SINK_TABLE, column: 'settled', ddl: `ALTER TABLE ${OUTBOX_SINK_TABLE} ADD COLUMN settled INTEGER NOT NULL DEFAULT 0` },
+  { table: OUTBOX_SINK_TABLE, column: 'down_tried', ddl: `ALTER TABLE ${OUTBOX_SINK_TABLE} ADD COLUMN down_tried INTEGER NOT NULL DEFAULT 0` },
 ];
 
 /** Where a message goes that the sink gave up on, or that reached `maxAttempts`: kept, never retried by itself. */
@@ -296,11 +301,28 @@ export const OUTBOX_CALLS_PER_ALARM = 16;
 
 /**
  * How many counted failures move a message to `__outbox_dead`
- * (`durableDb({ outbox: { maxAttempts } })`). A failure counts when the
- * message failed alone and the sink settled some other message since the
- * message was recorded or last failed.
+ * (`durableDb({ outbox: { maxAttempts } })`, at least 2). A failure counts
+ * when the message failed alone and the sink settled some other message since
+ * the message was recorded or last failed, so an outage counts at most one.
  */
 export const OUTBOX_MAX_ATTEMPTS = 100;
+
+/**
+ * What a row and a log line keep of a sink's error, whatever it is: a sink
+ * throws, and answers as `error`, any value, and `String()` throws for some
+ * (a null-prototype object, a revoked Proxy).
+ */
+export function outboxErrorText(error: unknown): string {
+  try {
+    return String(error);
+  } catch {
+    try {
+      return Object.prototype.toString.call(error);
+    } catch {
+      return '[an error that cannot be shown as text]';
+    }
+  }
+}
 
 /** The wait before the next try: 5 s, doubling, at most 5 minutes. */
 export function outboxRetryDelay(tries: number): number {

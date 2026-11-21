@@ -408,6 +408,9 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
   private holding = false;
   private release: (() => void) | null = null;
   private inFlight: Promise<void> | null = null;
+  /** Set by `holdSinkCall()`: how many sink calls go on before one waits for `releaseHeld()`. */
+  private holdAfter: number | null = null;
+  private held: (() => void) | null = null;
 
   /**
    * The sink, steered from the test through KV: `fail` throws, `poison`
@@ -419,6 +422,10 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
       if (this.holding) {
         this.holding = false;
         await new Promise<void>((resolve) => (this.release = resolve));
+      }
+      if (this.holdAfter !== null && this.holdAfter-- === 0) {
+        this.holdAfter = null;
+        await new Promise<void>((resolve) => (this.held = resolve));
       }
       const log = (env as { OUTBOX_LOG: KVNamespace }).OUTBOX_LOG;
       if (await log.get('fail')) throw new Error('sink is down');
@@ -521,6 +528,22 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     } finally {
       setTenantIdResolver(null);
     }
+  }
+
+  /** The sink call after the next `calls` waits for `releaseHeld()`: the alarm awaits it, and other calls of the object run meanwhile. */
+  async holdSinkCall(calls: number): Promise<void> {
+    this.holdAfter = calls;
+  }
+
+  /** Whether a sink call waits for `releaseHeld()`. */
+  async sinkCallHeld(): Promise<boolean> {
+    return this.held !== null;
+  }
+
+  async releaseHeld(): Promise<void> {
+    const release = this.held;
+    this.held = null;
+    release?.();
   }
 
   /** As if every retry's backoff had passed — and, when the sink is taken for down, the wait for its next try. */

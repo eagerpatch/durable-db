@@ -15,6 +15,9 @@ interface OutboxStub {
   startHeldDelivery(instanceKey: string, message: unknown): Promise<void>;
   destroyAndRecord(instanceKey: string, message: unknown): Promise<{ rows: Array<{ id: number; message: string; attempts: number }>; threw: string | null }>;
   tenantInside(instanceKey: string): Promise<string>;
+  holdSinkCall(calls: number): Promise<void>;
+  sinkCallHeld(): Promise<boolean>;
+  releaseHeld(): Promise<void>;
 }
 interface TestEnv {
   TEST_OUTBOX_DO: DurableObjectNamespace;
@@ -205,6 +208,30 @@ describe('the outbox (real workerd)', () => {
     expect((await delivered()).map((d) => d.message).sort()).toEqual(['a', 'b', 'c']);
     expect(await stub.outboxRows()).toEqual([]);
     expect(await stub.sinkDown()).toBe(false);
+  });
+
+  it("stamps a message an action records while the alarm awaits a later sink call with the alarm's count: an outage after it counts nothing", async () => {
+    const stub = newStub();
+    await testEnv.OUTBOX_LOG.put('retry-odd', '1');
+    // The first call delivers 2 and answers 1 and 3 for a retry; 1 fails alone; the call for 3 alone waits.
+    await stub.holdSinkCall(2);
+    await stub.record('acme', [2, 1, 3]);
+    const alarm = runDurableObjectAlarm(stub);
+    for (let i = 0; i < 100 && !(await stub.sinkCallHeld()); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(await stub.sinkCallHeld()).toBe(true);
+    // An action runs while the alarm awaits the sink, after it delivered 2; then the sink goes down.
+    expect(await stub.record('acme', ['x'])).toBe(1);
+    await testEnv.OUTBOX_LOG.put('fail', '1');
+    await stub.releaseHeld();
+    await alarm;
+    await deliver(stub, async () => (await stub.outboxRows()).some((row) => row.message === '"x"' && row.tries === 1));
+    // 1 and 3 failed alone after 2 was delivered: counted. 'x' was recorded after that and failed alone with
+    // nothing delivered since: not counted.
+    expect(await stub.outboxRows()).toEqual([
+      { message: '1', tries: 1, attempts: 1, last_error: 'Error: odd ones bounced' },
+      { message: '3', tries: 1, attempts: 1, last_error: 'Error: sink is down' },
+      { message: '"x"', tries: 1, attempts: 0, last_error: 'Error: sink is down' },
+    ]);
   });
 
   it('settles nothing on the storage deleteAll() left while the call was in flight: the new message with the old id is kept', async () => {

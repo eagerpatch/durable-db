@@ -404,16 +404,16 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
   };
   protected databaseName = 'notes';
   protected outboxMaxAttempts = 3;
-  /**
-   * The sink, steered from the test through KV: `fail` throws, `poison`
-   * throws for a delivery that holds the message 'poison', `retry-odd`
-   * delivers the even numbers and answers the odd ones for a retry.
-   */
-  /** Set by `startHeldDelivery()`: the next delivery waits for `release`. */
+  /** Set by `startHeldDelivery()`: the next sink call waits for `release`. */
   private holding = false;
   private release: (() => void) | null = null;
   private inFlight: Promise<void> | null = null;
 
+  /**
+   * The sink, steered from the test through KV: `fail` throws, `poison`
+   * throws for a call that holds the message 'poison', `retry-odd`
+   * delivers the even numbers and answers the odd ones for a retry.
+   */
   protected outboxSink = {
     deliver: async (envelopes: readonly OutboxEnvelope[], { env }: { env: unknown }) => {
       if (this.holding) {
@@ -455,7 +455,7 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     }
   }
 
-  /** An outbox as durable-db before 0.14 left it: no next_attempt_at, its messages waiting. */
+  /** An outbox as durable-db 0.13 left it: none of the columns added since, its messages waiting. */
   async recordInOldOutbox(instanceKey: string, messages: unknown[]): Promise<void> {
     this.sql.exec(`CREATE TABLE __outbox (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -469,27 +469,6 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
       this.sql.exec('INSERT INTO __outbox (instance_key, message, recorded_at) VALUES (?, ?, ?)', instanceKey, JSON.stringify(message), Date.now());
     }
     await this.ctx.storage.setAlarm(Date.now());
-  }
-
-  /**
-   * `messages` as a delivery that threw while another of its alarm went
-   * through leaves them: one suspect batch (its batch negated), failed
-   * `failedAgo` ms ago and due in an hour. Written in one block, no alarm set.
-   */
-  async seedSuspect(instanceKey: string, messages: unknown[], failedAgo: number): Promise<void> {
-    this.sql.exec(OUTBOX_DDL);
-    const failedAt = Date.now() - failedAgo;
-    for (const message of messages) {
-      this.sql.exec(
-        'INSERT INTO __outbox (instance_key, message, recorded_at, attempts, failed_at, next_attempt_at) VALUES (?, ?, ?, 1, ?, ?)',
-        instanceKey,
-        JSON.stringify(message),
-        failedAt,
-        failedAt,
-        Date.now() + 3_600_000,
-      );
-    }
-    this.sql.exec('UPDATE __outbox SET batch = -(SELECT min(id) FROM __outbox)');
   }
 
   /**
@@ -559,10 +538,10 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     return (row?.down_until ?? 0) > Date.now();
   }
 
-  async outboxRows(): Promise<Array<{ message: string; attempts: number; last_error: string | null }>> {
+  async outboxRows(): Promise<Array<{ message: string; tries: number; attempts: number; last_error: string | null }>> {
     const exists = this.sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox'`).toArray().length > 0;
     if (!exists) return [];
-    return this.sql.exec('SELECT message, attempts, last_error FROM __outbox ORDER BY id').toArray() as never;
+    return this.sql.exec('SELECT message, tries, attempts, last_error FROM __outbox ORDER BY id').toArray() as never;
   }
 
   async outboxColumns(): Promise<string[]> {

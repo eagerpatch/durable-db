@@ -56,12 +56,11 @@ export interface DurableDbOptions {
    * function `(envelopes, { env }) => …`, or an object with `deliver`. Without
    * it, `ctx.outbox.push()` throws naming this option.
    *
-   * `maxAttempts` (default 100: about eight hours of retries at the
-   * five-minute ceiling) is how many failed deliveries move a message to the
-   * Durable Object's `__outbox_dead` table, where it is kept and logged but
-   * never retried by itself — once a failure of its own reaches it: a
-   * delivery of it alone, or `{ retry }` naming it, while the sink delivered
-   * something else. Nothing is moved there while the sink is down.
+   * `maxAttempts` (default 100) is how many counted failures move a message
+   * to the Durable Object's `__outbox_dead` table, where it is kept and logged
+   * but never retried by itself. A failure counts when the message failed
+   * alone and the sink settled some other message since its previous one, so
+   * an outage counts nothing past one failure a message.
    */
   outbox?: OutboxOption;
 }
@@ -457,7 +456,7 @@ function checkOutbox(outbox: OutboxOption | undefined): OutboxOption | null {
   if (!outbox) return null;
   const { maxAttempts } = outbox;
   if (maxAttempts !== undefined && !(Number.isInteger(maxAttempts) && maxAttempts >= 1)) {
-    throw new Error(`[durable-db] durableDb({ outbox: { maxAttempts } }) is how many failed deliveries a message gets: a whole number of at least 1, not ${String(maxAttempts)}`);
+    throw new Error(`[durable-db] durableDb({ outbox: { maxAttempts } }) is how many counted failures move a message to __outbox_dead: a whole number of at least 1, not ${String(maxAttempts)}`);
   }
   return outbox;
 }

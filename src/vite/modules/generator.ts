@@ -243,8 +243,8 @@ function generateWithMap(ast: t.File, sourceFileName?: string) {
 
 /**
  * Where the outbox delivers: a Queue binding, or a module whose default export
- * is the sink; `maxAttempts` (default 100) is how many failed deliveries move
- * a message to `__outbox_dead` (a failure of its own: see `alarm()`).
+ * is the sink; `maxAttempts` (default 100) is how many counted failures move
+ * a message to `__outbox_dead` (see `alarm()`).
  */
 export type OutboxOption = ({ queue: string } | { module: string }) & { maxAttempts?: number };
 

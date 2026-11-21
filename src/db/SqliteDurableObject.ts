@@ -446,10 +446,12 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    * read or called, and the alarm is set to that time. Its next try hands it
    * the newest message alone and, if the sink does not take it, the one tried
    * or recorded longest ago alone (`max(tried_at, recorded_at)`), their own
-   * clocks ignored. A message a try handed and the sink did not take gets
-   * `tried_at` and its `last_error`, nothing else: no count, no clock. When the
-   * sink takes one, it is up and the alarm goes on; else the next try backs
-   * off (5 s, doubling, at most 5 minutes).
+   * clocks ignored. A message a try handed that the sink neither delivered nor
+   * answered in `{ dead }` gets `tried_at` and its `last_error`, nothing else:
+   * no count, no clock. One it answered in `{ dead }` is moved to
+   * `__outbox_dead`, and is no delivery. When the sink takes one, it is up and
+   * the alarm goes on; else the next try backs off (5 s, doubling, at most 5
+   * minutes).
    *
    * Then it reads the oldest due messages, by id, at most 100, and hands them
    * to the sink in one call. What a call did not deliver — all of it when the
@@ -499,7 +501,8 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
           delivered = true;
           break;
         }
-        // Not taken: it goes behind every message recorded or tried before it. No count, no clock.
+        // Neither delivered nor answered in { dead } (that one is moved to __outbox_dead already): it goes behind every
+        // message recorded or tried before it. No count, no clock.
         if (call.failed.length > 0) {
           failures.error = call.error;
           this.sql.exec(`UPDATE ${OUTBOX_TABLE} SET tried_at = ?, last_error = ? WHERE id = ?`, Date.now(), outboxErrorText(call.error), row.id);
@@ -541,9 +544,10 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Takes the sink for down until its next try, `rounds` tries in a row having
-   * found it down: nothing is read or called before then (5 s, doubling, at
-   * most 5 minutes), and the alarm is set to that time.
+   * Takes the sink for down until its next try, for its `rounds`-th round in a
+   * row (1 when an alarm takes it down, one more for each try that finds it
+   * down): nothing is read or called before then (5 s, doubling, at most 5
+   * minutes), and the alarm is set to that time.
    */
   private async takeOutboxSinkForDown(was: OutboxSinkState, rounds: number, failures: OutboxFailures): Promise<void> {
     const now = Date.now();

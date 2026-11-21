@@ -274,8 +274,9 @@ export const OUTBOX_SINK_TABLE = '__outbox_sink';
 /**
  * `down_until`: while later than now the sink is taken for down and nothing
  * is read or called; once past, the next alarm is its next try (0: it is not
- * down). `down_rounds`: how many tries in a row found it down, the backoff of
- * the next.
+ * down). `down_rounds`: how many rounds in a row the sink has been taken for
+ * down (1 when an alarm takes it down, one more for each try that finds it
+ * down), the backoff of the next try.
  */
 export const OUTBOX_SINK_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_SINK_TABLE} (
   id INTEGER PRIMARY KEY CHECK (id = 1),

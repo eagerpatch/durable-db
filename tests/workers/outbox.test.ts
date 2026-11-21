@@ -7,13 +7,13 @@ interface OutboxStub {
   recordInOldOutbox(instanceKey: string, messages: unknown[]): Promise<void>;
   makeDue(): Promise<void>;
   sinkDown(): Promise<boolean>;
-  outboxRows(): Promise<Array<{ message: string; tries: number; attempts: number; last_error: string | null }>>;
+  outboxRows(): Promise<Array<{ message: string; tries: number; counted: number; last_error: string | null }>>;
   outboxColumns(): Promise<string[]>;
   deadRows(): Promise<Array<{ message: string; instance_key: string; attempts: number; last_error: string | null }>>;
   notes(): Promise<number>;
   alarmAt(): Promise<number | null>;
   startHeldDelivery(instanceKey: string, message: unknown): Promise<void>;
-  destroyAndRecord(instanceKey: string, message: unknown): Promise<{ rows: Array<{ id: number; message: string; attempts: number }>; threw: string | null }>;
+  destroyAndRecord(instanceKey: string, message: unknown): Promise<{ rows: Array<{ id: number; message: string; counted: number }>; threw: string | null }>;
   tenantInside(instanceKey: string): Promise<string>;
   holdSinkCall(calls: number): Promise<void>;
   sinkCallHeld(): Promise<boolean>;
@@ -88,7 +88,7 @@ describe('the outbox (real workerd)', () => {
     await stub.record('global', ['retry me']);
     await deliver(stub, async () => ((await stub.outboxRows())[0]?.tries ?? 0) >= 1);
     // Nothing else was delivered since it was recorded: not counted, and the sink is taken for down.
-    expect(await stub.outboxRows()).toEqual([{ message: '"retry me"', tries: 1, attempts: 0, last_error: 'Error: sink is down' }]);
+    expect(await stub.outboxRows()).toEqual([{ message: '"retry me"', tries: 1, counted: 0, last_error: 'Error: sink is down' }]);
     expect(await stub.sinkDown()).toBe(true);
     expect((await stub.alarmAt())! - Date.now()).toBeGreaterThan(1000);
     await testEnv.OUTBOX_LOG.delete('fail');
@@ -120,7 +120,7 @@ describe('the outbox (real workerd)', () => {
     expect(await stub.outboxColumns()).not.toContain('tries');
     await deliver(stub, async () => (await delivered()).length === 1);
     expect(await delivered()).toEqual([{ message: 'left over', database: 'notes', tenantId: 'acme', attempts: 0 }]);
-    expect(await stub.outboxColumns()).toEqual(expect.arrayContaining(['tries', 'next_attempt_at', 'failed_after']));
+    expect(await stub.outboxColumns()).toEqual(expect.arrayContaining(['tries', 'counted', 'next_attempt_at', 'tried_at', 'failed_after']));
     await stub.record('acme', ['new']);
     await deliver(stub, async () => (await delivered()).length === 2);
     expect((await delivered()).map((d) => d.message)).toEqual(['left over', 'new']);
@@ -138,7 +138,7 @@ describe('the outbox (real workerd)', () => {
     await deliver(stub, async () => (await delivered()).length === 1);
     // The next try hands the sink the newest message that failed least; then the poison fails alone again — counted.
     expect(await delivered()).toEqual([{ message: 'fresh', database: 'notes', tenantId: 'acme', attempts: 0 }]);
-    expect(await stub.outboxRows()).toEqual([{ message: '"poison"', tries: 2, attempts: 1, last_error: 'Error: poison' }]);
+    expect(await stub.outboxRows()).toEqual([{ message: '"poison"', tries: 2, counted: 1, last_error: 'Error: poison' }]);
   });
 
   it('halves a call that fails until the message the sink cannot take is alone, in the same alarm', async () => {
@@ -148,7 +148,7 @@ describe('the outbox (real workerd)', () => {
     await deliver(stub, async () => (await delivered()).length === 1);
     expect(await delivered()).toEqual([{ message: 'innocent', database: 'notes', tenantId: 'acme', attempts: 0 }]);
     // It failed alone after 'innocent' was delivered: counted.
-    expect(await stub.outboxRows()).toEqual([{ message: '"poison"', tries: 1, attempts: 1, last_error: 'Error: poison' }]);
+    expect(await stub.outboxRows()).toEqual([{ message: '"poison"', tries: 1, counted: 1, last_error: 'Error: poison' }]);
   });
 
   it('settles a call one by one: the envelopes answered in { retry } are retried, the others delivered', async () => {
@@ -158,8 +158,8 @@ describe('the outbox (real workerd)', () => {
     await deliver(stub, async () => (await delivered()).length === 2);
     expect((await delivered()).map((d) => d.message)).toEqual([2, 4]);
     expect(await stub.outboxRows()).toEqual([
-      { message: '1', tries: 1, attempts: 1, last_error: 'Error: odd ones bounced' },
-      { message: '3', tries: 1, attempts: 1, last_error: 'Error: odd ones bounced' },
+      { message: '1', tries: 1, counted: 1, last_error: 'Error: odd ones bounced' },
+      { message: '3', tries: 1, counted: 1, last_error: 'Error: odd ones bounced' },
     ]);
   });
 
@@ -176,7 +176,7 @@ describe('the outbox (real workerd)', () => {
         stub,
         async () =>
           (await delivered()).some((d) => d.message === fine) &&
-          ((await stub.deadRows()).length > 0 || ((await stub.outboxRows())[0]?.attempts ?? 0) > round),
+          ((await stub.deadRows()).length > 0 || ((await stub.outboxRows())[0]?.counted ?? 0) > round),
       );
     }
     expect(await stub.outboxRows()).toEqual([]);
@@ -200,7 +200,7 @@ describe('the outbox (real workerd)', () => {
       expect(await stub.sinkDown()).toBe(true);
     }
     expect(await stub.deadRows()).toEqual([]);
-    expect((await stub.outboxRows()).map((row) => row.attempts)).toEqual([0, 0, 0]);
+    expect((await stub.outboxRows()).map((row) => row.counted)).toEqual([0, 0, 0]);
     // Back: everything delivered.
     await testEnv.OUTBOX_LOG.delete('fail');
     await stub.makeDue();
@@ -228,9 +228,9 @@ describe('the outbox (real workerd)', () => {
     // 1 and 3 failed alone after 2 was delivered: counted. 'x' was recorded after that and failed alone with
     // nothing delivered since: not counted.
     expect(await stub.outboxRows()).toEqual([
-      { message: '1', tries: 1, attempts: 1, last_error: 'Error: odd ones bounced' },
-      { message: '3', tries: 1, attempts: 1, last_error: 'Error: sink is down' },
-      { message: '"x"', tries: 1, attempts: 0, last_error: 'Error: sink is down' },
+      { message: '1', tries: 1, counted: 1, last_error: 'Error: odd ones bounced' },
+      { message: '3', tries: 1, counted: 1, last_error: 'Error: sink is down' },
+      { message: '"x"', tries: 1, counted: 0, last_error: 'Error: sink is down' },
     ]);
   });
 
@@ -239,7 +239,7 @@ describe('the outbox (real workerd)', () => {
     await stub.startHeldDelivery('acme', 'old');
     const { rows, threw } = await stub.destroyAndRecord('acme', 'new');
     expect(threw).toBeNull();
-    expect(rows).toEqual([{ id: 1, message: '"new"', attempts: 0 }]);
+    expect(rows).toEqual([{ id: 1, message: '"new"', counted: 0 }]);
   });
 
   it("answers getTenantId() inside a per-tenant object with its own tenant, never asking a resolver that reads a request", async () => {

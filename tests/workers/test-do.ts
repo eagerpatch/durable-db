@@ -496,7 +496,7 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
    * the held one had), the delivery released and settled. Answers the outbox
    * after it, and whether the alarm threw.
    */
-  async destroyAndRecord(instanceKey: string, message: unknown): Promise<{ rows: Array<{ id: number; message: string; attempts: number }>; threw: string | null }> {
+  async destroyAndRecord(instanceKey: string, message: unknown): Promise<{ rows: Array<{ id: number; message: string; counted: number }>; threw: string | null }> {
     await this.ctx.storage.deleteAll();
     this.resetMigrationState();
     this.sql.exec(OUTBOX_DDL);
@@ -508,7 +508,7 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     } catch (error) {
       threw = (error as Error).message;
     }
-    return { rows: this.sql.exec('SELECT id, message, attempts FROM __outbox ORDER BY id').toArray() as never, threw };
+    return { rows: this.sql.exec('SELECT id, message, counted FROM __outbox ORDER BY id').toArray() as never, threw };
   }
 
   /**
@@ -561,10 +561,10 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     return (row?.down_until ?? 0) > Date.now();
   }
 
-  async outboxRows(): Promise<Array<{ message: string; tries: number; attempts: number; last_error: string | null }>> {
+  async outboxRows(): Promise<Array<{ message: string; tries: number; counted: number; last_error: string | null }>> {
     const exists = this.sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__outbox'`).toArray().length > 0;
     if (!exists) return [];
-    return this.sql.exec('SELECT message, tries, attempts, last_error FROM __outbox ORDER BY id').toArray() as never;
+    return this.sql.exec('SELECT message, tries, counted, last_error FROM __outbox ORDER BY id').toArray() as never;
   }
 
   async outboxColumns(): Promise<string[]> {

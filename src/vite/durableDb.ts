@@ -59,7 +59,7 @@ export interface DurableDbOptions {
    * `maxAttempts` (default 100, at least 2) is how many counted failures
    * move a message to the Durable Object's `__outbox_dead` table, where it is
    * kept and logged but never retried by itself. A failure counts when the
-   * message failed alone and the sink settled some other message since its
+   * message failed alone and the sink delivered some other message since its
    * previous one, so an outage counts at most one failure a message: it buries
    * only a message that already had `maxAttempts - 1`.
    */

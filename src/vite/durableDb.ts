@@ -55,6 +55,14 @@ export interface DurableDbOptions {
    * root, or a package specifier) whose default export delivers them — a
    * function `(envelopes, { env }) => …`, or an object with `deliver`. Without
    * it, `ctx.outbox.push()` throws naming this option.
+   *
+   * `maxAttempts` (default 100, at least 2) is how many counted failures
+   * move a message to the Durable Object's `__outbox_dead` table, where it is
+   * kept and logged but never retried by itself. A failure counts when the
+   * message failed alone (the one of its call not delivered) in an alarm in
+   * which the sink delivered another message, in that call or earlier, so an
+   * outage counts at most one failure a message: it buries only a message
+   * that already had `maxAttempts - 1`.
    */
   outbox?: OutboxOption;
 }
@@ -442,7 +450,25 @@ async function findImportedDatabase(
 /** A relative sink module resolves from the project root; a package specifier or an absolute path stays as it is. */
 function resolveOutbox(outbox: OutboxOption | null, projectRoot: string): OutboxOption | null {
   if (!outbox || 'queue' in outbox) return outbox;
-  return outbox.module.startsWith('.') ? { module: path.resolve(projectRoot, outbox.module).split(path.sep).join('/') } : outbox;
+  return outbox.module.startsWith('.') ? { ...outbox, module: path.resolve(projectRoot, outbox.module).split(path.sep).join('/') } : outbox;
+}
+
+/**
+ * `outbox.maxAttempts` is a whole number of at least 2, said where the plugin
+ * is configured: an outage can count one failure of a message — in the alarm
+ * it began in, after a delivery — so with 1 an outage would bury what it
+ * found waiting.
+ */
+function checkOutbox(outbox: OutboxOption | undefined): OutboxOption | null {
+  if (!outbox) return null;
+  const { maxAttempts } = outbox;
+  if (maxAttempts !== undefined && !(Number.isInteger(maxAttempts) && maxAttempts >= 2)) {
+    throw new Error(
+      `[durable-db] durableDb({ outbox: { maxAttempts } }) is how many counted failures move a message to __outbox_dead: a whole number of at least 2, not ${String(maxAttempts)}. ` +
+        'An outage can count one failure of a message, in the alarm it began in after a delivery, so with 1 an outage would bury it.',
+    );
+  }
+  return outbox;
 }
 
 export function durableDb(options: DurableDbOptions = {}): Plugin {
@@ -452,7 +478,7 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
     databasesDir: options.databasesDir ?? 'src/databases',
     migrationsDir: options.migrationsDir ?? 'migrations',
     patchWranglerConfig: options.patchWranglerConfig ?? false,
-    outbox: options.outbox ?? null,
+    outbox: checkOutbox(options.outbox),
   });
 
   return {

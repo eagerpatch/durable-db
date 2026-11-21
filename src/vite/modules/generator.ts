@@ -241,8 +241,12 @@ function generateWithMap(ast: t.File, sourceFileName?: string) {
   return generate(ast, { sourceMaps: true, sourceFileName, comments: true });
 }
 
-/** Where the outbox delivers: a Queue binding, or a module whose default export is the sink. */
-export type OutboxOption = { queue: string } | { module: string };
+/**
+ * Where the outbox delivers: a Queue binding, or a module whose default export
+ * is the sink; `maxAttempts` (default 100) is how many counted failures move
+ * a message to `__outbox_dead` (see `alarm()`).
+ */
+export type OutboxOption = ({ queue: string } | { module: string }) & { maxAttempts?: number };
 
 const OUTBOX_LOCAL = '__ddOutbox';
 
@@ -276,6 +280,8 @@ export function generateDurableObjectsModule(
       'durable-db/db'
     ),
     createNamedImport(['getAction', 'runWithDoContext'], registryImport),
+    // The suffix the build applies to each database's instance keys (`devEpochSuffix`).
+    createNamedImport(['applyDevEpoch'], DEV_EPOCH_IMPORT),
     // Side-effect imports of every action-defining file, so their
     // `registerAction(...)` calls run at DO startup and populate the registry in
     // the DO's (separate, persistent) isolate — not just whatever the request
@@ -321,7 +327,7 @@ export function generateDurableObjectsModule(
 
   const statements: t.Statement[] = [...imports, ...outboxStatements];
   for (const db of databases) {
-    statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, dbTransportsExpr, isDev, outbox !== null));
+    statements.push(...buildDurableObjectStatements(db, bindingNamesExpr, dbTransportsExpr, isDev, outbox));
   }
   for (const tombstone of tombstones) {
     statements.push(buildTombstoneStatement(tombstone));
@@ -430,6 +436,8 @@ function buildMigrationGuardMethod(
  *   export class ClassName extends SqliteDurableObject {
  *     migrations = {...};
  *     databaseName = "name";
+ *     databaseInstance = "per-tenant";
+ *     devEpochSuffix = applyDevEpoch("", "name");
  *     async rpc(...) { ... }
  *   }
  */
@@ -438,7 +446,7 @@ function buildDurableObjectStatements(
   bindingNamesExpr: t.ObjectExpression,
   dbTransportsExpr: t.ObjectExpression,
   isDev: boolean,
-  hasOutbox: boolean = false
+  outbox: OutboxOption | null = null
 ): t.Statement[] {
   const isBrowsable = db.browsable === true || (db.browsable === 'development' && isDev);
   const rpcMethod = buildRpcMethod(db, bindingNamesExpr, dbTransportsExpr);
@@ -449,10 +457,25 @@ function buildDurableObjectStatements(
   // The name `db` commands know the database by, for recovery hints (the
   // class name cannot give it back: `orderItems` and `order-items` share one).
   const databaseNameProperty = t.classProperty(t.identifier('databaseName'), t.stringLiteral(db.name));
+  // What an instance key's tenant is worked out from (an action's getTenantId(),
+  // an outbox envelope's tenantId): the database's instance kind, and exactly
+  // the suffix the build's applyDevEpoch gives its keys ('' in production).
+  const instanceProperties = [
+    t.classProperty(t.identifier('databaseInstance'), t.stringLiteral(db.instance)),
+    t.classProperty(
+      t.identifier('devEpochSuffix'),
+      t.callExpression(t.identifier('applyDevEpoch'), [t.stringLiteral(''), t.stringLiteral(db.name)])
+    ),
+  ];
   const dataProperties = hasSchema(db)
-    ? [migrationsProperty, databaseNameProperty, buildSchemaProperty(db)]
-    : [migrationsProperty, databaseNameProperty];
-  if (hasOutbox) dataProperties.push(t.classProperty(t.identifier('outboxSink'), t.identifier(OUTBOX_LOCAL)));
+    ? [migrationsProperty, databaseNameProperty, ...instanceProperties, buildSchemaProperty(db)]
+    : [migrationsProperty, databaseNameProperty, ...instanceProperties];
+  if (outbox) {
+    dataProperties.push(t.classProperty(t.identifier('outboxSink'), t.identifier(OUTBOX_LOCAL)));
+    if (outbox.maxAttempts !== undefined) {
+      dataProperties.push(t.classProperty(t.identifier('outboxMaxAttempts'), t.numericLiteral(outbox.maxAttempts)));
+    }
+  }
 
   const sysMethod = buildSysMethod();
   const classMethods: t.ClassMethod[] = [rpcMethod, sysMethod];
@@ -597,6 +620,20 @@ function buildSysMethod(): t.ClassMethod {
 }
 
 /**
+ * `tenantId: this.tenantOf(ctx.instanceKey)` in the DoContext store: the
+ * tenant the object works out from its instance kind and epoch suffix, which
+ * `getTenantId()` answers inside the action.
+ */
+function buildDoContextTenantProperty(): t.ObjectProperty {
+  return t.objectProperty(
+    t.identifier('tenantId'),
+    t.callExpression(t.memberExpression(t.thisExpression(), t.identifier('tenantOf')), [
+      t.memberExpression(t.identifier('ctx'), t.identifier('instanceKey')),
+    ])
+  );
+}
+
+/**
  * `this.runWithOutbox(ctx, async () => entry.handler(this.db, validated, ctx))`:
  * the handler with `ctx.outbox`, its messages written when it resolves.
  */
@@ -718,7 +755,7 @@ function buildRpcMethod(
       ),
     ]),
 
-    // return runWithDoContext({ db: this.db, ctx, dbName: "...", instanceKey: ctx.instanceKey }, async () => ...)
+    // return runWithDoContext({ db: this.db, ctx, dbName: "...", instanceKey: ctx.instanceKey, tenantId: this.tenantOf(ctx.instanceKey) }, async () => ...)
     t.returnStatement(
       t.callExpression(t.identifier('runWithDoContext'), [
         t.objectExpression([
@@ -732,6 +769,7 @@ function buildRpcMethod(
             t.identifier('instanceKey'),
             t.memberExpression(t.identifier('ctx'), t.identifier('instanceKey'))
           ),
+          buildDoContextTenantProperty(),
         ]),
         t.arrowFunctionExpression(
           [],
@@ -940,6 +978,7 @@ function buildWebSocketMessageMethod(
                     t.identifier('instanceKey'),
                     t.memberExpression(t.identifier('ctx'), t.identifier('instanceKey'))
                   ),
+                  buildDoContextTenantProperty(),
                 ]),
                 t.arrowFunctionExpression(
                   [],

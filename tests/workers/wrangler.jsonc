@@ -36,6 +36,10 @@
         "class_name": "TestOutboxDO"
       },
       {
+        "name": "TEST_GLOBAL_OUTBOX_DO",
+        "class_name": "TestGlobalOutboxDO"
+      },
+      {
         "name": "TEST_SHARED_DO",
         "class_name": "TestSharedDO"
       },
@@ -73,6 +77,12 @@
       "tag": "v4",
       "new_sqlite_classes": [
         "TestRelatedDO"
+      ]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": [
+        "TestGlobalOutboxDO"
       ]
     }
   ],

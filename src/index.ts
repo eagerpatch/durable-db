@@ -48,4 +48,4 @@ export type {
   DrizzleToKysely,
   InferArgs,
 } from './db/types';
-export type { Outbox, OutboxEnvelope, OutboxMessage, OutboxSink, OutboxSinkContext, OutboxSinkModule } from './db/outbox';
+export type { InstanceKeyOrigin, Outbox, OutboxDelivery, OutboxEnvelope, OutboxMessage, OutboxSink, OutboxSinkContext, OutboxSinkModule } from './db/outbox';

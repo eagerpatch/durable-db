@@ -8,6 +8,11 @@ let tenantIdResolver: (() => string) | null = null;
  *
  * The resolver is called at the moment a database operation needs the tenant ID —
  * by which point request middleware (auth, session, etc.) has already completed.
+ * In an action of a per-tenant database — and what the action calls — it is
+ * not asked: the object's own tenant is the answer there (see
+ * {@link getTenantId}). Elsewhere in the object it still is: the alarm, and so
+ * the outbox sink it runs, has no action's context (a sink reads the tenant
+ * from `envelope.tenantId`).
  *
  * @example
  * ```ts
@@ -21,10 +26,56 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
   tenantIdResolver = resolver;
 }
 
+/** The DoContext store of the action running, when code runs inside a Durable Object's action. */
+function doContextStore(): { instanceKey?: string; tenantId?: string | null } | undefined {
+  const getStore = (globalThis as Record<symbol, unknown>)[
+    Symbol.for('durable-db.doContext')
+  ] as (() => { instanceKey?: string; tenantId?: string | null } | undefined) | undefined;
+  return getStore?.();
+}
+
 /**
- * Get the current tenant ID from the configured resolver.
+ * Inside a Durable Object the tenant is the object's own: the generated
+ * classes work it out from the instance key with what the build applied —
+ * null for a global database (its instance kind, not its key), else the key
+ * without exactly its dev epoch suffix (`__dev_<epoch>` in dev, nothing in
+ * production, so a tenant id containing `__dev_` is kept whole) — and hand it
+ * to the action's DoContext store (`tenantId`). The registry publishes its
+ * store getter on globalThis — see the note there for why this is not a
+ * module import.
+ */
+function objectTenant(): string | null {
+  const tenantId = doContextStore()?.tenantId;
+  return typeof tenantId === 'string' && tenantId !== '' ? tenantId : null;
+}
+
+/**
+ * A store that does not say its tenant (one built by hand, not by a generated
+ * class): its key as it is, the key 'global' as no tenant.
+ */
+function tenantFromStoreKey(): string | null {
+  const store = doContextStore();
+  if (!store?.instanceKey || store.tenantId !== undefined) return null;
+  return store.instanceKey === 'global' ? null : store.instanceKey;
+}
+
+/**
+ * The current tenant ID.
  *
- * @throws Error if no resolver is configured
+ * In an action of a per-tenant database's Durable Object, and in what it
+ * calls, the object's own tenant (its DoContext's `tenantId`) is the answer,
+ * before any resolver: it cannot be wrong for code running in that object,
+ * and a resolver that reads a request would throw there (the worker module's
+ * top level, where a resolver is installed, runs in every object's isolate
+ * too). So a resolver cannot answer another tenant for an action of a
+ * per-tenant object. Everywhere else the resolver answers: the worker, a
+ * global database's object (no tenant of its own), and an object's alarm —
+ * the outbox sink included, which has no action's context (it reads the
+ * tenant from `envelope.tenantId`). A store built by hand without a
+ * `tenantId` is read as its key, `'global'` as none, only when no resolver
+ * is set.
+ *
+ * @throws Error if no resolver is configured and no Durable Object supplies the tenant
  *
  * @example
  * ```ts
@@ -36,38 +87,14 @@ export function setTenantIdResolver(resolver: (() => string) | null): void {
  * }
  * ```
  */
-/**
- * Inside a Durable Object the instance key IS the tenant (per-tenant DBs key
- * their instances by tenant id, plus an optional `__dev_<epoch>` suffix in
- * dev — the database's own epoch after `db reset --database`, else the
- * project's). The registry publishes its DoContext store getter on globalThis
- * — see the note there for why this is not a module import — so getTenantId()
- * works in action handlers without the worker-side resolver, which the DO
- * execution context never registers.
- */
-function tenantIdFromDoContext(): string | null {
-  const getStore = (globalThis as Record<symbol, unknown>)[
-    Symbol.for('durable-db.doContext')
-  ] as (() => { instanceKey?: string } | undefined) | undefined;
-  const key = getStore?.()?.instanceKey;
-  if (!key) return null;
-  const tenant = stripDevEpoch(key);
-  // A global database's instance has no tenant — in dev too, where its key
-  // carries the epoch suffix (`global__dev_<epoch>`).
-  return tenant === 'global' ? null : tenant;
-}
-
-/** An instance key without its dev-epoch suffix (`<key>__dev_<epoch>` → `<key>`). */
-function stripDevEpoch(instanceKey: string): string {
-  const suffixAt = instanceKey.lastIndexOf('__dev_');
-  return suffixAt === -1 ? instanceKey : instanceKey.slice(0, suffixAt);
-}
-
 export function getTenantId(): string {
+  const own = objectTenant();
+  if (own) return own;
+
   if (tenantIdResolver) return tenantIdResolver();
 
-  const doTenant = tenantIdFromDoContext();
-  if (doTenant) return doTenant;
+  const fromKey = tenantFromStoreKey();
+  if (fromKey) return fromKey;
 
   throw new Error('getTenantId() called without a resolver. Call setTenantIdResolver() first.');
 }
@@ -77,7 +104,7 @@ export function getTenantId(): string {
  * can supply the tenant).
  */
 export function hasTenantId(): boolean {
-  return tenantIdResolver !== null || tenantIdFromDoContext() !== null;
+  return objectTenant() !== null || tenantIdResolver !== null || tenantFromStoreKey() !== null;
 }
 
 /**

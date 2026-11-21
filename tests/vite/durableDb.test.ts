@@ -139,6 +139,49 @@ describe('resolveId', () => {
 // wrangler config patching (opt-in)
 // ============================================================================
 
+describe('the outbox option', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-outbox-'));
+    fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, 'src', 'databases', 'main.ts'),
+      `
+import { defineDatabase } from 'durable-db';
+import { users } from './schema';
+export const { action } = defineDatabase({ schema: { users } });
+`
+    );
+    fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+      durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO'] }],
+    }));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('threads maxAttempts through to every generated class, beside a module sink resolved from the root', async () => {
+    const plugin = durableDb({ outbox: { module: './src/outbox.ts', maxAttempts: 7 } });
+    await (plugin.configResolved as Function)({ root: tempDir, command: 'build' } as ResolvedConfig);
+    const loaded = await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+    const code: string = typeof loaded === 'string' ? loaded : loaded.code;
+    expect(code).toContain(`import __ddOutboxModule from "${path.join(tempDir, 'src', 'outbox.ts').split(path.sep).join('/')}"`);
+    expect(code).toMatch(/class MainDatabaseDO extends SqliteDurableObject \{[\s\S]*?outboxSink = __ddOutbox;\s*outboxMaxAttempts = 7;/);
+  });
+
+  it('refuses a maxAttempts that is no whole number of at least 2, where the plugin is configured, and says why', () => {
+    for (const maxAttempts of [1, 0, -1, 2.5, Number.NaN]) {
+      expect(() => durableDb({ outbox: { queue: 'JOBS', maxAttempts } })).toThrow('a whole number of at least 2');
+    }
+    // An outage can count one failure of a message, in the alarm it began in after a delivery: with 1 it would bury it.
+    expect(() => durableDb({ outbox: { queue: 'JOBS', maxAttempts: 1 } })).toThrow('with 1 an outage would bury it');
+    expect(() => durableDb({ outbox: { queue: 'JOBS', maxAttempts: 2 } })).not.toThrow();
+  });
+});
+
 describe('wrangler config patching', () => {
   let tempDir: string;
 

@@ -5,7 +5,7 @@ export { RelatedExpression, createRelated } from './related';
 export type { AnyRelated, Related, RelatedOptions, RelatedSpec, RelatedWhere } from './related';
 export { SqliteDurableObject, createKyselyFromSql, MigrationSchemaConflictError } from './SqliteDurableObject';
 export { outboxSink, queueOutboxSink, tenantOfInstanceKey } from './outbox';
-export type { Outbox, OutboxEnvelope, OutboxMessage, OutboxSink, OutboxSinkContext, OutboxSinkModule } from './outbox';
+export type { InstanceKeyOrigin, Outbox, OutboxDelivery, OutboxEnvelope, OutboxMessage, OutboxSink, OutboxSinkContext, OutboxSinkModule } from './outbox';
 export {
   RemovedDatabaseDurableObject,
   RemovedDatabaseError,

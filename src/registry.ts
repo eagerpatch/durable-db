@@ -36,6 +36,16 @@ export interface DoContext {
   ctx: RpcContext;
   dbName: string;
   instanceKey: string;
+  /**
+   * The tenant the object worked out from `instanceKey` (`tenantOf()`: null
+   * for a global database, else the key without exactly the dev epoch the
+   * build applied) — what `getTenantId()` answers inside the action, before
+   * any resolver (`setTenantIdResolver()`): the resolver is asked only where
+   * this is null (a global database's object) or left out. The generated
+   * Durable Objects set it; a store without it (one built by hand) is read
+   * as its key, `'global'` as no tenant, when no resolver is set.
+   */
+  tenantId?: string | null;
 }
 
 export interface RpcContext {
@@ -57,11 +67,15 @@ const als = new AsyncLocalStorage<DoContext>();
 const wsTransportCache = new Map<string, WebSocketTransport>();
 
 // Publish the DO-context store getter on globalThis so getTenantId() (in
-// context/index.ts) can fall back to it inside a Durable Object, where the
-// consumer's worker-side setTenantIdResolver never ran. Deliberately NOT a
-// module-level wire: bundlers routinely produce two copies of this package in
-// one worker (a prebundled 'durable-db/registry' inside generated DO stubs, a
-// source-served 'durable-db/context' inside a framework) and a module-to-module
+// context/index.ts) answers the object's own tenant in an action running in a
+// Durable Object, and in what it calls — the store is the generated
+// rpc/webSocketMessage's, so the alarm (the outbox sink) has none — before the
+// consumer's setTenantIdResolver(), whose module top level runs in every
+// object's isolate too but whose resolver reads a request the object does not
+// have. Deliberately NOT a module-level wire: bundlers routinely
+// produce two copies of this package in one worker (a prebundled
+// 'durable-db/registry' inside generated DO stubs, a source-served
+// 'durable-db/context' inside a framework) and a module-to-module
 // registration only reaches its own copy — globalThis crosses copy boundaries.
 (globalThis as Record<symbol, unknown>)[Symbol.for('durable-db.doContext')] = () =>
   als.getStore();

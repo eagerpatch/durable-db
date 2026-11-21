@@ -176,7 +176,7 @@ export const { action } = defineDatabase({ schema: { users } });
     for (const maxAttempts of [1, 0, -1, 2.5, Number.NaN]) {
       expect(() => durableDb({ outbox: { queue: 'JOBS', maxAttempts } })).toThrow('a whole number of at least 2');
     }
-    // An outage counts the first failure of what waited while the sink last delivered: with 1 it would bury it.
+    // An outage can count one failure of a message, in the alarm it began in after a delivery: with 1 it would bury it.
     expect(() => durableDb({ outbox: { queue: 'JOBS', maxAttempts: 1 } })).toThrow('with 1 an outage would bury it');
     expect(() => durableDb({ outbox: { queue: 'JOBS', maxAttempts: 2 } })).not.toThrow();
   });

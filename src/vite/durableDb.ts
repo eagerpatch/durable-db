@@ -59,9 +59,9 @@ export interface DurableDbOptions {
    * `maxAttempts` (default 100, at least 2) is how many counted failures
    * move a message to the Durable Object's `__outbox_dead` table, where it is
    * kept and logged but never retried by itself. A failure counts when the
-   * message failed alone and the sink delivered some other message since its
-   * previous one, so an outage counts at most one failure a message: it buries
-   * only a message that already had `maxAttempts - 1`.
+   * message failed alone after the sink delivered another message earlier in
+   * the same alarm, so an outage counts at most one failure a message: it
+   * buries only a message that already had `maxAttempts - 1`.
    */
   outbox?: OutboxOption;
 }
@@ -454,9 +454,9 @@ function resolveOutbox(outbox: OutboxOption | null, projectRoot: string): Outbox
 
 /**
  * `outbox.maxAttempts` is a whole number of at least 2, said where the plugin
- * is configured: an outage can count one failure of a message — its first,
- * when the sink delivered something since its previous one — so with 1 an
- * outage would bury what it found waiting.
+ * is configured: an outage can count one failure of a message — in the alarm
+ * it began in, after a delivery — so with 1 an outage would bury what it
+ * found waiting.
  */
 function checkOutbox(outbox: OutboxOption | undefined): OutboxOption | null {
   if (!outbox) return null;
@@ -464,7 +464,7 @@ function checkOutbox(outbox: OutboxOption | undefined): OutboxOption | null {
   if (maxAttempts !== undefined && !(Number.isInteger(maxAttempts) && maxAttempts >= 2)) {
     throw new Error(
       `[durable-db] durableDb({ outbox: { maxAttempts } }) is how many counted failures move a message to __outbox_dead: a whole number of at least 2, not ${String(maxAttempts)}. ` +
-        'An outage counts the first failure of a message that waited while the sink last delivered something, so with 1 an outage would bury it.',
+        'An outage can count one failure of a message, in the alarm it began in after a delivery, so with 1 an outage would bury it.',
     );
   }
   return outbox;

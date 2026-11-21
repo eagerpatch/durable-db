@@ -38,12 +38,14 @@ interface Delivered {
 const delivered = async () => JSON.parse((await testEnv.OUTBOX_LOG.get('delivered')) ?? '[]') as Delivered[];
 
 /**
- * Runs the alarm until the outbox is empty or `until` holds. The alarm set to
- * "now" may also fire by itself in the test runtime: either way, what is
- * asserted is what the alarm did.
+ * Runs the alarm until `until` holds — with `due`, each time as if every
+ * backoff and the sink's next try had come. The alarm set to "now" may also
+ * fire by itself in the test runtime: either way, what is asserted is what
+ * the alarm did.
  */
-async function deliver(stub: DurableObjectStub & OutboxStub, until: () => Promise<boolean>): Promise<void> {
+async function deliver(stub: DurableObjectStub & OutboxStub, until: () => Promise<boolean>, { due = false } = {}): Promise<void> {
   for (let i = 0; i < 50 && !(await until()); i++) {
+    if (due) await stub.makeDue();
     await runDurableObjectAlarm(stub);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -120,7 +122,7 @@ describe('the outbox (real workerd)', () => {
     expect(await stub.outboxColumns()).not.toContain('tries');
     await deliver(stub, async () => (await delivered()).length === 1);
     expect(await delivered()).toEqual([{ message: 'left over', database: 'notes', tenantId: 'acme', attempts: 0 }]);
-    expect(await stub.outboxColumns()).toEqual(expect.arrayContaining(['tries', 'counted', 'next_attempt_at', 'tried_at', 'failed_after']));
+    expect(await stub.outboxColumns()).toEqual(['id', 'instance_key', 'message', 'recorded_at', 'attempts', 'last_error', 'tries', 'counted', 'next_attempt_at', 'tried_at']);
     await stub.record('acme', ['new']);
     await deliver(stub, async () => (await delivered()).length === 2);
     expect((await delivered()).map((d) => d.message)).toEqual(['left over', 'new']);
@@ -136,7 +138,7 @@ describe('the outbox (real workerd)', () => {
     await stub.record('acme', ['fresh']);
     await stub.makeDue();
     await deliver(stub, async () => (await delivered()).length === 1);
-    // The next try hands the sink the newest message that failed least; then the poison fails alone again — counted.
+    // The next try hands the sink the newest message; delivered, so the poison's failure alone after it counts.
     expect(await delivered()).toEqual([{ message: 'fresh', database: 'notes', tenantId: 'acme', attempts: 0 }]);
     expect(await stub.outboxRows()).toEqual([{ message: '"poison"', tries: 2, counted: 1, last_error: 'Error: poison' }]);
   });
@@ -167,17 +169,13 @@ describe('the outbox (real workerd)', () => {
     const stub = newStub();
     await testEnv.OUTBOX_LOG.put('poison', '1');
     await stub.record('acme', ['poison']);
-    await deliver(stub, async () => ((await stub.outboxRows())[0]?.tries ?? 0) >= 1);
-    // maxAttempts is 3 on this class: each time something else is delivered before it fails alone again, the failure counts.
+    // maxAttempts is 3 on this class. Each round: the poison fails alone with nothing else delivered, so the sink is taken
+    // for down; a message recorded then is handed first at its next try, and delivered — the poison's failure after it counts.
     for (const [round, fine] of ['fine 1', 'fine 2', 'fine 3'].entries()) {
+      await deliver(stub, async () => stub.sinkDown(), { due: true });
       await stub.record('acme', [fine]);
-      await stub.makeDue();
-      await deliver(
-        stub,
-        async () =>
-          (await delivered()).some((d) => d.message === fine) &&
-          ((await stub.deadRows()).length > 0 || ((await stub.outboxRows())[0]?.counted ?? 0) > round),
-      );
+      await deliver(stub, async () => (await delivered()).some((d) => d.message === fine), { due: true });
+      if (round < 2) expect(await stub.outboxRows()).toEqual([{ message: '"poison"', tries: 2 * round + 2, counted: round + 1, last_error: 'Error: poison' }]);
     }
     expect(await stub.outboxRows()).toEqual([]);
     expect(await stub.deadRows()).toEqual([{ message: '"poison"', instance_key: 'acme', attempts: 3, last_error: 'Error: poison' }]);
@@ -185,7 +183,7 @@ describe('the outbox (real workerd)', () => {
     expect((await delivered()).map((d) => d.message)).toEqual(['fine 1', 'fine 2', 'fine 3']);
   });
 
-  it('takes the sink for down: what is recorded meanwhile waits for its next try, each try is one message, and nothing is counted', async () => {
+  it('takes the sink for down: what is recorded meanwhile waits for its next try, each try hands at most two messages, and nothing is counted', async () => {
     const stub = newStub();
     await testEnv.OUTBOX_LOG.put('fail', '1');
     await stub.record('acme', ['a', 'b']);
@@ -210,7 +208,7 @@ describe('the outbox (real workerd)', () => {
     expect(await stub.sinkDown()).toBe(false);
   });
 
-  it("stamps a message an action records while the alarm awaits a later sink call with the alarm's count: an outage after it counts nothing", async () => {
+  it('keeps a message an action records while the alarm awaits a sink call, and delivers it from the next alarm, where an outage counts nothing of it', async () => {
     const stub = newStub();
     await testEnv.OUTBOX_LOG.put('retry-odd', '1');
     // The first call delivers 2 and answers 1 and 3 for a retry; 1 fails alone; the call for 3 alone waits.
@@ -225,8 +223,8 @@ describe('the outbox (real workerd)', () => {
     await stub.releaseHeld();
     await alarm;
     await deliver(stub, async () => (await stub.outboxRows()).some((row) => row.message === '"x"' && row.tries === 1));
-    // 1 and 3 failed alone after 2 was delivered: counted. 'x' was recorded after that and failed alone with
-    // nothing delivered since: not counted.
+    // 1 and 3 failed alone after 2 was delivered in their alarm: counted. 'x' is read by the next alarm, which delivers
+    // nothing: its failure alone counts nothing.
     expect(await stub.outboxRows()).toEqual([
       { message: '1', tries: 1, counted: 1, last_error: 'Error: odd ones bounced' },
       { message: '3', tries: 1, counted: 1, last_error: 'Error: sink is down' },

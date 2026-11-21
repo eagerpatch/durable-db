@@ -8,12 +8,14 @@
 // (and a handler that throws records none). An alarm hands the sink the oldest
 // messages that are due, at most 100 in a call, and deletes what it delivered.
 // What a call did not deliver is halved and tried again in the same alarm, so a
-// message the sink cannot take ends up alone. Only a failure alone moves a
-// message's clock (its own backoff), and it counts toward `maxAttempts` only
-// when the sink delivered some other message since the message was recorded or
-// last failed. A failure alone in an alarm that delivered nothing takes the
-// sink for down: nothing is tried until its next try, which hands it one
-// message.
+// message the sink cannot take ends up alone. A failure is judged only by what
+// the sink did earlier in the same alarm: a message that fails alone waits on
+// its own backoff, and the failure counts toward `maxAttempts` only when the
+// sink delivered another message before it in that alarm. A failure alone
+// before anything was delivered cannot be told from an outage: it takes the
+// sink for down, and nothing is read until its next try, which hands it the
+// newest message alone and, if it does not take that one, the one tried or
+// recorded longest ago.
 // A message is delivered at least once — make what consumes it idempotent.
 //
 // The sink is configured once, in the Vite plugin: `durableDb({ outbox: {
@@ -58,8 +60,8 @@ export interface OutboxEnvelope<M = OutboxMessage> {
   recordedAt: number;
   /**
    * How many of its failures counted toward `maxAttempts` before this call:
-   * 0 on its first. Only a failure alone counts, and only once the sink
-   * delivered some other message since its previous one.
+   * 0 on its first. Only a failure alone counts, and only after the sink
+   * delivered another message earlier in the same alarm.
    */
   attempts: number;
 }
@@ -240,19 +242,16 @@ function answeredList(list: unknown): unknown[] | null {
 export const OUTBOX_TABLE = '__outbox';
 
 /**
- * The outbox. `tries`: how often the message failed alone — its backoff.
- * `counted`: those of its failures that count toward `maxAttempts`.
- * `next_attempt_at` (ms since the epoch; 0 is due at once): when it is read
- * again. `tried_at`: when it last failed alone (0: never) — with
- * `recorded_at`, which of the waiting messages the sink was handed longest
- * ago, for the sink's tries while it is taken for down. `failed_after`: the
- * sink's `settled` count (`__outbox_sink`) when it was recorded or last failed
- * — a failure counts only when the count moved on since; null for a row
- * another durable-db wrote (0.13, after a rollback), whose first failure
- * counts nothing. `attempts` is durable-db 0.13's count, which it still
- * writes after a rollback: kept so that 0.13 runs on this table, never read
- * here. No index, on purpose: every index write is a billed row written per
- * message, and the outbox is near-empty but for an outage.
+ * The outbox. `tries`: how often the message failed alone — its own backoff,
+ * `next_attempt_at` (ms since the epoch; 0 is due) = now +
+ * `outboxRetryDelay(tries)`. `counted`: those of its failures that count
+ * toward `maxAttempts` — the envelope's `attempts`. `tried_at`: when a try of
+ * the down sink last handed it alone (0: never); with `recorded_at`, the
+ * order those tries take the waiting messages in (`max(tried_at,
+ * recorded_at)`). `attempts` is durable-db 0.13's count, kept so that 0.13
+ * runs on this table after a rollback: never read or written here. No index,
+ * on purpose: every index write is a billed row written per message, and the
+ * outbox is near-empty but for an outage.
  */
 export const OUTBOX_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_TABLE} (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,47 +263,34 @@ export const OUTBOX_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_TABLE} (
   tries INTEGER NOT NULL DEFAULT 0,
   counted INTEGER NOT NULL DEFAULT 0,
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
-  tried_at INTEGER NOT NULL DEFAULT 0,
-  failed_after INTEGER
+  tried_at INTEGER NOT NULL DEFAULT 0
 )`;
 
 /** What the outbox knows of its sink: one row. */
 export const OUTBOX_SINK_TABLE = '__outbox_sink';
 
 /**
- * `settled`: how many sink calls delivered at least one message — written
- * only while a message waits, since only a waiting message's `failed_after`
- * is compared with it. `down_until`: while later than now, the sink is taken
- * for down and nothing is tried before it; once past, the next alarm is its
- * next try (0: it is not down). `down_rounds`: how many tries in a row found
- * it down, the backoff of the next. `early_tries`: how many tries messages
- * recorded meanwhile may still bring forward, each handing the sink the
- * newest message that never failed alone — `OUTBOX_EARLY_TRIES` after a try
- * that handed it a message that had failed alone before while none that never
- * did waited (its failure may be its own), else 0.
+ * `down_until`: while later than now the sink is taken for down and nothing
+ * is read or called; once past, the next alarm is its next try (0: it is not
+ * down). `down_rounds`: how many tries in a row found it down, the backoff of
+ * the next.
  */
 export const OUTBOX_SINK_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_SINK_TABLE} (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  settled INTEGER NOT NULL DEFAULT 0,
   down_until INTEGER NOT NULL DEFAULT 0,
-  down_rounds INTEGER NOT NULL DEFAULT 0,
-  early_tries INTEGER NOT NULL DEFAULT 0
+  down_rounds INTEGER NOT NULL DEFAULT 0
 )`;
 
 /**
- * The columns a table an older durable-db created lacks (`CREATE TABLE IF NOT
- * EXISTS` leaves a table as it is), each added once. 0.13's `attempts` stays
- * as it was: 0.13 counted each failure on all of the 100 oldest, and this
- * count is `counted`, which starts at 0.
+ * The columns an outbox durable-db 0.13 created lacks (`CREATE TABLE IF NOT
+ * EXISTS` leaves a table as it is), each added once; nothing is reset. 0.13's
+ * `attempts` stays as it was: this count is `counted`, which starts at 0.
  */
 export const OUTBOX_ADDED_COLUMNS: ReadonlyArray<{ table: string; column: string; ddl: string }> = [
   { table: OUTBOX_TABLE, column: 'tries', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN tries INTEGER NOT NULL DEFAULT 0` },
   { table: OUTBOX_TABLE, column: 'counted', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN counted INTEGER NOT NULL DEFAULT 0` },
   { table: OUTBOX_TABLE, column: 'next_attempt_at', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0` },
   { table: OUTBOX_TABLE, column: 'tried_at', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN tried_at INTEGER NOT NULL DEFAULT 0` },
-  { table: OUTBOX_TABLE, column: 'failed_after', ddl: `ALTER TABLE ${OUTBOX_TABLE} ADD COLUMN failed_after INTEGER` },
-  { table: OUTBOX_SINK_TABLE, column: 'settled', ddl: `ALTER TABLE ${OUTBOX_SINK_TABLE} ADD COLUMN settled INTEGER NOT NULL DEFAULT 0` },
-  { table: OUTBOX_SINK_TABLE, column: 'early_tries', ddl: `ALTER TABLE ${OUTBOX_SINK_TABLE} ADD COLUMN early_tries INTEGER NOT NULL DEFAULT 0` },
 ];
 
 /** Where a message goes that the sink gave up on, or that reached `maxAttempts`: kept, never retried by itself. */
@@ -328,20 +314,10 @@ export const OUTBOX_DELIVERY_SIZE = 100;
 export const OUTBOX_CALLS_PER_ALARM = 16;
 
 /**
- * How many tries messages recorded while the sink is taken for down may bring
- * forward, after a try that handed it a message that had failed alone before
- * while none that never did waited: the first may hand it a bad message of its
- * own, and the second gives the next message its turn. A try brought forward
- * moves neither the sink's next try nor its backoff.
- */
-export const OUTBOX_EARLY_TRIES = 2;
-
-/**
  * How many counted failures move a message to `__outbox_dead`
  * (`durableDb({ outbox: { maxAttempts } })`, at least 2). A failure counts
- * when the message failed alone and the sink delivered some other message
- * since the message was recorded or last failed, so an outage counts at most
- * one.
+ * when the message failed alone after the sink delivered another message
+ * earlier in the same alarm, so an outage counts at most one a message.
  */
 export const OUTBOX_MAX_ATTEMPTS = 100;
 

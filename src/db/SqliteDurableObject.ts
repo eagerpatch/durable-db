@@ -416,9 +416,10 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    * it resolves — in the same synchronous block as its last writes, which the
    * Durable Object commits together — and the alarm that delivers them is set
    * with them: now, or, while the sink is taken for down, its next try, so a
-   * message recorded during an outage adds no alarm and no sink call. A
-   * handler that throws records nothing. An action called from another action
-   * of this database runs on the caller's context, and so on its outbox.
+   * message recorded during an outage adds no alarm (the try still makes at
+   * most two sink calls). A handler that throws records nothing. An action
+   * called from another action of this database runs on the caller's context,
+   * and so on its outbox.
    */
   protected async runWithOutbox<T>(ctx: { instanceKey: string; outbox?: Outbox }, run: () => Promise<T>): Promise<T> {
     if (ctx.outbox) return run();
@@ -439,7 +440,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
 
   /**
    * Delivers the outbox, in at most 16 sink calls (`OUTBOX_CALLS_PER_ALARM`).
-   * A failure is judged only by what the sink did earlier in the same alarm.
+   * A failure is judged only by what the sink did in the same alarm.
    *
    * While the sink is taken for down (`down_until` later than now) nothing is
    * read or called, and the alarm is set to that time. Its next try hands it
@@ -456,9 +457,9 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
    * next, the first first. The one message of a call not delivered fails
    * alone: it waits on its own backoff (`tries`), and the failure counts
    * toward `outboxMaxAttempts` (`counted`) only when the sink delivered
-   * another message earlier in this alarm; at the cap it is moved to
-   * `__outbox_dead`. A failure alone before anything was delivered in the
-   * alarm cannot be told from an outage: it counts nothing, and the sink is
+   * another message in this alarm, in that call or earlier; at the cap it is
+   * moved to `__outbox_dead`. A failure alone before anything was delivered in
+   * the alarm cannot be told from an outage: it counts nothing, and the sink is
    * taken for down until its next try, in 5 s. A message the sink answers in
    * `{ dead }` is moved to `__outbox_dead` at once, and is no delivery. The
    * alarm is then set to the earliest message waiting — now, when one is due.
@@ -526,7 +527,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
         const half = Math.ceil(failed.length / 2);
         groups.unshift(failed.slice(0, half), failed.slice(half));
       } else if (failed.length === 1) {
-        // Counted only after the sink took another message in this alarm; before that, an outage for all it can tell.
+        // Counted only when the sink took another message in this alarm, in this call or earlier; else an outage for all it can tell.
         this.failOutboxRowAlone(failed[0]!, call.error, delivered, failures);
         if (!delivered) return this.takeOutboxSinkForDown(was, 1, failures);
       }
@@ -617,7 +618,7 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   /**
    * A message that failed alone: `tries` moves on, and with it its backoff
    * (`next_attempt_at`). When it `counts` — the sink delivered another message
-   * earlier in this alarm — `counted` moves on too, and at
+   * in this alarm, in its call or earlier — `counted` moves on too, and at
    * `outboxMaxAttempts` the message is moved to `__outbox_dead`.
    */
   private failOutboxRowAlone(row: OutboxRow, error: unknown, counts: boolean, failures: OutboxFailures): void {

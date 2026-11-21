@@ -149,6 +149,23 @@ describe('the outbox', () => {
     expect(String(alone.deadError)).toContain('answered it in { dead }');
   });
 
+  it("reads a function answer's fields as an object's: a callable { retry } or { dead } settles as one, a bare function delivered all", () => {
+    const [a, b, c] = [envelope('a'), envelope('b'), envelope('c')];
+    const why = new Error('503 for a');
+    const callable = settleOutboxDelivery([a, b, c], Object.assign(() => {}, { retry: [a], dead: [c], error: why }));
+    expect([...callable.retry]).toEqual([a]);
+    expect([...callable.dead]).toEqual([c]);
+    expect(callable.error).toBe(why);
+    // A callable Proxy, answering its fields through a get trap.
+    const proxied = new Proxy(function answer() {}, { get: (target, key) => (key === 'retry' ? [b] : Reflect.get(target, key)) });
+    expect([...settleOutboxDelivery([a, b, c], proxied).retry]).toEqual([b]);
+    // A callable naming another object is a mistake, as an object's would be: nothing of the call delivered.
+    expect(settleOutboxDelivery([a, b, c], Object.assign(() => {}, { retry: [{ ...a }] })).retry).toEqual(new Set([a, b, c]));
+    // A function with neither field delivered everything, like any other value a sink returns.
+    const bare = settleOutboxDelivery([a, b, c], () => {});
+    expect([bare.retry.size, bare.dead.size]).toEqual([0, 0]);
+  });
+
   it('reads a malformed answer as a throw: every envelope of the call not delivered, none given up on', () => {
     const [a, b, c] = [envelope('a'), envelope('b'), envelope('c')];
     for (const answer of [{ retry: [{ ...a }] }, { retry: 'a' }, { retry: [a, envelope('x')] }, { retry: [a], dead: [a] }, { dead: 'c' }, { dead: [{ ...c }] }]) {

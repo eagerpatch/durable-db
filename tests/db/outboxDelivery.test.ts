@@ -492,14 +492,26 @@ describe('the outbox delivery', () => {
           'an answer that says it has no retry, then gives one',
           (envelopes) => new Proxy({ retry: [...envelopes] }, { has: () => false }) as OutboxDelivery,
         ],
+        ['a callable answer with a { retry }', (envelopes) => Object.assign(() => {}, { retry: [...envelopes], error: new Error('503') })],
+        [
+          'a callable Proxy answering a { retry }',
+          (envelopes) => new Proxy(function answer() {}, { get: (target, key) => (key === 'retry' ? [...envelopes] : Reflect.get(target, key)) }) as OutboxDelivery,
+        ],
       ];
       for (const [answer, deliver] of answers) {
         const t = outboxDatabase({ name: 'main' });
         await t.database.record('acme', ['not delivered']);
         t.sink(deliver);
         await t.alarm();
-        expect({ answer, waiting: t.rows().map((row) => row.message) }).toEqual({ answer, waiting: ['"not delivered"'] });
+        expect({ answer, waiting: t.rows().map((row) => row.message), dead: t.dead() }).toEqual({ answer, waiting: ['"not delivered"'], dead: [] });
       }
+      // A callable answer's { dead } gives the message up, as an object's would: moved aside, not delivered.
+      const t = outboxDatabase({ name: 'main' });
+      await t.database.record('acme', ['never']);
+      t.sink((envelopes) => Object.assign(() => {}, { dead: [...envelopes] }));
+      await t.alarm();
+      expect(t.rows()).toEqual([]);
+      expect(t.dead()).toMatchObject([{ message: '"never"', attempts: 0 }]);
     });
 
     it('records into a new outbox after destroyDatabase wiped the storage', async () => {
@@ -578,7 +590,7 @@ describe('the outbox delivery', () => {
   });
 
   describe('I2 — buried only by the rule', () => {
-    it('counts a failure alone only after the sink delivered another message earlier in the same alarm', async () => {
+    it('counts the one message of a call not delivered only when the sink delivered another in that alarm, in that call or earlier', async () => {
       // 'ok' first: delivered, then 'bad' fails alone — counted.
       const after = outboxDatabase({ name: 'main' });
       after.sink(failingOn((m) => m === 'bad'));
@@ -587,6 +599,23 @@ describe('the outbox delivery', () => {
       expect(after.calls()).toEqual([['ok', 'bad'], ['ok'], ['bad']]);
       expect(after.rows()).toMatchObject([{ message: '"bad"', tries: 1, counted: 1, next_attempt_at: now + 5_000 }]);
       expect(after.sinkState()).toEqual({ down_until: 0, down_rounds: 0 });
+
+      // In the same call: the sink refuses 'bad' and takes 'ok'. 'bad' is the one of its call not delivered, and the
+      // sink delivered another in that call — counted, though it was never in a call of it alone and nothing was
+      // delivered before its call. Not counting it would take the sink for down after a call that delivered the rest.
+      const same = outboxDatabase({ name: 'main', maxAttempts: 2 });
+      same.sink((envelopes) => ({ retry: envelopes.filter((e) => e.message === 'bad'), error: new Error('400') }));
+      await same.database.record('acme', ['bad', 'ok']);
+      await same.alarm();
+      expect(same.calls()).toEqual([['bad', 'ok']]);
+      expect(same.rows()).toMatchObject([{ message: '"bad"', tries: 1, counted: 1 }]);
+      expect(same.sinkState()).toEqual({ down_until: 0, down_rounds: 0 });
+      // Again beside a message the sink takes: counted again, and at maxAttempts buried.
+      now = same.alarmAt()!;
+      await same.database.record('acme', ['ok 2']);
+      await same.alarm();
+      expect(same.calls(1)).toEqual([['bad', 'ok 2']]);
+      expect(same.dead()).toMatchObject([{ message: '"bad"', attempts: 2, last_error: 'Error: 400' }]);
 
       // 'bad' first: it fails alone before anything was delivered — not counted, and the sink is taken for down.
       const before = outboxDatabase({ name: 'main' });
@@ -601,7 +630,7 @@ describe('the outbox delivery', () => {
       expect(before.sinkState()).toEqual({ down_until: now + 5_000, down_rounds: 1 });
     });
 
-    it('of 100 messages, one bad: the other 99 are delivered in that alarm, and the bad one is counted alone', async () => {
+    it('of 100 messages, one bad: the other 99 are delivered in that alarm, and the bad one is counted alone — unless it is the oldest of the read', async () => {
       const t = outboxDatabase({ name: 'main' });
       const delivered: unknown[] = [];
       t.sink(failingOn((m) => m === 63, delivered));
@@ -613,9 +642,36 @@ describe('the outbox delivery', () => {
       expect(t.rows()).toMatchObject([{ message: '63', tries: 1, counted: 1, next_attempt_at: now + 5_000 }]);
       expect(t.sinkState()).toEqual({ down_until: 0, down_rounds: 0 });
       expect(t.alarmAt()).toBe(now + 5_000);
+
+      // Anywhere but first, the same: halving delivers a message before it is alone.
+      for (const at of [1, 99]) {
+        const other = outboxDatabase({ name: 'main' });
+        const sent: unknown[] = [];
+        other.sink(failingOn((m) => m === at, sent));
+        await other.database.record('acme', range(100));
+        await other.alarm();
+        expect({ at, sent: sent.length, sink: other.sinkState() }).toEqual({ at, sent: 99, sink: { down_until: 0, down_rounds: 0 } });
+      }
+
+      // The oldest of the read, with a sink that fails every call holding it: halving reaches it first, alone, before
+      // anything was delivered — it takes the sink for down, and the 99 go at the next try, 5 s later (limit 2).
+      const first = outboxDatabase({ name: 'main' });
+      const sentAt = new Map<unknown, number>();
+      first.sink((envelopes) => {
+        if (envelopes.some((e) => e.message === 0)) throw new Error('400 bad payload');
+        for (const e of envelopes) sentAt.set(e.message, now);
+      });
+      await first.database.record('acme', range(100));
+      const head = await first.alarm();
+      expect(head.calls).toEqual([100, 50, 25, 13, 7, 4, 2, 1]);
+      expect(sentAt.size).toBe(0);
+      expect(first.sinkState()).toEqual({ down_until: now + 5_000, down_rounds: 1 });
+      await first.run(5_000);
+      expect(sentAt.size).toBe(99);
+      expect(new Set(sentAt.values())).toEqual(new Set([1_000_000 + 5_000]));
     });
 
-    it('buries a message when its counted reaches maxAttempts, each counted failure after a delivery in its alarm', async () => {
+    it('buries a message when its counted reaches maxAttempts, each counted failure in an alarm that delivered another', async () => {
       const t = outboxDatabase({ name: 'main', maxAttempts: 3 });
       // The sink takes everything but 'bad', which it answers in { retry }.
       t.sink((envelopes) => ({ retry: envelopes.filter((e) => e.message === 'bad'), error: new Error('400 bad payload') }));
@@ -733,7 +789,7 @@ describe('the outbox delivery', () => {
       expect(t.sinkState().down_until).toBeGreaterThan(now - 300_000);
     });
 
-    it('while down a try makes at most two calls and writes two __outbox rows and the sink row; what is recorded meanwhile adds no alarm and no call', async () => {
+    it('while down a try makes at most two calls and writes two __outbox rows and the sink row; what is recorded meanwhile adds no alarm', async () => {
       const t = outboxDatabase({ name: 'main' });
       await t.database.record('acme', range(300));
       t.sink(down);
@@ -781,6 +837,25 @@ describe('the outbox delivery', () => {
       await t.alarm();
       expect(t.counted.outboxReads - reads).toBe(2);
       expect(t.calls(calls)).toEqual([['y'], ['x']]);
+    });
+
+    it('with one message waiting a try makes one call; a message recorded meanwhile adds no alarm, but makes each later try two calls', async () => {
+      const outage = async (recordOne: boolean) => {
+        now = 1_000_000;
+        const t = outboxDatabase({ name: 'main' });
+        t.sink(down);
+        await t.database.record('acme', ['waiting']);
+        await t.alarm();
+        now += 1_000;
+        if (recordOne) await t.database.record('acme', ['recorded meanwhile']);
+        const alarms = await t.run(3_600_000);
+        expect(Math.max(...alarms.map((alarm) => alarm.calls.length))).toBe(recordOne ? 2 : 1);
+        return { alarms: alarms.length, calls: alarms.flatMap((alarm) => alarm.calls).length, written: alarms.reduce((sum, alarm) => sum + alarm.written, 0) };
+      };
+      // The second order finds no other row: one call a try, the message's tried_at and the sink's row.
+      expect(await outage(false)).toEqual({ alarms: 16, calls: 16, written: 32 });
+      // The same alarms; every try now hands the newest and then the other, still at most two calls and two rows.
+      expect(await outage(true)).toEqual({ alarms: 16, calls: 32, written: 48 });
     });
 
     it('2 000 waiting, an hour of outage: 17 alarms, 40 sink calls, 50 rows written', async () => {
@@ -853,7 +928,27 @@ describe('the outbox delivery', () => {
       ]);
     });
 
-    it('hands every waiting message alone by the try after as many tries as there are messages ahead of it, whatever is recorded meanwhile', async () => {
+    it('over tries that take nothing, hands every waiting message alone by the try after as many tries as there are messages ahead of it', async () => {
+      // Nothing recorded meanwhile: m<j> (j ahead of it: m0 … m<j − 1>) is handed alone at try j + 1, not within j;
+      // m9, the newest, at every try.
+      const quiet = outboxDatabase({ name: 'main' });
+      quiet.sink(down);
+      await quiet.database.record('acme', range(10).map((n) => `m${n}`));
+      await quiet.alarm();
+      const handedAt = new Map<unknown, number>();
+      for (let k = 1; k <= 10; k++) {
+        now = quiet.sinkState().down_until;
+        const from = quiet.handed.length;
+        await quiet.alarm();
+        for (const [message] of quiet.calls(from)) if (!handedAt.has(message)) handedAt.set(message, k);
+      }
+      expect([...handedAt].sort(([, x], [, y]) => x - y)).toEqual([
+        ['m9', 1],
+        ...range(9).map((j) => [`m${j}`, j + 1]),
+      ]);
+
+      // A message recorded before every try is the newest there, handed first, and goes behind the rest.
+      now = 1_000_000;
       const t = outboxDatabase({ name: 'main' });
       t.sink(down);
       await t.database.record('acme', range(10).map((n) => `m${n}`));
@@ -964,6 +1059,57 @@ describe('the outbox delivery', () => {
       expect(two.calls(8).slice(0, 4)).toEqual([['bad 2'], ['bad 1'], ['bad 2'], ['good 0']]);
       expect(deliveredAt2.size).toBe(98);
       expect(new Set(deliveredAt2.values())).toEqual(new Set([start + 15_000]));
+    });
+
+    it('2. while refused messages fill the head of the read past what one alarm’s halving isolates, each try delivers only its newest message: the rest wait until those leave the read', async () => {
+      /**
+       * A sink relaying to two destinations, as the webhook sink of the README does: A is down (its messages
+       * answered in { retry }), B takes everything. `refused` messages for A wait; one for B is recorded every 2 s.
+       */
+      const relay = async (refused: number, ms: number) => {
+        now = 1_000_000;
+        const t = outboxDatabase({ name: 'main' });
+        const deliveredAt = new Map<string, number>();
+        t.sink((envelopes) => {
+          const retry = envelopes.filter((e) => String(e.message).startsWith('a'));
+          for (const e of envelopes) if (!retry.includes(e)) deliveredAt.set(String(e.message), now);
+          if (retry.length > 0) return { retry, error: new Error('503 destination A unavailable') };
+        });
+        for (let i = 0; i < refused; i += 100) await t.database.record('acme', range(Math.min(100, refused - i), i).map((n) => `a ${n}`));
+        const recordedAt = new Map<string, number>();
+        let n = 0;
+        await t.run(ms, {
+          ms: 2_000,
+          record: (at) => {
+            recordedAt.set(`b ${n}`, at);
+            return [`b ${n++}`];
+          },
+        });
+        const waits = [...recordedAt].map(([m, at]) => (deliveredAt.get(m) ?? now) - at);
+        return {
+          t,
+          waiting: [...recordedAt.keys()].filter((m) => !deliveredAt.has(m)).length,
+          longest: Math.max(...waits),
+          // Every call that held a B message: the try's newest, alone, or a read with room for it.
+          handedB: t.handed.filter((call) => call.some((e) => String(e.message).startsWith('b'))),
+        };
+      };
+
+      // 300 refused at the head: each take-down's try delivers its newest message and the alarm after it is taken
+      // down again by the head, until enough of them wait on their own backoff for the read to reach the rest.
+      const some = await relay(300, 3_600_000);
+      expect(some.waiting).toBe(0);
+      expect(some.longest).toBeGreaterThan(20 * 60_000);
+      expect(some.longest).toBeLessThan(25 * 60_000);
+      expect(Math.max(...some.t.stats.map((alarm) => alarm.calls.length))).toBe(16);
+
+      // 1 000: their backoff (at most 5 minutes) never takes enough of them out of the read. Two hours on, every B
+      // message delivered was a try's newest, alone, and most still wait — the longest the whole run.
+      const many = await relay(1_000, 2 * 3_600_000);
+      expect(many.handedB.every((call) => call.length === 1)).toBe(true);
+      expect(many.waiting).toBeGreaterThan(2_000);
+      expect(many.longest).toBeGreaterThan(115 * 60_000);
+      expect(many.t.dead()).toEqual([]);
     });
 
     it('3. a sink that stops part-way through each alarm (a quota) has that alarm’s failures alone counted: at most one a message an alarm', async () => {

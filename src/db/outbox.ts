@@ -8,14 +8,14 @@
 // (and a handler that throws records none). An alarm hands the sink the oldest
 // messages that are due, at most 100 in a call, and deletes what it delivered.
 // What a call did not deliver is halved and tried again in the same alarm, so a
-// message the sink cannot take ends up alone. A failure is judged only by what
-// the sink did earlier in the same alarm: a message that fails alone waits on
-// its own backoff, and the failure counts toward `maxAttempts` only when the
-// sink delivered another message before it in that alarm. A failure alone
-// before anything was delivered cannot be told from an outage: it takes the
-// sink for down, and nothing is read until its next try, which hands it the
-// newest message alone and, if it does not take that one, the one tried or
-// recorded longest ago.
+// message the sink cannot take ends up the one of its call not delivered: it
+// fails alone. A failure is judged only by what the sink did in the same
+// alarm: a message that fails alone waits on its own backoff, and the failure
+// counts toward `maxAttempts` only when the sink delivered another message in
+// that alarm, in that call or earlier. A failure alone before anything was
+// delivered cannot be told from an outage: it takes the sink for down, and
+// nothing is read until its next try, which hands it the newest message alone
+// and, if it does not take that one, the one tried or recorded longest ago.
 // A message is delivered at least once — make what consumes it idempotent.
 //
 // The sink is configured once, in the Vite plugin: `durableDb({ outbox: {
@@ -60,8 +60,9 @@ export interface OutboxEnvelope<M = OutboxMessage> {
   recordedAt: number;
   /**
    * How many of its failures counted toward `maxAttempts` before this call:
-   * 0 on its first. Only a failure alone counts, and only after the sink
-   * delivered another message earlier in the same alarm.
+   * 0 on its first. Only a failure alone counts — the one message of a call
+   * the sink did not deliver — and only when the sink delivered another
+   * message in that alarm, in that call or earlier.
    */
   attempts: number;
 }
@@ -193,12 +194,13 @@ export interface SettledOutboxDelivery {
  * envelope this call was not handed (a copy, say), or names one envelope in
  * both is the sink's mistake and counts as a throw: no envelope of the call
  * was delivered. A message is never counted as delivered, or given up on,
- * that the sink did not say was. Each field of the answer is read once, and
- * each list copied once, by index: what is checked is what settles the call,
- * however the answer reads a second time.
+ * that the sink did not say was. A function's fields are read as an object's
+ * (a function with a `retry` is still an answer). Each field of the answer is
+ * read once, and each list copied once, by index: what is checked is what
+ * settles the call, however the answer reads a second time.
  */
 export function settleOutboxDelivery(envelopes: readonly OutboxEnvelope[], answer: unknown): SettledOutboxDelivery {
-  if (answer === null || typeof answer !== 'object') {
+  if (answer === null || (typeof answer !== 'object' && typeof answer !== 'function')) {
     return { retry: new Set(), error: undefined, dead: new Set(), deadError: undefined };
   }
   const { retry, dead, error } = answer as { retry?: unknown; dead?: unknown; error?: unknown };
@@ -316,8 +318,9 @@ export const OUTBOX_CALLS_PER_ALARM = 16;
 /**
  * How many counted failures move a message to `__outbox_dead`
  * (`durableDb({ outbox: { maxAttempts } })`, at least 2). A failure counts
- * when the message failed alone after the sink delivered another message
- * earlier in the same alarm, so an outage counts at most one a message.
+ * when the message failed alone — the one of its call not delivered — in an
+ * alarm in which the sink delivered another message, in that call or
+ * earlier, so an outage counts at most one a message.
  */
 export const OUTBOX_MAX_ATTEMPTS = 100;
 

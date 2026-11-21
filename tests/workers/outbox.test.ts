@@ -5,6 +5,7 @@ import { env, runDurableObjectAlarm } from 'cloudflare:test';
 interface OutboxStub {
   record(instanceKey: string, messages: unknown[], fail?: boolean): Promise<number | string>;
   recordInOldOutbox(instanceKey: string, messages: unknown[]): Promise<void>;
+  seedSuspect(instanceKey: string, messages: unknown[], failedAgo: number): Promise<void>;
   makeDue(): Promise<void>;
   sinkDown(): Promise<boolean>;
   outboxRows(): Promise<Array<{ message: string; attempts: number; last_error: string | null }>>;
@@ -201,6 +202,27 @@ describe('the outbox (real workerd)', () => {
     await deliver(stub, async () => (await delivered()).length === 4);
     expect((await delivered()).map((d) => d.message).sort()).toEqual(['a', 'b', 'c', 'd']);
     expect(await stub.outboxRows()).toEqual([]);
+    expect(await stub.sinkDown()).toBe(false);
+  });
+
+  it('gives every batch its turn while the sink is taken for down: two bad messages recorded apart hold back no batch that failed beside a delivery', async () => {
+    const stub = newStub();
+    await testEnv.OUTBOX_LOG.put('poison', '1');
+    // H1 and H2 threw in a delivery while another of its alarm went through: one suspect batch, failed a minute ago.
+    await stub.seedSuspect('acme', ['H1', 'H2'], 60_000);
+    // Two messages the sink never takes, each recorded alone: each is new, so its failure says something of the sink.
+    await stub.record('acme', ['poison']);
+    await deliver(stub, async () => (await stub.outboxRows()).some((row) => row.message === '"poison"' && row.attempts >= 1));
+    await stub.record('acme', ['poison']);
+    await deliver(stub, async () => stub.sinkDown());
+    // The sink's next try: what failed longest ago goes first.
+    await stub.makeDue();
+    expect(await runDurableObjectAlarm(stub)).toBe(true);
+    expect(await delivered()).toEqual([
+      { message: 'H1', database: 'notes', tenantId: 'acme', attempts: 1 },
+      { message: 'H2', database: 'notes', tenantId: 'acme', attempts: 1 },
+    ]);
+    expect((await stub.outboxRows()).map((row) => row.message)).toEqual(['"poison"', '"poison"']);
     expect(await stub.sinkDown()).toBe(false);
   });
 

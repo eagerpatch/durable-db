@@ -8,8 +8,11 @@ let tenantIdResolver: (() => string) | null = null;
  *
  * The resolver is called at the moment a database operation needs the tenant ID —
  * by which point request middleware (auth, session, etc.) has already completed.
- * Inside a per-tenant database's Durable Object it is not asked: the object's
- * own tenant is the answer there (see {@link getTenantId}).
+ * In an action of a per-tenant database — and what the action calls — it is
+ * not asked: the object's own tenant is the answer there (see
+ * {@link getTenantId}). Elsewhere in the object it still is: the alarm, and so
+ * the outbox sink it runs, has no action's context (a sink reads the tenant
+ * from `envelope.tenantId`).
  *
  * @example
  * ```ts
@@ -59,15 +62,18 @@ function tenantFromStoreKey(): string | null {
 /**
  * The current tenant ID.
  *
- * Inside a per-tenant database's Durable Object — an action, or what it
- * calls — the object's own tenant (its DoContext's `tenantId`) is the answer,
+ * In an action of a per-tenant database's Durable Object, and in what it
+ * calls, the object's own tenant (its DoContext's `tenantId`) is the answer,
  * before any resolver: it cannot be wrong for code running in that object,
  * and a resolver that reads a request would throw there (the worker module's
  * top level, where a resolver is installed, runs in every object's isolate
- * too). So a resolver cannot answer another tenant for code running inside a
- * per-tenant object. Everywhere else — the worker, a global database's
- * object (no tenant of its own) — the resolver answers; a store built by hand
- * without a `tenantId` is read as its key when no resolver is set.
+ * too). So a resolver cannot answer another tenant for an action of a
+ * per-tenant object. Everywhere else the resolver answers: the worker, a
+ * global database's object (no tenant of its own), and an object's alarm —
+ * the outbox sink included, which has no action's context (it reads the
+ * tenant from `envelope.tenantId`). A store built by hand without a
+ * `tenantId` is read as its key, `'global'` as none, only when no resolver
+ * is set.
  *
  * @throws Error if no resolver is configured and no Durable Object supplies the tenant
  *

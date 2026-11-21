@@ -67,10 +67,12 @@ const als = new AsyncLocalStorage<DoContext>();
 const wsTransportCache = new Map<string, WebSocketTransport>();
 
 // Publish the DO-context store getter on globalThis so getTenantId() (in
-// context/index.ts) answers the object's own tenant inside a Durable Object —
-// before the consumer's setTenantIdResolver(), whose module top level runs in
-// every object's isolate too but whose resolver reads a request the object
-// does not have. Deliberately NOT a module-level wire: bundlers routinely
+// context/index.ts) answers the object's own tenant in an action running in a
+// Durable Object, and in what it calls — the store is the generated
+// rpc/webSocketMessage's, so the alarm (the outbox sink) has none — before the
+// consumer's setTenantIdResolver(), whose module top level runs in every
+// object's isolate too but whose resolver reads a request the object does not
+// have. Deliberately NOT a module-level wire: bundlers routinely
 // produce two copies of this package in one worker (a prebundled
 // 'durable-db/registry' inside generated DO stubs, a source-served
 // 'durable-db/context' inside a framework) and a module-to-module

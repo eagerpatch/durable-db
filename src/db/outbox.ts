@@ -7,17 +7,19 @@
 // block as the action's last writes, so the Durable Object commits them as one
 // (and a handler that throws records none). An alarm then hands the ones that
 // are due to the sink — at most three deliveries an alarm, what no delivery has
-// failed yet first — and deletes what was delivered; a message whose delivery
-// failed stays in the table and is retried with backoff, on its own clock, so
-// it never holds back the messages behind it (and no order is kept across a
-// failure). The messages a delivery that threw leaves are split in two for
-// their retry, each half a delivery of its own, so a message that fails every
-// delivery holding it is cut off from the others within a few retries; once a
-// delivery has gone through, the rest due goes in one — but never a delivery
-// that failed while others went through, which holds a message failing on its
-// own. When two deliveries in a row that say something of the sink take
-// nothing, the sink is taken for down: nothing is tried until its next try,
-// and no attempt is counted meanwhile. A message is delivered at least once —
+// failed yet first, then what failed longest ago — and deletes what was
+// delivered; a message whose delivery failed stays in the table and is retried
+// with backoff, on its own clock, so it never holds back the messages behind it
+// (and no order is kept across a failure). The messages a delivery that threw
+// leaves are split in two for their retry, each half a delivery of its own, so
+// a message that fails every delivery holding it is cut off from the others
+// within a few retries; once a delivery has gone through, the rest due goes in
+// one — but never a delivery that failed while another went through, which
+// holds a message failing on its own. When two deliveries in a row that say
+// something of the sink take nothing, the sink is taken for down: nothing is
+// tried until its next try, which hands the sink one message, then another —
+// what never failed first, then what failed longest ago, from the whole table
+// — and no attempt is counted meanwhile. A message is delivered at least once —
 // make what consumes it idempotent — and one that fails `maxAttempts`
 // deliveries of its own (alone, or named in `{ retry }`, while the sink
 // delivered others), or that the sink gives up on (`{ dead }`), is moved to
@@ -267,16 +269,19 @@ export const OUTBOX_TABLE = '__outbox';
  * at once) is when a row is next handed to the sink — after a failed
  * delivery, its own backoff — `attempts` how many deliveries of it failed
  * (one that failed while the sink was taken for down is not counted) and
- * `failed_at` when the last of them did (0: none has). `batch` is which rows
- * a delivery hands the sink together: 0 for the rows no delivery has failed
- * yet, else the id of the first row of what a failed delivery left to retry
- * together (see {@link outboxBatches}) — negated when that delivery failed
- * while others of its alarm went through: such a batch holds a message that
- * fails on its own, so it is never merged into another delivery, and its
- * failure says nothing of the sink. No index, on purpose: every index write
- * is a billed row written per message, and the outbox is near-empty but for
- * an outage, when an alarm a round of retries reads it at most twice and
- * writes at most the 100 messages it tried (see `SqliteDurableObject.alarm()`).
+ * `failed_at` when a delivery of it last failed, counted or not (0: none
+ * has) — the order an alarm tries what is due in. `batch` is which rows a
+ * delivery hands the sink together: 0 for the rows no delivery has failed
+ * yet (or only a try of one while the sink was taken for down), else the id
+ * of the first row of what a failed delivery left to retry together (see
+ * {@link outboxBatches}) — negated when that delivery failed while another
+ * of its alarm went through: such a batch holds a message that fails on its
+ * own, so it is never merged into another delivery. No index, on purpose:
+ * every index write is a billed row written per message, and the outbox is
+ * near-empty but for an outage, when an alarm a round of retries reads it
+ * once — the whole table, to try what failed longest ago — and writes the
+ * two messages it tried and the row of `__outbox_sink` (see
+ * `SqliteDurableObject.alarm()`).
  */
 export const OUTBOX_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_TABLE} (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -308,13 +313,16 @@ export const OUTBOX_ADDED_COLUMNS: ReadonlyArray<{ column: string; ddl: string }
 export const OUTBOX_SINK_TABLE = '__outbox_sink';
 
 /**
- * `delivered_at`: when a delivery that took anything last ran — kept when
- * messages that failed wait (a failure counts towards `maxAttempts` only when
- * the sink delivered something since the message last failed, or in the same
- * alarm). `failing`: how many deliveries in a row that say something of the
- * sink took nothing. `down_until`: while later than now, the sink is taken for
- * down and nothing is tried before it (0: it is not); `down_rounds` how many
- * tries in a row found it down, the backoff of the next.
+ * `delivered_at`: when a delivery that took anything last ran — kept while
+ * messages that failed wait, again whenever the last of their failures is no
+ * older than it (a failure counts towards `maxAttempts` only when the sink
+ * delivered something since the message last failed, or in the same alarm).
+ * `failing`: how many deliveries in a row that say something of the sink — of
+ * several messages, suspect or not, or of one that never failed — took
+ * nothing. `down_until`: while later than now, the sink is taken for down
+ * and nothing is tried before it; once past, the next alarm is its next try
+ * (0: it is not down). `down_rounds` how many tries in a row found it down,
+ * the backoff of the next.
  */
 export const OUTBOX_SINK_DDL = `CREATE TABLE IF NOT EXISTS ${OUTBOX_SINK_TABLE} (
   id INTEGER PRIMARY KEY CHECK (id = 1),

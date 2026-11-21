@@ -472,6 +472,27 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
   }
 
   /**
+   * `messages` as a delivery that threw while another of its alarm went
+   * through leaves them: one suspect batch (its batch negated), failed
+   * `failedAgo` ms ago and due in an hour. Written in one block, no alarm set.
+   */
+  async seedSuspect(instanceKey: string, messages: unknown[], failedAgo: number): Promise<void> {
+    this.sql.exec(OUTBOX_DDL);
+    const failedAt = Date.now() - failedAgo;
+    for (const message of messages) {
+      this.sql.exec(
+        'INSERT INTO __outbox (instance_key, message, recorded_at, attempts, failed_at, next_attempt_at) VALUES (?, ?, ?, 1, ?, ?)',
+        instanceKey,
+        JSON.stringify(message),
+        failedAt,
+        failedAt,
+        Date.now() + 3_600_000,
+      );
+    }
+    this.sql.exec('UPDATE __outbox SET batch = -(SELECT min(id) FROM __outbox)');
+  }
+
+  /**
    * Records `message` and starts delivering it, the delivery held until
    * `destroyAndRecord()` releases it (no alarm left set: this is the alarm).
    */

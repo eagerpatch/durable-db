@@ -4,7 +4,9 @@
 // nothing until a definition is parsed. ArkType initialises its whole scope of
 // keywords when it is imported (~40 ms of CPU in a worker's cold start, every
 // isolate, every Durable Object); this parses a definition into plain
-// closures in microseconds.
+// closures in microseconds, when its Type is first used, not when `type()`
+// is called: a malformed definition (which ArkType's types refuse at compile
+// time) throws its ParseError there.
 //
 // The Types it returns are callable like ArkType's (`T(data)` → the value or
 // `ArkErrors`), Standard Schemas (oRPC, any `~standard` consumer) with their
@@ -392,19 +394,48 @@ function makeType(node: Node, config: TypeConfig): Type<any> {
   return validate as unknown as Type<any>;
 }
 
+/**
+ * A Type whose node is made at its first use — a call, any property or
+ * method, its use inside another Type — then kept, so a definition is parsed
+ * once, and never if its Type is never used. `type()` runs at module scope
+ * (an action's args, an API's inputs, a job's), and every isolate — a
+ * worker's and each Durable Object's — evaluates all of them as it starts,
+ * though a request validates one or two. A definition that cannot be parsed
+ * throws its ParseError at that first use, each time it is used.
+ */
+function lazyType(parse: () => Node, config: TypeConfig): Type<any> {
+  let node: Node | undefined;
+  const nodeOf = () => (node ??= parse());
+  const validate = ((data: unknown) => run(nodeOf(), config, data)) as unknown as Internals;
+  Object.setPrototypeOf(validate, prototype);
+  // An own accessor until it is read, then the node as a data property: `NODE
+  // in value` (what tells a Type) holds from the start.
+  Object.defineProperty(validate, NODE, {
+    configurable: true,
+    enumerable: true,
+    get() {
+      const parsed = nodeOf();
+      Object.defineProperty(validate, NODE, { value: parsed, writable: true, enumerable: true, configurable: true });
+      return parsed;
+    },
+  });
+  validate[CONFIG] = config;
+  return validate as unknown as Type<any>;
+}
+
 /** A `type()` whose Types follow `config` (durable-db's action args admit `undefined` for an optional key). */
 export function createTypeParser(config: Partial<TypeConfig> = {}): TypeParser {
   const resolved: TypeConfig = { ...DEFAULT_CONFIG, ...config };
   const context = contextFor(resolved);
-  const parse = (def: unknown) => makeType(parseDefinition(def, context), resolved);
+  const parse = (def: unknown) => lazyType(() => parseDefinition(def, context), resolved);
   const parser = ((...args: unknown[]) => parse(args.length === 1 ? args[0] : args)) as unknown as TypeParser & Record<string, unknown>;
   Object.assign(parser, {
     errors: ArkErrors,
     raw: parse,
     unit: (value: unknown) => makeType(new UnitNode(value), resolved),
     enumerated: (...values: unknown[]) => makeType(union(values.map((v) => new UnitNode(v))), resolved),
-    or: (...defs: unknown[]) => makeType(union(defs.map((d) => parseDefinition(d, context))), resolved),
-    and: (...defs: unknown[]) => makeType(defs.map((d) => parseDefinition(d, context)).reduce(intersect), resolved),
+    or: (...defs: unknown[]) => lazyType(() => union(defs.map((d) => parseDefinition(d, context))), resolved),
+    and: (...defs: unknown[]) => lazyType(() => defs.map((d) => parseDefinition(d, context)).reduce(intersect), resolved),
   });
   return parser;
 }

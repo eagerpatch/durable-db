@@ -918,6 +918,19 @@ describe('transform', () => {
     expect(result).toBeNull();
   });
 
+  // Rolldown's tree-shaking would drop Drizzle base classes a lazy module
+  // extends: its modules are tagged side-effectful. The answer carries no
+  // code, so the module keeps its own and none is handed back to the bundler.
+  it("tags Drizzle's modules side-effectful, their code left as it is", async () => {
+    const transform = handlerOf(plugin.transform);
+    const result = await transform.call(
+      { resolve: async () => null },
+      'export class TypedQueryBuilder {}',
+      '/project/node_modules/.pnpm/drizzle-orm@0.45.4/node_modules/drizzle-orm/query-builders/query-builder.js'
+    );
+    expect(result).toEqual({ moduleSideEffects: true });
+  });
+
   it('returns null for virtual modules', async () => {
     const transform = handlerOf(plugin.transform);
     const result = await transform.call(

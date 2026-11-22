@@ -711,8 +711,11 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
         // bodies (base-class declarations included). Runs before the node_modules
         // skip below because Drizzle lives in node_modules. Remove once Rolldown
         // fixes the cyclic-`extends` tree-shaking bug.
+        //
+        // No `code` in the answer: the module keeps its code (Rollup, Rolldown
+        // and Vite's dev server alike), and none is handed back to the bundler.
         if (/[\\/]drizzle-orm[\\/]/.test(id)) {
-          return { code, map: null, moduleSideEffects: true };
+          return { moduleSideEffects: true };
         }
 
         // Skip virtual modules and node_modules

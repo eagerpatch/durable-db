@@ -5,9 +5,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 // A host CLI registers `db` (createDbCommand) for every command line it runs,
-// so the BUILT CLI entry loads what registering needs and nothing of drizzle-kit
-// (its API loads drizzle-orm's ~240 modules): that is required at the first
-// snapshot or migration.
+// so the BUILT CLI entry loads what registering needs: nothing of drizzle-kit
+// (its API loads drizzle-orm's ~240 modules), required at the first snapshot
+// or migration, and nothing of Babel (about 40 ms), required at the first parse.
 const dist = path.resolve(import.meta.dirname, '../../dist');
 
 /** The packages under node_modules that importing `entry` (then running `then`, given its module as `m`) loads. */
@@ -50,5 +50,34 @@ describe('the CLI entry', () => {
     const snapshot = path.join(dist, 'migrations', 'snapshot.js');
     expect(loadedPackages(snapshot)).not.toContain('drizzle-kit');
     expect(loadedPackages(snapshot, 'await m.generateSnapshotFromSchema({});')).toContain('drizzle-kit');
+  });
+});
+
+const BABEL = ['@babel/parser', '@babel/traverse', '@babel/generator', '@babel/types'];
+
+describe('Babel', () => {
+  const entry = path.join(dist, 'cli', 'index.js');
+
+  it('is not loaded by the CLI entry', () => {
+    if (!fs.existsSync(entry)) throw new Error('dist/ not found — run `pnpm build` first.');
+    const packages = loadedPackages(entry);
+    for (const name of BABEL) expect(packages).not.toContain(name);
+  });
+
+  it('is loaded at the first parse (the loader is no stub)', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'durable-db-startup-project-'));
+    try {
+      fs.mkdirSync(path.join(project, 'src', 'databases'), { recursive: true });
+      fs.writeFileSync(
+        path.join(project, 'src', 'databases', 'main.ts'),
+        "import { defineDatabase } from 'durable-db';\nimport { users } from './schema';\nexport const { action } = defineDatabase({ schema: { users } });\n"
+      );
+      const discover = `const found = m.discoverDatabases({ projectRoot: ${JSON.stringify(project)}, databasesDir: 'src/databases', migrationsDir: 'migrations' });
+if (found.length !== 1 || found[0].name !== 'main') throw new Error('discovered ' + JSON.stringify(found));`;
+      const packages = loadedPackages(entry, discover);
+      for (const name of BABEL) expect(packages).toContain(name);
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
   });
 });

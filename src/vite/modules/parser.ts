@@ -1,8 +1,6 @@
-import { parse } from '@babel/parser';
-import _traverse from '@babel/traverse';
-import _generate from '@babel/generator';
-import * as t from '@babel/types';
+import type * as T from '@babel/types';
 import type { NodePath } from '@babel/traverse';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import type { Alias } from 'vite';
 import type { DatabaseInfo, ActionInfo, ParsedDatabaseFile } from '../../db';
@@ -22,9 +20,34 @@ export interface ParseDatabaseFileOptions {
   namePrefix?: string;
 }
 
-// Handle both ESM and CJS module formats for Babel
-const traverse = typeof _traverse === 'function' ? _traverse : (_traverse as any).default;
-const generate = typeof _generate === 'function' ? _generate : (_generate as any).default;
+const require = createRequire(import.meta.url);
+
+type Traverse = typeof import('@babel/traverse').default;
+type Generate = typeof import('@babel/generator').default;
+
+let parse: typeof import('@babel/parser').parse;
+let traverse: Traverse;
+let generate: Generate;
+let t: typeof import('@babel/types');
+
+/**
+ * Babel (its parser, traverse, generator and types: about 40 ms to load) is
+ * required at the first parse, not with this module: the CLI's entry imports
+ * it (`declaresSchema`, the discovery `db` commands share), and a host CLI
+ * registers `db` for every command line it runs. Every function here that
+ * reads `t`, `parse`, `traverse` or `generate` is reached through one that
+ * calls this first.
+ */
+function loadBabel(): void {
+  if (t) return;
+  // A required ES module is its namespace: the function is its default export.
+  const traverseModule = require('@babel/traverse') as { default?: Traverse };
+  const generatorModule = require('@babel/generator') as { default?: Generate };
+  parse = (require('@babel/parser') as typeof import('@babel/parser')).parse;
+  traverse = traverseModule.default ?? (traverseModule as unknown as Traverse);
+  generate = generatorModule.default ?? (generatorModule as unknown as Generate);
+  t = require('@babel/types') as typeof import('@babel/types');
+}
 
 /**
  * Shared Babel parser plugins used across all parsing in the Vite plugin.
@@ -41,7 +64,8 @@ export const BABEL_PARSER_PLUGINS: any[] = [
 /**
  * Parse a TypeScript/JavaScript file into an AST
  */
-export function parseCode(code: string): t.File {
+export function parseCode(code: string): T.File {
+  loadBabel();
   return parse(code, {
     sourceType: 'module',
     plugins: BABEL_PARSER_PLUGINS,
@@ -51,7 +75,8 @@ export function parseCode(code: string): t.File {
 /**
  * Generate source code from an AST node
  */
-export function generateCode(node: t.Node): string {
+export function generateCode(node: T.Node): string {
+  loadBabel();
   return generate(node).code;
 }
 
@@ -69,6 +94,7 @@ export function findActionCallsInSource(
   context?: { filePath?: string; actionName?: string }
 ): string[] {
   const calls: string[] = [];
+  loadBabel();
 
   try {
     // Wrap the source so it's valid JS
@@ -78,7 +104,7 @@ export function findActionCallsInSource(
     });
 
     traverse(ast, {
-      CallExpression(nodePath: NodePath<t.CallExpression>) {
+      CallExpression(nodePath: NodePath<T.CallExpression>) {
         // Look for direct calls: someAction({ ... }) or await someAction({ ... })
         if (t.isIdentifier(nodePath.node.callee)) {
           const name = nodePath.node.callee.name;
@@ -128,7 +154,7 @@ export function parseDatabaseFile(
 
   traverse(ast, {
     // Track imports for dependency resolution
-    ImportDeclaration(nodePath: NodePath<t.ImportDeclaration>) {
+    ImportDeclaration(nodePath: NodePath<T.ImportDeclaration>) {
       const source = nodePath.node.source.value;
 
       for (const specifier of nodePath.node.specifiers) {
@@ -166,7 +192,7 @@ export function parseDatabaseFile(
 
     // Find: const { action } = defineDatabase({ ... })
     // Or: export const myAction = action({ ... })
-    VariableDeclarator(nodePath: NodePath<t.VariableDeclarator>) {
+    VariableDeclarator(nodePath: NodePath<T.VariableDeclarator>) {
       const init = nodePath.node.init;
       const id = nodePath.node.id;
 
@@ -200,7 +226,7 @@ export function parseDatabaseFile(
 /**
  * Check if a node is a defineDatabase() call
  */
-function isDefineDatabaseCall(node: t.Node | null | undefined): node is t.CallExpression {
+function isDefineDatabaseCall(node: T.Node | null | undefined): node is T.CallExpression {
   return (
     t.isCallExpression(node) &&
     t.isIdentifier(node.callee) &&
@@ -211,7 +237,7 @@ function isDefineDatabaseCall(node: t.Node | null | undefined): node is t.CallEx
 /**
  * Check if a node is an action() call with the given factory name
  */
-function isActionCall(node: t.Node | null | undefined, actionFnName: string): node is t.CallExpression {
+function isActionCall(node: T.Node | null | undefined, actionFnName: string): node is T.CallExpression {
   return (
     t.isCallExpression(node) &&
     t.isIdentifier(node.callee) &&
@@ -224,7 +250,7 @@ function isActionCall(node: t.Node | null | undefined, actionFnName: string): no
  * const { action } = defineDatabase(...)
  *        ^^^^^^^
  */
-function extractActionFactoryName(pattern: t.ObjectPattern): string | null {
+function extractActionFactoryName(pattern: T.ObjectPattern): string | null {
   for (const prop of pattern.properties) {
     // Skip rest elements
     if (t.isRestElement(prop)) {
@@ -271,7 +297,7 @@ interface DeclaredSchema {
 }
 
 /** `x as const`, `x satisfies T`, `x!`: the expression itself. */
-function unwrapExpression(node: t.Node): t.Node {
+function unwrapExpression(node: T.Node): T.Node {
   let current = node;
   while (t.isTSAsExpression(current) || t.isTSSatisfiesExpression(current) || t.isTSNonNullExpression(current)) {
     current = current.expression;
@@ -281,7 +307,7 @@ function unwrapExpression(node: t.Node): t.Node {
 
 /** `{ users, posts }`: the tables by name, and the module they are imported from. */
 function listedTables(
-  object: t.ObjectExpression,
+  object: T.ObjectExpression,
   imports: Map<string, { source: string; imported: string }>
 ): DeclaredSchema {
   const declared: DeclaredSchema = { schemaImport: null, schemaExport: null, schemaTableNames: [] };
@@ -313,8 +339,8 @@ function listedTables(
  * the export to import (`schemaExport`), and whoever needs the tables loads it.
  */
 function extractSchema(
-  declaratorPath: NodePath<t.VariableDeclarator>,
-  value: t.Node,
+  declaratorPath: NodePath<T.VariableDeclarator>,
+  value: T.Node,
   filePath: string,
   imports: Map<string, { source: string; imported: string }>
 ): DeclaredSchema | null {
@@ -350,8 +376,8 @@ function extractSchema(
  * Extract database configuration from a defineDatabase() call
  */
 function extractDatabaseInfo(
-  declaratorPath: NodePath<t.VariableDeclarator>,
-  callExpr: t.CallExpression,
+  declaratorPath: NodePath<T.VariableDeclarator>,
+  callExpr: T.CallExpression,
   filePath: string,
   imports: Map<string, { source: string; imported: string }>,
   namePrefix?: string
@@ -431,8 +457,8 @@ function extractDatabaseInfo(
  * Extract action information from an action() call
  */
 function extractActionInfo(
-  declaratorPath: NodePath<t.VariableDeclarator>,
-  callExpr: t.CallExpression,
+  declaratorPath: NodePath<T.VariableDeclarator>,
+  callExpr: T.CallExpression,
   databaseName: string,
   filePath: string
 ): ActionInfo | null {

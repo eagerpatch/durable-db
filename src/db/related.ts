@@ -41,7 +41,7 @@ import {
   type SqlBool,
   type UnknownRow,
 } from 'kysely';
-import { getTableColumns } from 'drizzle-orm';
+import { getTableColumns } from 'drizzle-orm/utils';
 import { dateSerializers, parseJsonValue } from './plugins';
 import { relationOf, type AnySchema, type Relation, type Relations } from './relations';
 import type { DrizzleToKysely } from './types';

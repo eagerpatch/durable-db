@@ -43,11 +43,13 @@ describe('durable-db/type: inferred types', () => {
     }
   });
 
-  it('refuses a definition ArkType refuses, at compile time', () => {
+  it('refuses a definition ArkType refuses, at compile time (and at its first use)', () => {
     // @ts-expect-error — not a keyword
-    expect(() => type({ name: 'strng' })).toThrow("'strng' is unresolvable");
+    const misspelt = type({ name: 'strng' });
+    expect(() => misspelt({ name: 'x' })).toThrow("'strng' is unresolvable");
     // @ts-expect-error — a bound needs a number on its other side
-    expect(() => type('string > x')).toThrow();
+    const unbounded = type('string > x');
+    expect(() => unbounded.expression).toThrow();
   });
 
   it('is a Standard Schema, typed', () => {

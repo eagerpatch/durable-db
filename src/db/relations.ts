@@ -12,8 +12,9 @@
 // - inverse (many): the schema key of the table that holds the foreign key
 //   (`invoices`); when that table points at the same target more than once,
 //   `<key>As<Forward>` each (`invoicesAsCustomer`, `invoicesAsReferee`).
-import { getTableColumns } from 'drizzle-orm';
-import { getTableConfig, type SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
+import { getTableColumns } from 'drizzle-orm/utils';
+import { getTableConfig } from 'drizzle-orm/sqlite-core/utils';
+import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnySchema = Record<string, SQLiteTableWithColumns<any>>;

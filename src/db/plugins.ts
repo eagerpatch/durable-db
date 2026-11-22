@@ -26,8 +26,14 @@ import {
   type UnknownRow
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
-import { getTableConfig, SQLiteSyncDialect } from 'drizzle-orm/sqlite-core';
-import { getTableColumns, getTableName, is, isSQLWrapper, Table } from 'drizzle-orm';
+// Each from the module that defines it (see ../schema.ts): the indexes of
+// 'drizzle-orm' and 'drizzle-orm/sqlite-core' load the rest of Drizzle.
+import { getTableConfig } from 'drizzle-orm/sqlite-core/utils';
+import { SQLiteSyncDialect } from 'drizzle-orm/sqlite-core/dialect';
+import { getTableColumns } from 'drizzle-orm/utils';
+import { getTableName, Table } from 'drizzle-orm/table';
+import { is } from 'drizzle-orm/entity';
+import { isSQLWrapper } from 'drizzle-orm/sql/sql';
 import { toCamelCase, toSnakeCase } from 'drizzle-orm/casing';
 
 /**

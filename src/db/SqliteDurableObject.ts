@@ -23,7 +23,7 @@ import {
 import { DurableObject } from 'cloudflare:workers';
 import { Kysely } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
-import { debugMigrations } from '../utils/debug';
+import { debugMigrations, setDebugSpec } from '../utils/debug';
 import {
   createKyselyFromSql,
   type CreateKyselyOptions,
@@ -331,6 +331,10 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    // The migration debugger reads DEBUG from the object's env, not from
+    // `process.env`: in workerd the first read of `process` builds Node's
+    // whole process object (about 8 ms of CPU at the first migration run).
+    setDebugSpec((env as { DEBUG?: unknown } | undefined)?.DEBUG);
   }
 
   /**

@@ -93,15 +93,44 @@ const VIRTUAL_DATABASES_MODULE_ID = '\0virtual:durable-db/__databases.js';
 /** Old org-prefixed spelling, still resolved for compatibility. */
 const LEGACY_ID_PREFIX = 'eagerpatch/';
 
+/** A virtual id in every accepted spelling (`virtual:` optional, legacy prefix). */
+function virtualIdSpellings(canonicalId: string): string[] {
+  return [
+    canonicalId,
+    `virtual:${canonicalId}`,
+    `${LEGACY_ID_PREFIX}${canonicalId}`,
+    `virtual:${LEGACY_ID_PREFIX}${canonicalId}`,
+  ];
+}
+
 /** Match a virtual id in all accepted spellings (`virtual:` optional, legacy prefix). */
 function matchesVirtualId(id: string, canonicalId: string): boolean {
-  return (
-    id === canonicalId ||
-    id === `virtual:${canonicalId}` ||
-    id === `${LEGACY_ID_PREFIX}${canonicalId}` ||
-    id === `virtual:${LEGACY_ID_PREFIX}${canonicalId}`
-  );
+  return virtualIdSpellings(canonicalId).includes(id);
 }
+
+/** `text` as a RegExp source: its NUL written `\x00` (a raw one in a hook filter's pattern does not reach Rolldown). */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&').replace(/\0/g, '\\x00');
+}
+
+/** Exactly one of `ids`. */
+function exactIds(ids: string[]): RegExp {
+  return new RegExp(`^(?:${ids.map(escapeRegExp).join('|')})$`);
+}
+
+/**
+ * The hooks' filters (Rolldown — Vite 8 —, Rollup ≥ 4.38, Vite's dev server
+ * ≥ 6.3): the bundler calls a hook only for the ids it may act on, instead of
+ * for every module — a call from the bundler into JS per module per hook, and
+ * for `load`/`transform` a promise. Each is a superset the handler still
+ * checks, never derived from state, and a Vite or Rollup of the peer range
+ * that has no filters (Vite 5.4 on Rollup 4.27) ignores `filter` and calls the
+ * handler for everything, as before.
+ */
+const RESOLVE_ID_FILTER = exactIds([DURABLE_OBJECTS_ID, DEV_EPOCH_ID, DATABASES_ID].flatMap(virtualIdSpellings));
+const LOAD_FILTER = exactIds([VIRTUAL_DO_MODULE_ID, VIRTUAL_DEV_EPOCH_MODULE_ID, VIRTUAL_DATABASES_MODULE_ID]);
+/** Drizzle's modules (tagged side-effectful) and TypeScript (where a database or an action can be). No exclude: Drizzle lives in node_modules. */
+const TRANSFORM_FILTER = [/[\\/]drizzle-orm[\\/]/, /\.tsx?$/];
 
 /**
  * Generate the __devEpoch virtual module. Action stubs route every DO
@@ -586,175 +615,187 @@ export function durableDb(options: DurableDbOptions = {}): Plugin {
       state.reset();
     },
 
-    resolveId(id) {
-      if (matchesVirtualId(id, DURABLE_OBJECTS_ID)) {
-        return VIRTUAL_DO_MODULE_ID;
-      }
-      if (matchesVirtualId(id, DEV_EPOCH_ID)) {
-        return VIRTUAL_DEV_EPOCH_MODULE_ID;
-      }
-      if (matchesVirtualId(id, DATABASES_ID)) {
-        return VIRTUAL_DATABASES_MODULE_ID;
-      }
-      return null;
-    },
-
-    async load(id) {
-      if (id === VIRTUAL_DEV_EPOCH_MODULE_ID) {
-        // Read fresh on every load — the module is invalidated when the
-        // state file changes, so this always reflects the current epoch.
-        const isDev = state.config.command === 'serve';
-        let epoch: string | null = null;
-        let databaseEpochs: Record<string, string> = {};
-        if (isDev) {
-          // Persist a newly minted epoch immediately: loadDevState mints
-          // one when no state file exists, and an unsaved epoch would
-          // differ on every reload, silently orphaning dev databases.
-          // Only write when missing — an unconditional write would
-          // retrigger the cache watcher and loop forever.
-          const devState = loadDevState(state.projectRoot);
-          if (!fs.existsSync(getDevPaths(state.projectRoot).stateFile)) {
-            state.markSelfDevStateWrite();
-            saveDevState(state.projectRoot, devState);
-          }
-          epoch = devState.epoch;
-          databaseEpochs = getDatabaseEpochs(devState);
+    resolveId: {
+      filter: { id: RESOLVE_ID_FILTER },
+      handler(id) {
+        if (matchesVirtualId(id, DURABLE_OBJECTS_ID)) {
+          return VIRTUAL_DO_MODULE_ID;
         }
-        return { code: generateDevEpochModule(epoch, databaseEpochs) };
-      }
-
-      if (id === VIRTUAL_DATABASES_MODULE_ID) {
-        await state.initialize();
-        return { code: generateDatabasesModule(Array.from(state.databases.values())) };
-      }
-
-      if (id !== VIRTUAL_DO_MODULE_ID) return null;
-
-      await state.initialize();
-
-      const isDev = state.config.command === 'serve';
-      // Action files are side-effect-imported by the generated DO module so every
-      // action registers in the DO's isolate at startup (see discoverActionFiles).
-      const actionFiles = discoverActionFiles({
-        projectRoot: state.projectRoot,
-        databasesDir: state.options.databasesDir,
-      });
-      const databases = Array.from(state.databases.values());
-      const code = generateDurableObjectsModule(
-        databases,
-        state.options.registryImport,
-        isDev,
-        actionFiles,
-        // Classes of removed databases the wrangler migrations still declare
-        // (read after the `config` hook reconciled the file).
-        tombstoneClasses(state.projectRoot, databases),
-        resolveOutbox(state.options.outbox, state.projectRoot)
-      );
-
-      return { code };
+        if (matchesVirtualId(id, DEV_EPOCH_ID)) {
+          return VIRTUAL_DEV_EPOCH_MODULE_ID;
+        }
+        if (matchesVirtualId(id, DATABASES_ID)) {
+          return VIRTUAL_DATABASES_MODULE_ID;
+        }
+        return null;
+      },
     },
 
-    async transform(code, id) {
-      // Workaround for a Rolldown (Vite 8) tree-shaking correctness bug that
-      // drops Drizzle base classes from the production worker bundle.
-      // `drizzle-orm` ships `"sideEffects": false`, so Rolldown treats every
-      // Drizzle module as pure and free to delete when its exports look unused.
-      // Drizzle's classes form deep circular graphs that Rolldown wraps in lazy
-      // `__esm(() => { … })` init closures; when a base class is referenced ONLY
-      // via `class Sub extends Base` from inside another lazy-wrapped module,
-      // Rolldown fails to count that `extends` as a use of `Base` — it then
-      // empties `Base`'s init closure AND removes the hoisted `var Base`, leaving
-      // the surviving `extends Base` reference dangling:
-      //   Uncaught ReferenceError: TypedQueryBuilder is not defined
-      // (binding absent, not TDZ-undefined). Production build only; dev is fine.
-      // `build.rollupOptions.treeshake.moduleSideEffects` can't fix it (a
-      // package's own `sideEffects` field outranks it), but a plugin hook's
-      // `moduleSideEffects` return value DOES outrank package.json — so tagging
-      // Drizzle's modules side-effectful here forces Rolldown to keep their
-      // bodies (base-class declarations included). Runs before the node_modules
-      // skip below because Drizzle lives in node_modules. Remove once Rolldown
-      // fixes the cyclic-`extends` tree-shaking bug.
-      if (/[\\/]drizzle-orm[\\/]/.test(id)) {
-        return { code, map: null, moduleSideEffects: true };
-      }
+    load: {
+      filter: { id: LOAD_FILTER },
+      async handler(id) {
+        if (id === VIRTUAL_DEV_EPOCH_MODULE_ID) {
+          // Read fresh on every load — the module is invalidated when the
+          // state file changes, so this always reflects the current epoch.
+          const isDev = state.config.command === 'serve';
+          let epoch: string | null = null;
+          let databaseEpochs: Record<string, string> = {};
+          if (isDev) {
+            // Persist a newly minted epoch immediately: loadDevState mints
+            // one when no state file exists, and an unsaved epoch would
+            // differ on every reload, silently orphaning dev databases.
+            // Only write when missing — an unconditional write would
+            // retrigger the cache watcher and loop forever.
+            const devState = loadDevState(state.projectRoot);
+            if (!fs.existsSync(getDevPaths(state.projectRoot).stateFile)) {
+              state.markSelfDevStateWrite();
+              saveDevState(state.projectRoot, devState);
+            }
+            epoch = devState.epoch;
+            databaseEpochs = getDatabaseEpochs(devState);
+          }
+          return { code: generateDevEpochModule(epoch, databaseEpochs) };
+        }
 
-      // Skip virtual modules and node_modules
-      if (id.startsWith('\0') || id.includes('node_modules')) return null;
+        if (id === VIRTUAL_DATABASES_MODULE_ID) {
+          await state.initialize();
+          return { code: generateDatabasesModule(Array.from(state.databases.values())) };
+        }
 
-      // Only process TypeScript files
-      if (!/\.tsx?$/.test(id)) return null;
+        if (id !== VIRTUAL_DO_MODULE_ID) return null;
 
-      // Only files that can define a database or actions are parsed.
-      if (!mayDefineDatabaseCode(code)) return null;
+        await state.initialize();
 
-      await state.initialize();
+        const isDev = state.config.command === 'serve';
+        // Action files are side-effect-imported by the generated DO module so every
+        // action registers in the DO's isolate at startup (see discoverActionFiles).
+        const actionFiles = discoverActionFiles({
+          projectRoot: state.projectRoot,
+          databasesDir: state.options.databasesDir,
+        });
+        const databases = Array.from(state.databases.values());
+        const code = generateDurableObjectsModule(
+          databases,
+          state.options.registryImport,
+          isDev,
+          actionFiles,
+          // Classes of removed databases the wrangler migrations still declare
+          // (read after the `config` hook reconciled the file).
+          tombstoneClasses(state.projectRoot, databases),
+          resolveOutbox(state.options.outbox, state.projectRoot)
+        );
 
-      const cleanId = path.normalize(id.split('?', 1)[0]);
+        return { code };
+      },
+    },
 
-      // Database definition files: rewrite same-file action() definitions
-      // into RPC stubs and replace destroyDatabase (when destructured)
-      const dbNameForPath = state.getDatabaseNameForPath(cleanId);
-      if (dbNameForPath) {
-        const database = state.databases.get(dbNameForPath);
-        if (!database) return null;
+    transform: {
+      filter: { id: { include: TRANSFORM_FILTER } },
+      async handler(code, id) {
+        // Workaround for a Rolldown (Vite 8) tree-shaking correctness bug that
+        // drops Drizzle base classes from the production worker bundle.
+        // `drizzle-orm` ships `"sideEffects": false`, so Rolldown treats every
+        // Drizzle module as pure and free to delete when its exports look unused.
+        // Drizzle's classes form deep circular graphs that Rolldown wraps in lazy
+        // `__esm(() => { … })` init closures; when a base class is referenced ONLY
+        // via `class Sub extends Base` from inside another lazy-wrapped module,
+        // Rolldown fails to count that `extends` as a use of `Base` — it then
+        // empties `Base`'s init closure AND removes the hoisted `var Base`, leaving
+        // the surviving `extends Base` reference dangling:
+        //   Uncaught ReferenceError: TypedQueryBuilder is not defined
+        // (binding absent, not TDZ-undefined). Production build only; dev is fine.
+        // `build.rollupOptions.treeshake.moduleSideEffects` can't fix it (a
+        // package's own `sideEffects` field outranks it), but a plugin hook's
+        // `moduleSideEffects` return value DOES outrank package.json — so tagging
+        // Drizzle's modules side-effectful here forces Rolldown to keep their
+        // bodies (base-class declarations included). Runs before the node_modules
+        // skip below because Drizzle lives in node_modules. Remove once Rolldown
+        // fixes the cyclic-`extends` tree-shaking bug.
+        //
+        // No `code` in the answer: the module keeps its code (Rollup, Rolldown
+        // and Vite's dev server alike), and none is handed back to the bundler.
+        if (/[\\/]drizzle-orm[\\/]/.test(id)) {
+          return { moduleSideEffects: true };
+        }
+
+        // Skip virtual modules and node_modules
+        if (id.startsWith('\0') || id.includes('node_modules')) return null;
+
+        // Only process TypeScript files
+        if (!/\.tsx?$/.test(id)) return null;
+
+        // Only files that can define a database or actions are parsed.
+        if (!mayDefineDatabaseCode(code)) return null;
+
+        await state.initialize();
+
+        const cleanId = path.normalize(id.split('?', 1)[0]);
+
+        // Database definition files: rewrite same-file action() definitions
+        // into RPC stubs and replace destroyDatabase (when destructured)
+        const dbNameForPath = state.getDatabaseNameForPath(cleanId);
+        if (dbNameForPath) {
+          const database = state.databases.get(dbNameForPath);
+          if (!database) return null;
+
+          const parsed = parseDatabaseFile(cleanId, code, { aliases: state.aliases });
+
+          for (const action of parsed.actions) {
+            state.registerAction(action, dbNameForPath, cleanId);
+          }
+
+          const result = transformDatabaseFile({
+            code,
+            sourceFileName: cleanId,
+            database,
+            actionsInFile: parsed.actions,
+            contextImport: state.options.contextImport,
+            registryImport: state.options.registryImport,
+          });
+
+          if (result && parsed.actions.length > 0 && state.config.command === 'serve') {
+            state.invalidateDOModule();
+          }
+
+          // Babel's GeneratorResult carries more than Vite's TransformResult takes.
+          return result ? { code: result.code, map: result.map as TransformResult['map'] } : null;
+        }
 
         const parsed = parseDatabaseFile(cleanId, code, { aliases: state.aliases });
+        if (parsed.actions.length === 0) return null;
 
+        const importedDbName = await findImportedDatabase(
+          this.resolve.bind(this),
+          state,
+          parsed.localImports,
+          cleanId
+        );
+        if (!importedDbName) return null;
+
+        const database = state.databases.get(importedDbName);
+        if (!database) return null;
+
+        // Track discovered actions
         for (const action of parsed.actions) {
-          state.registerAction(action, dbNameForPath, cleanId);
+          state.registerAction(action, importedDbName, cleanId);
         }
 
-        const result = transformDatabaseFile({
+        const result = transformActionFile({
           code,
           sourceFileName: cleanId,
+          dbName: importedDbName,
           database,
           actionsInFile: parsed.actions,
           contextImport: state.options.contextImport,
           registryImport: state.options.registryImport,
         });
 
-        if (result && parsed.actions.length > 0 && state.config.command === 'serve') {
+        if (result && state.config.command === 'serve') {
           state.invalidateDOModule();
         }
 
-        // Babel's GeneratorResult carries more than Vite's TransformResult takes.
         return result ? { code: result.code, map: result.map as TransformResult['map'] } : null;
-      }
-
-      const parsed = parseDatabaseFile(cleanId, code, { aliases: state.aliases });
-      if (parsed.actions.length === 0) return null;
-
-      const importedDbName = await findImportedDatabase(
-        this.resolve.bind(this),
-        state,
-        parsed.localImports,
-        cleanId
-      );
-      if (!importedDbName) return null;
-
-      const database = state.databases.get(importedDbName);
-      if (!database) return null;
-
-      // Track discovered actions
-      for (const action of parsed.actions) {
-        state.registerAction(action, importedDbName, cleanId);
-      }
-
-      const result = transformActionFile({
-        code,
-        sourceFileName: cleanId,
-        dbName: importedDbName,
-        database,
-        actionsInFile: parsed.actions,
-        contextImport: state.options.contextImport,
-        registryImport: state.options.registryImport,
-      });
-
-      if (result && state.config.command === 'serve') {
-        state.invalidateDOModule();
-      }
-
-      return result ? { code: result.code, map: result.map as TransformResult['map'] } : null;
+      },
     },
 
     buildEnd() {

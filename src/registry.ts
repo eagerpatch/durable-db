@@ -25,7 +25,7 @@ export { actionArgsType as type };
 export interface ActionDefinition {
   validator: (args: unknown) => unknown;
   handler: (db: unknown, args: unknown, ctx: unknown) => Promise<unknown>;
-  /** The compiled args schema (a `type()`), for `describeAction()`. */
+  /** The compiled args schema (a `type()`), for `describeAction()`; a getter, read only when asked. */
   args?: unknown;
   /** The call site the build compiled this action to: `describeAction()` reads the description from it. */
   stub?: object;
@@ -107,12 +107,17 @@ export function registerAction(dbName: string, actionName: string, def: ActionDe
   dbMap.set(actionName, def);
   // What the action is, on its call site (see ./db/describeAction): inert
   // unless a library asks, non-enumerable like the untransformed action's meta.
+  // `args` is read when asked: the transform compiles the schema at its
+  // first use (a getter on `def`), and registering is no use.
   if (def.stub) {
-    Object.defineProperty(def.stub, ACTION_INFO, {
-      value: { database: dbName, name: actionName, args: def.args } satisfies ActionInfo,
-      enumerable: false,
-      configurable: true,
-    });
+    const info: ActionInfo = {
+      database: dbName,
+      name: actionName,
+      get args() {
+        return def.args;
+      },
+    };
+    Object.defineProperty(def.stub, ACTION_INFO, { value: info, enumerable: false, configurable: true });
   }
 }
 
@@ -272,8 +277,9 @@ interface PendingCall {
 const argsSchemas = new Map<string, unknown>();
 
 /**
- * The args schema of an action, compiled on its first call in this isolate
- * and kept — the compiled call site used to build it on every call.
+ * What `make()` answers for `key`, made at the first call in this isolate and
+ * kept. (The action transform no longer calls it: each action file keeps its
+ * one compiled args schema itself, so an edit in dev compiles the new one.)
  */
 export function cachedArgsSchema<T>(key: string, make: () => T): T {
   let schema = argsSchemas.get(key) as T | undefined;

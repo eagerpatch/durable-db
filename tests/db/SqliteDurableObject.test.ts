@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { loadSqlite } from '../../src/testing';
 
 /**
@@ -1263,5 +1263,65 @@ describe('repeated `db push` in dev', () => {
     }).then(() => null, (e: Error) => e);
 
     expect(err).toBeInstanceOf(MigrationSchemaConflictError);
+  });
+});
+
+// The migration debugger reads DEBUG from the object's env (its vars and
+// secrets), never `process.env`: in workerd the first read of `process` builds
+// Node's whole process object, about 8 ms of CPU at the object's first
+// migration run. Each debugger keeps what it first read, so each test loads
+// the module afresh.
+describe('DEBUG', () => {
+  const saved = process.env.DEBUG;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.DEBUG;
+    else process.env.DEBUG = saved;
+    vi.restoreAllMocks();
+  });
+
+  async function migrate(env: Record<string, unknown>): Promise<string[]> {
+    vi.resetModules();
+    const { SqliteDurableObject: Fresh } = await import('../../src/db/SqliteDurableObject');
+    class Probe extends Fresh {
+      migrations: Migrations = {
+        '20240101_initial': { chunks: [['CREATE TABLE users (id TEXT PRIMARY KEY)']] },
+      };
+    }
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { state } = createMockDurableObjectState({ pitrAvailable: false });
+    await new Probe(state as any, env).fetch(new Request('http://test/'));
+    return logged.mock.calls.map((call) => String(call[0]));
+  }
+
+  it('is read from the env', async () => {
+    delete process.env.DEBUG;
+    expect(await migrate({ DEBUG: 'database:migrations' }))
+      .toContainEqual(expect.stringContaining('database:migrations Migration chunk applied: 20240101_initial[0]'));
+  });
+
+  it('is not read from process.env', async () => {
+    process.env.DEBUG = 'database:*';
+    const env = Object.getOwnPropertyDescriptor(process, 'env')!;
+    let reads = 0;
+    Object.defineProperty(process, 'env', {
+      configurable: true,
+      get: () => {
+        reads++;
+        return env.value;
+      },
+    });
+    let logged: string[];
+    try {
+      logged = await migrate({});
+    } finally {
+      Object.defineProperty(process, 'env', env);
+    }
+    expect(logged.filter((line) => line.startsWith('database:'))).toEqual([]);
+    expect(reads).toBe(0);
+  });
+
+  it('is no DEBUG when it is not a string', async () => {
+    delete process.env.DEBUG;
+    expect((await migrate({ DEBUG: ['database:migrations'] })).filter((line) => line.startsWith('database:'))).toEqual([]);
   });
 });

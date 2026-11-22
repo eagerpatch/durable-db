@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createDebug } from '../../src/utils/debug';
 
 // The debug module is in the worker's and the Durable Object's bundle. In
@@ -48,5 +48,26 @@ describe('createDebug', () => {
     expect(quiet.enabled).toBe(false);
     expect(loud.enabled).toBe(true);
     expect(loud.extend('sub').namespace).toBe('database:other:sub');
+  });
+});
+
+// A Durable Object hands its env's DEBUG over (SqliteDurableObject's
+// constructor), so no debugger in its isolate reads `process`.
+describe('setDebugSpec', () => {
+  const saved = process.env.DEBUG;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.DEBUG;
+    else process.env.DEBUG = saved;
+  });
+
+  it('is read instead of process.env by every debugger asked after it', async () => {
+    vi.resetModules();
+    const { createDebug, setDebugSpec } = await import('../../src/utils/debug');
+    process.env.DEBUG = 'database:*';
+    setDebugSpec('database:probe');
+    expect(createDebug('database:probe').enabled).toBe(true);
+    expect(createDebug('database:other').enabled).toBe(false);
+    setDebugSpec(undefined);
+    expect(createDebug('database:probe').enabled).toBe(false);
   });
 });

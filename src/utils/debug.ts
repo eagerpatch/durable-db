@@ -19,7 +19,24 @@ type Debugger = ((formatter?: unknown, ...args: unknown[]) => void) & {
   extend: (subNamespace: string, delimiter?: string) => Debugger;
 };
 
+// DEBUG as code with an env of its own handed it over (setDebugSpec): a
+// Durable Object's. Undefined until then, and `process.env.DEBUG` is read.
+let providedSpec: string | undefined;
+
+/**
+ * DEBUG as the runtime gave it to the caller — a Durable Object's `env.DEBUG`
+ * (its vars and secrets) — read by every debugger instead of
+ * `process.env.DEBUG`: in workerd the first read of `process` builds Node's
+ * whole process object, its streams with it (about 8 ms of CPU, at an
+ * object's first migration run). Anything but a string is no DEBUG. Set it
+ * before a debugger is first asked: each keeps what it read.
+ */
+export function setDebugSpec(spec: unknown): void {
+  providedSpec = typeof spec === 'string' ? spec : '';
+}
+
 function readDebugEnv(): string {
+  if (providedSpec !== undefined) return providedSpec;
   if (typeof process !== 'undefined' && process.env && process.env.DEBUG) {
     return process.env.DEBUG;
   }

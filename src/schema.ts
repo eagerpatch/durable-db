@@ -6,7 +6,12 @@
 // Column names without explicit strings are also auto-snake_cased by
 // drizzle-kit's casing option during migration generation.
 import type { ColumnBuilderBaseConfig, ColumnBuilderExtraConfig, ColumnDataType } from 'drizzle-orm';
-import { sqliteTable } from 'drizzle-orm/sqlite-core';
+// Each from the module that defines it, not from 'drizzle-orm/sqlite-core':
+// that index loads about 100 of drizzle-orm's modules (pg-core's vector
+// column among them), about 150 ms in Node at every schema load, and keeps
+// them in a worker's bundle, where durable-db's plugin marks Drizzle's
+// modules side-effectful. drizzle-orm exports every file (`./sqlite-core/table`).
+import { sqliteTable } from 'drizzle-orm/sqlite-core/table';
 import type { AnySQLiteColumn, UpdateDeleteAction } from 'drizzle-orm/sqlite-core';
 import { toSnakeCase } from 'drizzle-orm/casing';
 
@@ -40,16 +45,13 @@ export const table: typeof sqliteTable = ((
   extraConfig?: any,
 ) => sqliteTable(toSnakeCase(name), columns, extraConfig)) as any;
 
-export {
-  text,
-  integer,
-  real,
-  blob,
-  numeric,
-  index,
-  uniqueIndex,
-  foreignKey,
-  primaryKey,
-} from 'drizzle-orm/sqlite-core';
+export { text } from 'drizzle-orm/sqlite-core/columns/text';
+export { integer } from 'drizzle-orm/sqlite-core/columns/integer';
+export { real } from 'drizzle-orm/sqlite-core/columns/real';
+export { blob } from 'drizzle-orm/sqlite-core/columns/blob';
+export { numeric } from 'drizzle-orm/sqlite-core/columns/numeric';
+export { index, uniqueIndex } from 'drizzle-orm/sqlite-core/indexes';
+export { foreignKey } from 'drizzle-orm/sqlite-core/foreign-keys';
+export { primaryKey } from 'drizzle-orm/sqlite-core/primary-keys';
 
 export type { AnySQLiteColumn } from 'drizzle-orm/sqlite-core';

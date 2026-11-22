@@ -125,6 +125,8 @@ Actions are defined with `action({ args, handler })`. The `args` object uses Ark
 
 ### Schema Definition
 
+Drizzle's values are imported from the modules that define them (`drizzle-orm/sqlite-core/table`, `…/columns/text`, `drizzle-orm/utils`, `drizzle-orm/entity`, …; drizzle-orm exports every file), never from the indexes of `drizzle-orm` and `drizzle-orm/sqlite-core`, which load the rest of Drizzle (about 100 modules, pg-core's columns among them): `durable-db/schema` loads 31 of drizzle-orm's modules, the root 84 (the SQLite dialect brings the SQL builders), `tests/schema.test.ts` holds it. Types may come from the indexes.
+
 Schemas are defined using `table()` from `durable-db/schema` (not `sqliteTable` from drizzle-orm directly). The `table()` wrapper auto-converts table names to snake_case. Column names are omitted — they are derived from the JS property key and auto-snake_cased by the migration system (`casing: 'snake_case'`).
 
 ```ts

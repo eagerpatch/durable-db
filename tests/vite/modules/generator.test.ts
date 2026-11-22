@@ -399,7 +399,67 @@ export const createUser = action({
       actionsInFile: [createUserAction],
     });
 
-    expect(result!.code).toMatch(/registerAction\("main", "createUser", \{[^}]*args: __validator_createUser,\s*stub: createUser\s*\}\)/);
+    expect(result!.code).toMatch(
+      /registerAction\("main", "createUser", \{\s*validator: args => __validator_createUser\(\)\(args\),\s*handler: __handler_createUser,\s*get args\(\) \{\s*return __validator_createUser\(\);\s*\},\s*stub: createUser\s*\}\)/
+    );
+  });
+
+  // Every isolate evaluates every action file as it starts (a Durable Object
+  // imports them all): the args schema is compiled at its first use, once —
+  // for the call site, the object's validator and describeAction() alike —
+  // and kept by the module, so a file dev evaluates again compiles anew.
+  describe('the args schema', () => {
+    function evaluate(code: string) {
+      const compiled: unknown[] = [];
+      const registered: Array<{ validator(args: unknown): unknown; args: unknown }> = [];
+      const fakeType = (definition: unknown) => {
+        compiled.push(definition);
+        return Object.assign((args: unknown) => args, { assert: (args: unknown) => args });
+      };
+      const body = code.replace(/^import [^;]*;$/gm, '').replace(/^export /gm, '') + '\nreturn { createUser };';
+      const module = new Function('registerAction', 'getDoContext', 'callAction', '__ddType', '__ddRpc', 'applyDevEpoch', 'getTenantId', 'env', body)(
+        (_db: string, _name: string, definition: (typeof registered)[number]) => registered.push(definition),
+        () => undefined,
+        async () => undefined,
+        fakeType,
+        async (_binding: unknown, _key: string, _action: string, args: unknown) => args,
+        (key: string) => key,
+        () => 'tenant',
+        { MAIN_DATABASE_DO: {} },
+      ) as { createUser(args: unknown): Promise<unknown> };
+      return { module, compiled, registered };
+    }
+
+    const code = () =>
+      transformActionFile({
+        ...defaultOptions,
+        code: `export const createUser = action({ args: { name: 'string' }, handler: async () => {} });`,
+        actionsInFile: [{ ...createUserAction, argsSchemaSource: `{ name: 'string' }` }],
+      })!.code;
+
+    it('is not compiled when the module is evaluated', () => {
+      const { compiled, registered } = evaluate(code());
+      expect(registered).toHaveLength(1);
+      expect(compiled).toEqual([]);
+    });
+
+    it('is compiled once, for the call site, the validator and describeAction()', async () => {
+      const { module, compiled, registered } = evaluate(code());
+      expect(await module.createUser({ name: 'Ada' })).toEqual({ name: 'Ada' });
+      await module.createUser({ name: 'Grace' });
+      registered[0]!.validator({ name: 'Edsger' });
+      expect(registered[0]!.args).toBe(registered[0]!.args);
+      expect(compiled).toEqual([{ name: 'string' }]);
+    });
+
+    it('is compiled anew by a module evaluated again', () => {
+      const first = evaluate(code());
+      const second = evaluate(code());
+      first.registered[0]!.validator({});
+      second.registered[0]!.validator({});
+      expect(first.compiled).toHaveLength(1);
+      expect(second.compiled).toHaveLength(1);
+    });
   });
 
   it('generates DO short path check', () => {
@@ -794,8 +854,10 @@ export const createUser = action({
       expect(result!.code).toContain('registerAction("main", "createUser"');
       // One RPC per object per turn: the call goes through the registry's batchedRpc.
       expect(result!.code).toContain('__ddRpc(env.MAIN_DATABASE_DO, instanceKey, "createUser", validatedArgs)');
-      // The args schema is compiled once per isolate, not per call.
-      expect(result!.code).toContain('__ddSchema("main/createUser", () => __ddType(');
+      // The args schema is compiled at its first use, once per isolate, not per call.
+      expect(result!.code).toMatch(/var __args_createUser;\s*function __validator_createUser\(\) \{\s*return __args_createUser \|\| \(__args_createUser = __ddType\(/);
+      expect(result!.code).toContain('const argsSchema = __validator_createUser();');
+      expect(result!.code).not.toContain('__ddSchema');
       // The original placeholder call-site must be gone
       expect(result!.code).not.toContain('createUser = action(');
     });

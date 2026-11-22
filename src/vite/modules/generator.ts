@@ -33,8 +33,7 @@ export const DEV_EPOCH_IMPORT = 'virtual:durable-db/__devEpoch';
 // been declared". The injected import still routes to durable-db's inlined arktype
 // instance (see the comment at the injection site).
 const ARKTYPE_LOCAL = '__ddType';
-/** The registry's cachedArgsSchema and batchedRpc, imported under aliases that never collide with the app's own names. */
-const SCHEMA_LOCAL = '__ddSchema';
+/** The registry's batchedRpc, imported under an alias that never collides with the app's own names. */
 const RPC_LOCAL = '__ddRpc';
 
 // ============================================================================
@@ -1098,6 +1097,47 @@ function buildInstanceKeyExpr(database: DatabaseInfo): t.CallExpression {
   return t.callExpression(t.identifier('applyDevEpoch'), [baseKeyExpr, t.stringLiteral(database.name)]);
 }
 
+/** The function that answers an action's compiled args schema (`__validator_X`). */
+function validatorIdOf(exportName: string): t.Identifier {
+  return t.identifier(`__validator_${exportName}`);
+}
+
+/**
+ * `var __args_X; function __validator_X() { return __args_X || (__args_X = __ddType(<args>)); }`:
+ * the action's args schema, compiled at its first use and kept for the
+ * module's life — one per isolate, for the call site, the Durable Object's
+ * validator and `describeAction()` alike. Every isolate evaluates every
+ * action file as it starts (a Durable Object imports them all), and an
+ * action's schema compiled there, and again at its call site's first call,
+ * was paid for every action, called or not. Kept by the module, not by name
+ * in the registry: an action file that dev evaluates again after an edit
+ * compiles its new args. `var`, so a call before the module body reaches it
+ * finds it unset instead of in its temporal dead zone.
+ */
+function buildArgsSchemaStatements(action: ActionInfo): t.Statement[] {
+  const cached = t.identifier(`__args_${action.exportName}`);
+  return [
+    t.variableDeclaration('var', [t.variableDeclarator(cached)]),
+    t.functionDeclaration(
+      validatorIdOf(action.exportName),
+      [],
+      t.blockStatement([
+        t.returnStatement(
+          t.logicalExpression(
+            '||',
+            cached,
+            t.assignmentExpression(
+              '=',
+              cached,
+              t.callExpression(t.identifier(ARKTYPE_LOCAL), [parseExpression(action.argsSchemaSource)])
+            )
+          )
+        ),
+      ])
+    ),
+  ];
+}
+
 function buildStubBodyStatements(config: StubConfig): t.Statement[] {
   const { action, database } = config;
 
@@ -1105,18 +1145,13 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
   const instanceKeyExpr = buildInstanceKeyExpr(database);
 
   const commonStatements: t.Statement[] = [
-    // const argsSchema = __ddSchema("db/action", () => __ddType({...}));
-    // Compiled on the first call in the isolate and kept, not on every call.
+    // const argsSchema = __validator_X();
+    // The action's one args schema, compiled at its first use in the isolate
+    // (see applyActionTransforms), never on every call.
     t.variableDeclaration('const', [
       t.variableDeclarator(
         t.identifier('argsSchema'),
-        t.callExpression(t.identifier(SCHEMA_LOCAL), [
-          t.stringLiteral(`${database.name}/${action.exportName}`),
-          t.arrowFunctionExpression(
-            [],
-            t.callExpression(t.identifier(ARKTYPE_LOCAL), [parseExpression(action.argsSchemaSource)])
-          ),
-        ])
+        t.callExpression(validatorIdOf(action.exportName), [])
       ),
     ]),
 
@@ -1226,14 +1261,13 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
   // injected import fails to resolve in the cloudflare plugin's worker-entry
   // evaluation. registryImport always resolves there (it's already injected),
   // and routes to the arktype durable-db depends on — the app's own, version
-  // permitting. Imported under aliases (ARKTYPE_LOCAL, SCHEMA_LOCAL,
-  // RPC_LOCAL) so they never collide with the app's own names.
+  // permitting. Imported under aliases (ARKTYPE_LOCAL, RPC_LOCAL) so they
+  // never collide with the app's own names.
   ensureNamedImports(body, registryImport, [
     'registerAction',
     'getDoContext',
     'callAction',
     { imported: 'type', local: ARKTYPE_LOCAL },
-    { imported: 'cachedArgsSchema', local: SCHEMA_LOCAL },
     { imported: 'batchedRpc', local: RPC_LOCAL },
   ]);
   ensureNamedImports(body, DEV_EPOCH_IMPORT, ['applyDevEpoch']);
@@ -1264,18 +1298,11 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
       const exportName = d.id.name;
       const action = actionsInFile.find((a) => a.exportName === exportName)!;
 
-      const validatorId = t.identifier(`__validator_${exportName}`);
+      const validatorId = validatorIdOf(exportName);
       const handlerId = t.identifier(`__handler_${exportName}`);
 
-      // const __validator_X = __ddType(<schema>);
-      replaced.push(
-        t.variableDeclaration('const', [
-          t.variableDeclarator(
-            validatorId,
-            t.callExpression(t.identifier(ARKTYPE_LOCAL), [parseExpression(action.argsSchemaSource)])
-          ),
-        ])
-      );
+      // var __args_X; function __validator_X() { … } — compiled at its first use
+      replaced.push(...buildArgsSchemaStatements(action));
 
       // const __handler_X = (<handler>);
       replaced.push(
@@ -1284,7 +1311,7 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
         ])
       );
 
-      // registerAction(dbName, "X", { validator, handler, args, stub })
+      // registerAction(dbName, "X", { validator, handler, get args(), stub })
       replaced.push(
         t.expressionStatement(
           t.callExpression(t.identifier('registerAction'), [
@@ -1295,12 +1322,17 @@ function applyActionTransforms(body: t.Statement[], ctx: ActionTransformContext)
                 t.identifier('validator'),
                 t.arrowFunctionExpression(
                   [t.identifier('args')],
-                  t.callExpression(validatorId, [t.identifier('args')])
+                  t.callExpression(t.callExpression(validatorId, []), [t.identifier('args')])
                 )
               ),
               t.objectProperty(t.identifier('handler'), handlerId),
-              // For describeAction(): the compiled schema, and the stub below (hoisted) to describe.
-              t.objectProperty(t.identifier('args'), validatorId),
+              // For describeAction(): the compiled schema (compiled when asked), and the stub below (hoisted) to describe.
+              t.objectMethod(
+                'get',
+                t.identifier('args'),
+                [],
+                t.blockStatement([t.returnStatement(t.callExpression(validatorId, []))])
+              ),
               t.objectProperty(t.identifier('stub'), t.identifier(exportName)),
             ]),
           ])

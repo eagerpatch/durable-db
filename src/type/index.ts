@@ -6,7 +6,8 @@
 // isolate, every Durable Object); this parses a definition into plain
 // closures in microseconds, when its Type is first used, not when `type()`
 // is called: a malformed definition (which ArkType's types refuse at compile
-// time) throws its ParseError there.
+// time) throws its ParseError there. What is parsed is the definition as it
+// was at `type()`, which copies its plain objects and arrays.
 //
 // The Types it returns are callable like ArkType's (`T(data)` → the value or
 // `ArkErrors`), Standard Schemas (oRPC, any `~standard` consumer) with their
@@ -401,7 +402,8 @@ function makeType(node: Node, config: TypeConfig): Type<any> {
  * (an action's args, an API's inputs, a job's), and every isolate — a
  * worker's and each Durable Object's — evaluates all of them as it starts,
  * though a request validates one or two. A definition that cannot be parsed
- * throws its ParseError at that first use, each time it is used.
+ * throws its ParseError at that first use, each time it is used. `parse`
+ * reads the definition as `type()` copied it (`snapshot()`).
  */
 function lazyType(parse: () => Node, config: TypeConfig): Type<any> {
   let node: Node | undefined;
@@ -423,19 +425,56 @@ function lazyType(parse: () => Node, config: TypeConfig): Type<any> {
   return validate as unknown as Type<any>;
 }
 
+/**
+ * The definition as it is at `type()`, for a parse that comes later: its plain
+ * objects and arrays copied, at any depth, so one changed after `type()` does
+ * not change what the Type checks — as when `type()` parsed it. What a
+ * definition holds as a value is kept as it is: the values of `['===', …]`
+ * (compared by identity) and a default (`[def, '=', value]`, handed out as
+ * it is), and a Type, a function, a RegExp, a Standard Schema or an instance
+ * of a class anywhere (one of those is read when it is parsed).
+ */
+function snapshot(def: unknown): unknown {
+  if (typeof def !== 'object' || def === null || def instanceof RegExp || '~standard' in def) return def;
+  if (Array.isArray(def)) {
+    if (def[0] === '===') return def.slice();
+    if (def.length === 3 && def[1] === '=') return [snapshot(def[0]), '=', def[2]];
+    return def.map(snapshot);
+  }
+  const proto = Object.getPrototypeOf(def);
+  if (proto !== Object.prototype && proto !== null) return def;
+  const copy: Record<string, unknown> = {};
+  for (const key of Object.keys(def)) {
+    const value = snapshot((def as Record<string, unknown>)[key]);
+    // An own `__proto__` key (JSON.parse makes one) stays a key.
+    if (key === '__proto__') Object.defineProperty(copy, key, { value, enumerable: true, writable: true, configurable: true });
+    else copy[key] = value;
+  }
+  return copy;
+}
+
 /** A `type()` whose Types follow `config` (durable-db's action args admit `undefined` for an optional key). */
 export function createTypeParser(config: Partial<TypeConfig> = {}): TypeParser {
   const resolved: TypeConfig = { ...DEFAULT_CONFIG, ...config };
   const context = contextFor(resolved);
-  const parse = (def: unknown) => lazyType(() => parseDefinition(def, context), resolved);
+  const parse = (def: unknown) => {
+    const written = snapshot(def);
+    return lazyType(() => parseDefinition(written, context), resolved);
+  };
   const parser = ((...args: unknown[]) => parse(args.length === 1 ? args[0] : args)) as unknown as TypeParser & Record<string, unknown>;
   Object.assign(parser, {
     errors: ArkErrors,
     raw: parse,
     unit: (value: unknown) => makeType(new UnitNode(value), resolved),
     enumerated: (...values: unknown[]) => makeType(union(values.map((v) => new UnitNode(v))), resolved),
-    or: (...defs: unknown[]) => lazyType(() => union(defs.map((d) => parseDefinition(d, context))), resolved),
-    and: (...defs: unknown[]) => lazyType(() => defs.map((d) => parseDefinition(d, context)).reduce(intersect), resolved),
+    or: (...defs: unknown[]) => {
+      const written = defs.map(snapshot);
+      return lazyType(() => union(written.map((d) => parseDefinition(d, context))), resolved);
+    },
+    and: (...defs: unknown[]) => {
+      const written = defs.map(snapshot);
+      return lazyType(() => written.map((d) => parseDefinition(d, context)).reduce(intersect), resolved);
+    },
   });
   return parser;
 }

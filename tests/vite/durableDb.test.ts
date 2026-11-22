@@ -7,6 +7,19 @@ import { durableDb, databasePlugin, syncWranglerConfig } from '../../src/vite/du
 import { syncWranglerConfig as moduleSyncWranglerConfig } from '../../src/vite/modules/syncWrangler';
 import type { Plugin, ResolvedConfig } from 'vite';
 
+/** A hook's function, whether the plugin gives it as a function or as `{ filter, handler }`. */
+function handlerOf(hook: unknown): Function {
+  return typeof hook === 'function' ? hook : (hook as { handler: Function }).handler;
+}
+
+/** What a hook's `filter` admits by id, as Vite applies it: every RegExp of `include` (or the one given) against the id with forward slashes. */
+function admits(hook: unknown, id: string): boolean {
+  const filter = (hook as { filter?: { id?: RegExp | { include: RegExp[] } } }).filter?.id;
+  if (!filter) return true;
+  const patterns = filter instanceof RegExp ? [filter] : filter.include;
+  return patterns.some((pattern) => pattern.test(id.replace(/\\/g, '/')));
+}
+
 // ============================================================================
 // Plugin Configuration
 // ============================================================================
@@ -68,15 +81,15 @@ describe('databasePlugin', () => {
     });
 
     it('has resolveId', () => {
-      expect(typeof plugin.resolveId).toBe('function');
+      expect(typeof handlerOf(plugin.resolveId)).toBe('function');
     });
 
     it('has load', () => {
-      expect(typeof plugin.load).toBe('function');
+      expect(typeof handlerOf(plugin.load)).toBe('function');
     });
 
     it('has transform', () => {
-      expect(typeof plugin.transform).toBe('function');
+      expect(typeof handlerOf(plugin.transform)).toBe('function');
     });
   });
 });
@@ -93,25 +106,25 @@ describe('resolveId', () => {
   });
 
   it('resolves virtual:durable-db/__durableObjects', async () => {
-    const resolveId = plugin.resolveId as Function;
+    const resolveId = handlerOf(plugin.resolveId);
     const result = await resolveId('virtual:durable-db/__durableObjects');
     expect(result).toBe('\0virtual:durable-db/__durableObjects.js');
   });
 
   it('resolves durable-db/__durableObjects without prefix', async () => {
-    const resolveId = plugin.resolveId as Function;
+    const resolveId = handlerOf(plugin.resolveId);
     const result = await resolveId('durable-db/__durableObjects');
     expect(result).toBe('\0virtual:durable-db/__durableObjects.js');
   });
 
   it('resolves virtual:durable-db/__devEpoch', async () => {
-    const resolveId = plugin.resolveId as Function;
+    const resolveId = handlerOf(plugin.resolveId);
     const result = await resolveId('virtual:durable-db/__devEpoch');
     expect(result).toBe('\0virtual:durable-db/__devEpoch.js');
   });
 
   it('still resolves the legacy eagerpatch-prefixed ids', async () => {
-    const resolveId = plugin.resolveId as Function;
+    const resolveId = handlerOf(plugin.resolveId);
     expect(await resolveId('virtual:eagerpatch/durable-db/__durableObjects'))
       .toBe('\0virtual:durable-db/__durableObjects.js');
     expect(await resolveId('virtual:eagerpatch/durable-db/__devEpoch'))
@@ -123,15 +136,73 @@ describe('resolveId', () => {
   });
 
   it('returns null for registry (now a real module)', async () => {
-    const resolveId = plugin.resolveId as Function;
+    const resolveId = handlerOf(plugin.resolveId);
     expect(await resolveId('durable-db/registry')).toBeNull();
   });
 
   it('returns null for non-virtual imports', async () => {
-    const resolveId = plugin.resolveId as Function;
+    const resolveId = handlerOf(plugin.resolveId);
     expect(await resolveId('lodash')).toBeNull();
     expect(await resolveId('react')).toBeNull();
     expect(await resolveId('./utils')).toBeNull();
+  });
+});
+
+// ============================================================================
+// Hook filters
+// ============================================================================
+
+// Vite 8's Rolldown (and Vite >= 6.3) calls a hook only for the ids its
+// filter admits: a build no longer crosses into JS for every module of every
+// hook. Each filter is a superset of what its handler acts on, the handler
+// still checks, and a bundler without filters calls it for everything.
+describe('hook filters', () => {
+  const plugin = durableDb();
+  const VIRTUAL = ['durable-db/__durableObjects', 'durable-db/__devEpoch', 'durable-db/__databases'];
+  const SPELLINGS = VIRTUAL.flatMap((id) => [id, `virtual:${id}`, `eagerpatch/${id}`, `virtual:eagerpatch/${id}`]);
+  const LOADED = [
+    '\0virtual:durable-db/__durableObjects.js',
+    '\0virtual:durable-db/__devEpoch.js',
+    '\0virtual:durable-db/__databases.js',
+  ];
+
+  it('resolveId: every spelling the handler resolves, and nothing else', async () => {
+    for (const id of SPELLINGS) {
+      expect(admits(plugin.resolveId, id), id).toBe(true);
+      expect(await handlerOf(plugin.resolveId)(id), id).toMatch(/^\0virtual:durable-db\/__\w+\.js$/);
+    }
+    for (const id of ['lodash', './utils', 'durable-db', 'durable-db/registry', 'virtual:durable-db/__durableObjectsX', 'xdurable-db/__devEpoch', ...LOADED]) {
+      expect(admits(plugin.resolveId, id), id).toBe(false);
+    }
+  });
+
+  it('load: the three virtual modules, and nothing else', () => {
+    for (const id of LOADED) expect(admits(plugin.load, id), id).toBe(true);
+    for (const id of [...SPELLINGS, '/project/src/databases/main.ts', '\0virtual:durable-db/__durableObjects.jsx']) {
+      expect(admits(plugin.load, id), id).toBe(false);
+    }
+  });
+
+  it('writes a NUL as an escape, never raw (Rolldown does not take a raw one)', () => {
+    for (const hook of [plugin.resolveId, plugin.load]) {
+      expect((hook as { filter: { id: RegExp } }).filter.id.source).not.toContain('\0');
+    }
+    expect((plugin.load as { filter: { id: RegExp } }).filter.id.source).toContain('\\x00');
+  });
+
+  it('transform: TypeScript, and Drizzle\'s modules wherever they are', () => {
+    for (const id of [
+      '/project/src/databases/main.ts',
+      '/project/src/pages/index.tsx',
+      'C:\\project\\src\\actions.ts',
+      '/project/node_modules/.pnpm/drizzle-orm@0.45.4/node_modules/drizzle-orm/sqlite-core/table.js',
+      'C:\\project\\node_modules\\drizzle-orm\\index.js',
+    ]) {
+      expect(admits(plugin.transform, id), id).toBe(true);
+    }
+    for (const id of ['/project/src/main.js', '/project/src/styles.css', '\0virtual:durable-db/__durableObjects.js', '/project/node_modules/react/index.js']) {
+      expect(admits(plugin.transform, id), id).toBe(false);
+    }
   });
 });
 
@@ -166,7 +237,7 @@ export const { action } = defineDatabase({ schema: { users } });
   it('threads maxAttempts through to every generated class, beside a module sink resolved from the root', async () => {
     const plugin = durableDb({ outbox: { module: './src/outbox.ts', maxAttempts: 7 } });
     await (plugin.configResolved as Function)({ root: tempDir, command: 'build' } as ResolvedConfig);
-    const loaded = await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+    const loaded = await handlerOf(plugin.load)('\0virtual:durable-db/__durableObjects.js');
     const code: string = typeof loaded === 'string' ? loaded : loaded.code;
     expect(code).toContain(`import __ddOutboxModule from "${path.join(tempDir, 'src', 'outbox.ts').split(path.sep).join('/')}"`);
     expect(code).toMatch(/class MainDatabaseDO extends SqliteDurableObject \{[\s\S]*?outboxSink = __ddOutbox;\s*outboxMaxAttempts = 7;/);
@@ -209,7 +280,7 @@ export const { action } = defineDatabase({ schema: { users } });
     const plugin = durableDb(options);
     const configResolved = plugin.configResolved as Function;
     await configResolved({ root: tempDir, command } as ResolvedConfig);
-    const load = plugin.load as Function;
+    const load = handlerOf(plugin.load);
     await load('\0virtual:durable-db/__durableObjects.js');
   }
 
@@ -309,7 +380,7 @@ export const { action } = defineDatabase({ schema: { users } });
         await (plugin.config as Function)({ root: tempDir }, { command, mode: command === 'build' ? 'production' : 'development' });
       }
       await (plugin.configResolved as Function)({ root: tempDir, command } as ResolvedConfig);
-      const loaded = await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+      const loaded = await handlerOf(plugin.load)('\0virtual:durable-db/__durableObjects.js');
       return typeof loaded === 'string' ? loaded : loaded.code;
     }
 
@@ -382,7 +453,7 @@ export const { action } = defineDatabase({ schema: { users } });
     async function loadModule(options: Parameters<typeof durableDb>[0], command: 'serve' | 'build') {
       const plugin = durableDb(options);
       await (plugin.configResolved as Function)({ root: tempDir, command } as ResolvedConfig);
-      const loaded = await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+      const loaded = await handlerOf(plugin.load)('\0virtual:durable-db/__durableObjects.js');
       return typeof loaded === 'string' ? loaded : loaded.code;
     }
 
@@ -494,7 +565,7 @@ export const { action } = defineDatabase({ schema: { users } });
     fs.rmSync(path.join(tempDir, 'wrangler.jsonc'));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    await (plugin.load as Function)('\0virtual:durable-db/__durableObjects.js');
+    await handlerOf(plugin.load)('\0virtual:durable-db/__durableObjects.js');
 
     expect(logSpy.mock.calls.flat().filter((line) => String(line).startsWith('durable-db updated'))).toHaveLength(1);
     expect(warnSpy).not.toHaveBeenCalled();
@@ -555,7 +626,7 @@ describe('__devEpoch virtual module', () => {
     const configResolved = plugin.configResolved as Function;
     await configResolved({ root: tempDir, command } as ResolvedConfig);
 
-    const load = plugin.load as Function;
+    const load = handlerOf(plugin.load);
     const result = await load('\0virtual:durable-db/__devEpoch.js');
     return result.code;
   }
@@ -619,7 +690,7 @@ describe('__devEpoch virtual module', () => {
     const plugin = durableDb();
     const configResolved = plugin.configResolved as Function;
     await configResolved({ root: tempDir, command: 'serve' } as ResolvedConfig);
-    const load = plugin.load as Function;
+    const load = handlerOf(plugin.load);
 
     const before = (await load('\0virtual:durable-db/__devEpoch.js')).code;
 
@@ -691,7 +762,7 @@ describe('dev cache watcher', () => {
     // First load of __devEpoch on a fresh project mints and persists the
     // epoch — that write must not bounce back through the cache watcher as
     // a full reload (on a real first run no hot channel is connected yet).
-    const load = plugin.load as Function;
+    const load = handlerOf(plugin.load);
     await load('\0virtual:durable-db/__devEpoch.js');
 
     // Give the fs watcher and the reload debounce ample time to fire
@@ -838,7 +909,7 @@ describe('transform', () => {
   });
 
   it('returns null for node_modules', async () => {
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const result = await transform.call(
       { resolve: async () => null },
       'export const x = 1;',
@@ -848,7 +919,7 @@ describe('transform', () => {
   });
 
   it('returns null for virtual modules', async () => {
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const result = await transform.call(
       { resolve: async () => null },
       'export const x = 1;',
@@ -858,7 +929,7 @@ describe('transform', () => {
   });
 
   it('returns null for non-TypeScript', async () => {
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const result = await transform.call(
       { resolve: async () => null },
       'export const x = 1;',
@@ -868,7 +939,7 @@ describe('transform', () => {
   });
 
   it('returns null for files without actions', async () => {
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const result = await transform.call(
       { resolve: async () => null },
       `import { something } from 'somewhere';\nexport const x = something();`,
@@ -880,7 +951,7 @@ describe('transform', () => {
   it('passes a file with a syntax error and no durable-db usage through untouched', async () => {
     // A page being edited: the compiler that owns it reports the error, not
     // durable-db's Babel parse ([plugin:durable-db] for every syntax error).
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const page = `import { Suspense } from 'react';\nexport default function Page() {\n  return ((\n    <form action={save}><Suspense /></form>\n  );\n}\n`;
     const result = await transform.call(
       { resolve: async () => null },
@@ -891,7 +962,7 @@ describe('transform', () => {
   });
 
   it('still parses a file that imports an action factory', async () => {
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     await expect(transform.call(
       { resolve: async () => null },
       `import { action } from '../databases/main';\nexport const x = (;`,
@@ -908,7 +979,7 @@ describe('transform', () => {
     ['a comment before the braces', `import /* factory */ { action } from '../databases/main';`],
     ['a string specifier', `import { "action" as act } from '../databases/main';`],
   ])('still parses an action file importing the factory with %s', async (_, importLine) => {
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     await expect(transform.call(
       { resolve: async () => null },
       `${importLine}\nexport const x = (;`,
@@ -927,7 +998,7 @@ describe('transform', () => {
       `import main, { action } from '../databases/main';\n` +
       `export const getUser = action({ args: {}, handler: async () => main });\n`;
 
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const result = await transform.call(
       { resolve: async (source: string, importer: string) => ({ id: path.resolve(path.dirname(importer), source) + '.ts' }) },
       code,
@@ -941,7 +1012,7 @@ describe('transform', () => {
   });
 
   it('handles query parameters in id', async () => {
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const result = await transform.call(
       { resolve: async () => null },
       'export const x = 1;',
@@ -967,7 +1038,7 @@ export const createUser = action({
 `;
     fs.writeFileSync(dbFile, code);
 
-    const transform = plugin.transform as Function;
+    const transform = handlerOf(plugin.transform);
     const result = await transform.call({ resolve: async () => null }, code, dbFile);
 
     expect(result).not.toBeNull();
@@ -1002,8 +1073,8 @@ describe('concurrent initialization', () => {
       command: 'build',
     } as ResolvedConfig);
 
-    const load = plugin.load as Function;
-    const transform = plugin.transform as Function;
+    const load = handlerOf(plugin.load);
+    const transform = handlerOf(plugin.transform);
 
     // Fire both hooks concurrently — both call state.initialize()
     const [loadResult, transformResult] = await Promise.all([

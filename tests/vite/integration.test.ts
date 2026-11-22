@@ -501,3 +501,89 @@ export default { fetch: () => new Response('ok') };
     ]);
   }, 30_000);
 });
+
+// ============================================================================
+// A build calls the hooks only for what they act on
+// ============================================================================
+
+// The resolveId, load and transform hooks carry filters, so Vite 8's Rolldown
+// calls into the plugin for its virtual modules, TypeScript and Drizzle's
+// modules only — not for every module of the build, as it did.
+describe('hook filters in a build', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'epdb-filters-')));
+    fs.mkdirSync(path.join(tempDir, 'src', 'databases'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('asks the handlers about their own ids only, and builds the same', async () => {
+    fs.writeFileSync(path.join(tempDir, 'wrangler.jsonc'), JSON.stringify({
+      name: 'store',
+      main: 'src/index.ts',
+      durable_objects: { bindings: [{ name: 'MAIN_DATABASE_DO', class_name: 'MainDatabaseDO' }] },
+      migrations: [{ tag: 'v1', new_sqlite_classes: ['MainDatabaseDO'] }],
+    }));
+    fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'schema.ts'), `
+import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
+export const items = sqliteTable('items', { id: text().primaryKey() });
+`);
+    fs.writeFileSync(path.join(tempDir, 'src', 'databases', 'main.ts'), `
+import { defineDatabase } from 'durable-db/db';
+import { items } from './schema';
+export const { action } = defineDatabase({ schema: { items } });
+export const addItem = action({ args: { id: 'string' }, handler: async () => 1 });
+`);
+    for (let i = 0; i < 5; i++) {
+      fs.writeFileSync(path.join(tempDir, 'src', `util${i}.js`), `export const u${i} = ${i};\n`);
+    }
+    fs.writeFileSync(path.join(tempDir, 'src', 'index.ts'), `
+export * from 'virtual:durable-db/__durableObjects';
+export { addItem } from './databases/main';
+${[0, 1, 2, 3, 4].map((i) => `export { u${i} } from './util${i}.js';`).join('\n')}
+export default { fetch: () => new Response('ok') };
+`);
+
+    const plugin = durableDb();
+    const asked: Record<'resolveId' | 'load' | 'transform', string[]> = { resolveId: [], load: [], transform: [] };
+    for (const hook of ['resolveId', 'load', 'transform'] as const) {
+      const given = plugin[hook] as { filter: unknown; handler: Function };
+      plugin[hook] = {
+        ...given,
+        handler(this: unknown, ...args: unknown[]) {
+          asked[hook].push(String(hook === 'transform' ? args[1] : args[0]));
+          return given.handler.apply(this, args);
+        },
+      } as never;
+    }
+
+    const output = await build({
+      root: tempDir,
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [plugin],
+      build: {
+        write: false,
+        minify: false,
+        lib: { entry: path.join(tempDir, 'src', 'index.ts'), formats: ['es'], fileName: 'index' },
+        rollupOptions: { external: [/^durable-db/, /^drizzle-orm/, /^cloudflare:/] },
+      },
+    });
+    const worker = (Array.isArray(output) ? output[0] : output as { output: Array<{ type: string; code?: string }> })
+      .output.find((file) => file.type === 'chunk')!;
+
+    expect(worker.code).toMatch(/\bMainDatabaseDO = class extends SqliteDurableObject\b/);
+    expect(worker.code).toContain('registerAction("main", "addItem"');
+    // Every import of a virtual module is asked; ./util*.js, the entry's own imports, never.
+    expect(asked.resolveId.length).toBeGreaterThan(0);
+    for (const id of asked.resolveId) expect(id).toMatch(/^virtual:durable-db\/__\w+$/);
+    expect(asked.load.length).toBeGreaterThan(0);
+    for (const id of asked.load) expect(id).toMatch(/^\0virtual:durable-db\/__\w+\.js$/);
+    expect(asked.transform.map((id) => path.relative(tempDir, id)).sort())
+      .toEqual(['src/databases/main.ts', 'src/databases/schema.ts', 'src/index.ts']);
+  }, 30_000);
+});

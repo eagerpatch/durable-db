@@ -70,13 +70,27 @@ function format(formatter: unknown, args: unknown[]): string {
   return extra.length ? `${formatted} ${extra.map(stringify).join(' ')}` : formatted;
 }
 
+// `enabled` is worked out at its first read (a call, or the property), not
+// when the debugger is made: this module is in the Durable Object's and the
+// worker's bundle, and in workerd the first read of `process` builds Node's
+// whole process object, its streams with it — about 7 ms of every isolate's
+// startup, for three debuggers no request calls. Once read, it is kept, as
+// the `debug` package reads DEBUG once.
 export function createDebug(namespace: string): Debugger {
+  let enabled: boolean | undefined;
   const debug = ((formatter?: unknown, ...args: unknown[]) => {
     if (!debug.enabled) return;
     console.error(`${namespace} ${format(formatter, args)}`);
   }) as Debugger;
   debug.namespace = namespace;
-  debug.enabled = namespaceEnabled(namespace);
+  Object.defineProperty(debug, 'enabled', {
+    get: () => (enabled ??= namespaceEnabled(namespace)),
+    set: (value: boolean) => {
+      enabled = value;
+    },
+    enumerable: true,
+    configurable: true,
+  });
   debug.extend = (subNamespace, delimiter = ':') =>
     createDebug(`${namespace}${delimiter}${subNamespace}`);
   return debug;

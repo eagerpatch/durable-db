@@ -1,6 +1,4 @@
-import {
-  DrizzleSQLiteSnapshotJSON,
-} from 'drizzle-kit/api';
+import type { DrizzleSQLiteSnapshotJSON } from 'drizzle-kit/api';
 
 import { createRequire } from 'node:module'
 import {
@@ -13,7 +11,17 @@ import {
   type RenameAnswer,
 } from './renames';
 const require = createRequire(import.meta.url)
-const { generateSQLiteDrizzleJson, generateSQLiteMigration } = require('drizzle-kit/api') as typeof import('drizzle-kit/api')
+
+// drizzle-kit's API (it loads drizzle-orm's ~240 modules, about 100 ms) is
+// required at the first snapshot or migration, not with this module: the CLI's
+// entry imports it, and a host CLI registers `db` for every command line.
+let drizzleKit: typeof import('drizzle-kit/api') | undefined
+const kit = (): typeof import('drizzle-kit/api') =>
+  (drizzleKit ??= require('drizzle-kit/api') as typeof import('drizzle-kit/api'))
+const generateSQLiteDrizzleJson: typeof import('drizzle-kit/api')['generateSQLiteDrizzleJson'] = (...args) =>
+  kit().generateSQLiteDrizzleJson(...args)
+const generateSQLiteMigration: typeof import('drizzle-kit/api')['generateSQLiteMigration'] = (...args) =>
+  kit().generateSQLiteMigration(...args)
 
 export type Snapshot = DrizzleSQLiteSnapshotJSON;
 

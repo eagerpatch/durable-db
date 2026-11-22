@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { type, isType, ParseError } from '../../src/type';
 import { actionArgsType } from '../../src/db/actionArgs';
 
@@ -102,5 +102,32 @@ describe('a definition', () => {
     expect(reads()).toBe(0);
     expect(Args({ name: 'Ada', age: undefined })).toEqual({ name: 'Ada', age: undefined });
     expect(reads()).toBeGreaterThan(0);
+  });
+});
+
+// A RegExp literal is compiled when it first runs; the constructor parses its
+// pattern when called. The IPv6 keyword's (~1 KB) is made at its first use.
+describe('the keywords', () => {
+  it('construct no IPv6 pattern when the module loads, one at the first use', async () => {
+    vi.resetModules();
+    const Original = globalThis.RegExp;
+    const made: string[] = [];
+    globalThis.RegExp = new Proxy(Original, {
+      construct(target, args) {
+        made.push(String(args[0]));
+        return Reflect.construct(target, args);
+      },
+    });
+    const ipv6 = (pattern: string) => pattern.includes('[0-9a-fA-F]{1,4}');
+    try {
+      const fresh = await import('../../src/type');
+      expect(made.filter(ipv6)).toEqual([]);
+      expect(fresh.type('string.ip.v6').allows('::1')).toBe(true);
+      expect(fresh.type('string.ip').allows('fe80::1%eth0')).toBe(true);
+      expect(fresh.type('string.ip').allows('10.0.0.1')).toBe(true);
+    } finally {
+      globalThis.RegExp = Original;
+    }
+    expect(made.filter(ipv6)).toHaveLength(1);
   });
 });

@@ -44,7 +44,11 @@ const iso8601 =
 const ipv4Segment = '(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])';
 const ipv4Address = `(${ipv4Segment}[.]){3}${ipv4Segment}`;
 const ipv6Segment = '(?:[0-9a-fA-F]{1,4})';
-const ipv6 = new RegExp(
+// Made at the first IPv6 keyword: a RegExp literal is compiled when it first
+// runs, but the constructor parses its ~1 KB pattern when called — at every
+// isolate's start, for a keyword few definitions use.
+let ipv6Pattern: RegExp | undefined;
+const ipv6 = (): RegExp => (ipv6Pattern ??= new RegExp(
   '^(' +
     `(?:${ipv6Segment}:){7}(?:${ipv6Segment}|:)|` +
     `(?:${ipv6Segment}:){6}(?:${ipv4Address}|:${ipv6Segment}|:)|` +
@@ -55,7 +59,7 @@ const ipv6 = new RegExp(
     `(?:${ipv6Segment}:){1}(?:(:${ipv6Segment}){0,4}:${ipv4Address}|(:${ipv6Segment}){1,6}|:)|` +
     `(?::((?::${ipv6Segment}){0,5}:${ipv4Address}|(?::${ipv6Segment}){1,7}|:))` +
     ')(%[0-9a-zA-Z.]{1,})?$',
-);
+));
 const uuidVersioned = /^[\dA-Fa-f]{8}-[\dA-Fa-f]{4}-[1-8][\dA-Fa-f]{3}-[89ABab][\dA-Fa-f]{3}-[\dA-Fa-f]{12}$/;
 const uuidVersion = (v: number) => new RegExp(`^[\\dA-Fa-f]{8}-[\\dA-Fa-f]{4}-${v}[\\dA-Fa-f]{3}-[89ABab][\\dA-Fa-f]{3}-[\\dA-Fa-f]{12}$`);
 const semver =
@@ -175,12 +179,12 @@ const KEYWORDS: Record<string, () => Node> = {
   'string.creditCard': () =>
     new RefinedNode(string(), [patternRefinement(creditCardMatcher, 'a credit card number'), predicateRefinement(isLuhnValid as never, 'a credit card number')], 'a credit card number'),
   'string.ip': () => {
-    const node = described(new UnionNode([regexString(new RegExp(`^${ipv4Address}$`), 'an IPv4 address', 'ipv4'), regexString(ipv6, 'an IPv6 address', 'ipv6')]), 'an IP address');
+    const node = described(new UnionNode([regexString(new RegExp(`^${ipv4Address}$`), 'an IPv4 address', 'ipv4'), regexString(ipv6(), 'an IPv6 address', 'ipv6')]), 'an IP address');
     node.meta = { description: 'an IP address' };
     return node;
   },
   'string.ip.v4': () => regexString(new RegExp(`^${ipv4Address}$`), 'an IPv4 address', 'ipv4'),
-  'string.ip.v6': () => regexString(ipv6, 'an IPv6 address', 'ipv6'),
+  'string.ip.v6': () => regexString(ipv6(), 'an IPv6 address', 'ipv6'),
   'string.uuid': () =>
     described(
       new UnionNode([

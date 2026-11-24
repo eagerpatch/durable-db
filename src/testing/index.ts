@@ -212,9 +212,10 @@ interface Frame {
   ctx: ActionRunContext;
 }
 
-/** The context a handler is handed. */
+/** The context a handler is handed: a Durable Object's (`dbName` the database's name, `'test'` unless the options say). */
 interface ActionRunContext {
   env: Record<string, unknown>;
+  dbName: string;
   instanceKey: string;
   outbox: ActionOutbox;
   transaction<T>(fn: () => Promise<T>): Promise<T>;
@@ -336,6 +337,7 @@ export async function createTestDatabase<TSchema = any>(
     // The handler's context, its outbox as the Durable Object's: messages of a successful run only.
     const ctx: ActionRunContext = {
       env,
+      dbName: database,
       instanceKey,
       outbox: createActionOutbox(true),
       transaction: (fn) => part(fn),

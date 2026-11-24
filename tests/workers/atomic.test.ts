@@ -17,6 +17,7 @@ interface AtomicEnv {
     get: (id: DurableObjectId) => DurableObjectStub & {
       call: (method: string, args: unknown, instanceKey?: string) => Promise<Result>;
       state: () => Promise<State>;
+      late: () => Promise<string[]>;
     };
   };
 }
@@ -99,5 +100,36 @@ describe('an action is one transaction (real workerd)', () => {
 
   it('calls another database from an action', async () => {
     expect(await newObject().call('callOtherPlainly', {})).toEqual({ ok: true, value: 'echo' });
+  });
+  describe('a query or a push that runs after its action ended', () => {
+    const refused = expect.stringMatching(/after its action ended/);
+
+    it('is refused when the action did not await it', async () => {
+      const object = newObject();
+      expect(await object.call('notAwaited', {})).toEqual({ ok: true, value: 'returned' });
+      expect(await object.late()).toEqual([refused]);
+      expect((await object.state()).lines).toEqual(['awaited']);
+    });
+
+    it('is refused when Promise.all() gave up at another failure', async () => {
+      const object = newObject();
+      expect(await object.call('allFails', {})).toEqual({ ok: false, error: 'the first failed' });
+      expect(await object.late()).toEqual([refused]);
+      expect((await object.state()).lines).toEqual([]);
+    });
+
+    it('refuses a message pushed after the action returned', async () => {
+      const object = newObject();
+      expect(await object.call('pushAfterwards', {})).toEqual({ ok: true, value: 'returned' });
+      expect(await object.late()).toEqual([refused]);
+      expect((await object.state()).messages).toEqual([]);
+    });
+
+    it("is refused after a part rolled back, not written into the action's transaction", async () => {
+      const object = newObject();
+      expect(await object.call('partNotAwaited', {})).toEqual({ ok: true, value: undefined });
+      expect(await object.late()).toEqual([refused]);
+      expect((await object.state()).lines).toEqual(['after the part']);
+    });
   });
 });

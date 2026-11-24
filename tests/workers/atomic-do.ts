@@ -157,6 +157,63 @@ ledgerAction('callOther', async (_db, _args, ctx) => {
   return { error: answer.refused ?? null, ms: Date.now() - started };
 });
 
+/** What a query or a push that ran after its action ended was told (the test pool reports an unhandled rejection). */
+const late: string[] = [];
+const afterwards = (what: () => Promise<unknown> | unknown) =>
+  void (async () => {
+    await sleep(10);
+    try {
+      await what();
+      late.push('ran');
+    } catch (error) {
+      late.push((error as Error).message);
+    }
+  })();
+
+/** A write it does not await, made after it returned. */
+ledgerAction('notAwaited', async (db) => {
+  await note(db, 'awaited');
+  afterwards(() => note(db, 'not awaited'));
+  return 'returned';
+});
+
+/** Promise.all() settles at the first failure: the other write comes after the action threw. */
+ledgerAction('allFails', async (db) => {
+  await note(db, 'before');
+  await Promise.all([
+    (async () => {
+      throw new Error('the first failed');
+    })(),
+    (async () => {
+      await sleep(10);
+      try {
+        await note(db, 'the second');
+        late.push('ran');
+      } catch (error) {
+        late.push((error as Error).message);
+      }
+    })(),
+  ]);
+});
+
+/** A message pushed after it returned. */
+ledgerAction('pushAfterwards', async (_db, _args, ctx) => {
+  afterwards(() => ctx.outbox.push('late'));
+  return 'returned';
+});
+
+/** A part's write it does not await, made after the part threw: it would land in the action's transaction. */
+ledgerAction('partNotAwaited', async (db, _args, ctx) => {
+  try {
+    await ctx.transaction(async () => {
+      afterwards(() => note(db, 'part, not awaited'));
+      throw new Error('the part failed');
+    });
+  } catch {}
+  await sleep(30);
+  await note(db, 'after the part');
+});
+
 ledgerAction('noop', async () => 'noop');
 
 /** The call back, its refusal answered as a value (a rejection across RPC is reported as unhandled by the test pool). */
@@ -233,6 +290,12 @@ export class TestAtomicDO extends GeneratedLike {
       this.delivered.push(...envelopes.map((envelope) => envelope.message));
     },
   };
+
+  /** What came of the queries and pushes that ran after their action ended. */
+  async late(): Promise<string[]> {
+    await sleep(40);
+    return late.splice(0);
+  }
 
   /** What the object holds: its rows, and every message recorded (still in the outbox or delivered). */
   async state(): Promise<{ vouchers: unknown[]; lines: string[]; balance: number | null; messages: unknown[] }> {

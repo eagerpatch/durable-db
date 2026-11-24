@@ -1,3 +1,5 @@
+import { assertInScope } from './scope';
+
 // The outbox: messages an action records (`ctx.outbox.push(message)`) for
 // something outside the Durable Object to act on — a queue, an email, a
 // webhook — delivered after the action has succeeded, never from inside it.
@@ -407,6 +409,7 @@ export function createActionOutbox(sinkConfigured: boolean): ActionOutbox {
   let messages: string[] = [];
   return {
     push(message) {
+      assertInScope('ctx.outbox.push()');
       if (!sinkConfigured) {
         throw new Error(
           '[db] ctx.outbox.push(): no outbox sink is configured — durableDb({ outbox: { queue: "<QUEUE_BINDING>" } }) ' +

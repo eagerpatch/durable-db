@@ -303,6 +303,8 @@ export const postVoucher = action({
     await db.insertInto('waitlist').values(args).execute();
   }
   ```
+- **Await every query.** A query, a push to the outbox or a part that runs after its action (or its part) has ended is refused: one the handler did not await, or the other promise of a `Promise.all()` that gave up when one failed. Run after the end, it would not be in the transaction — written on its own after the action rolled back, or into the action after its part did — so it throws `… ran after its action ended …` instead (an unhandled rejection, since nothing awaits it). Run the writes one after the other, or with `Promise.allSettled()`, before the handler returns.
+
 - **Kysely's `db.transaction()`** is refused, naming `ctx.transaction()`: the action already is one, and a Durable Object refuses SQL's `BEGIN` and `SAVEPOINT` anyway.
 - **An action holds its object.** An action that waits on I/O — another database's action, a `fetch` — holds its object for that long, every other call of it waiting. Keep slow work out of actions (call it from the worker, or [push it to the outbox](#the-outbox)). The runtime resets an object whose action runs for more than 30 s, and the action's writes are rolled back.
 - **Across objects nothing is atomic.** An action of another database (another object, or another tenant's) runs as a transaction of its own and commits on its own: when the calling action then throws, what the other one wrote stays. Use the outbox for the step that must follow a commit.
@@ -1052,7 +1054,7 @@ t.destroy();
 
 While a test database is live, an action called directly — from a page, a procedure, a job under test — runs against the newest live test database created with every table of the action's database.
 
-An action runs there as [in its Durable Object](#one-transaction): one transaction (`BEGIN … COMMIT`, rolled back when it throws), one at a time per test database — a run started while another runs waits for it —, `ctx.transaction()` and an action of the same database called from one as a savepoint, Kysely's `db.transaction()` refused, and a call back into a test database an action further out runs in refused with the `ActionCycleError` production gives. `t.runHandler(handler, args)` runs a handler whose args are already validated the same way, for a library that finds an action's handler itself.
+An action runs there as [in its Durable Object](#one-transaction): one transaction (`BEGIN … COMMIT`, rolled back when it throws), one at a time per test database — a run started while another runs waits for it —, `ctx.transaction()` and an action of the same database called from one as a savepoint, Kysely's `db.transaction()` refused, a query or a push after its action ended refused, and a call back into a test database an action further out runs in refused with the `ActionCycleError` production gives. `t.runHandler(handler, args)` runs a handler whose args are already validated the same way, for a library that finds an action's handler itself.
 
 ---
 

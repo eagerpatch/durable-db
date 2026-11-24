@@ -12,6 +12,7 @@ import {
   type LiveTestDatabase,
 } from '../db/defineDatabase';
 import { setTenantIdResolver } from '../context';
+import { assertInScope, inScope } from '../db/scope';
 import { createActionOutbox, tenantOfInstanceKey, type ActionOutbox, type OutboxEnvelope, type OutboxMessage, type OutboxSink } from '../db/outbox';
 import { ActionCycleError } from '../registry';
 import {
@@ -250,7 +251,7 @@ async function inTransaction<T>(
   const savepoint = `durable_db_test_${depth}`;
   sqlite.exec(depth === 1 ? 'BEGIN' : `SAVEPOINT ${savepoint}`);
   try {
-    const result = await frames.run([...stack, { transactions, level, ctx }], fn);
+    const result = await frames.run([...stack, { transactions, level, ctx }], () => inScope(fn));
     sqlite.exec(depth === 1 ? 'COMMIT' : `RELEASE ${savepoint}`);
     return result;
   } catch (error) {
@@ -266,8 +267,13 @@ async function inTransaction<T>(
 
 /** A part of the action of `ctx`: a savepoint, and what it pushed goes with it when it throws. */
 function partOf(sqlite: DatabaseSync, transactions: Transactions, ctx: ActionRunContext) {
-  return <T>(fn: () => Promise<T>): Promise<T> =>
-    inTransaction(sqlite, transactions, ctx, async () => {
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      assertInScope('ctx.transaction()');
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return inTransaction(sqlite, transactions, ctx, async () => {
       const mark = ctx.outbox.mark();
       try {
         return await fn();
@@ -276,6 +282,7 @@ function partOf(sqlite: DatabaseSync, transactions: Transactions, ctx: ActionRun
         throw error;
       }
     });
+  };
 }
 
 async function deriveStatements(schema: Schema): Promise<string[]> {

@@ -30,6 +30,7 @@ import {
   type SqlExecutor,
 } from './kysely';
 import { guardReferencingRows } from './referencingRows';
+import { assertInScope, inScope } from './scope';
 
 // The Kysely-over-SqlStorage bridge lives in ./kysely so it can be imported
 // without pulling in `cloudflare:workers` (e.g. the durable-db/testing harness
@@ -446,20 +447,26 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
     ctx.outbox = outbox;
     // A part of the action: what it pushed goes with it, from where it began
     // (its siblings run one after the other: the mark is taken inside).
-    ctx.transaction = (fn) =>
-      storage.transaction(async () => {
+    ctx.transaction = (fn) => {
+      try {
+        assertInScope('ctx.transaction()');
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return storage.transaction(async () => {
         const mark = outbox.mark();
         try {
-          return await fn();
+          return await inScope(fn);
         } catch (error) {
           outbox.rewind(mark);
           throw error;
         }
       });
+    };
     const outboxWasReady = this.outboxReady;
     try {
       return await storage.transaction(async () => {
-        const result = await run();
+        const result = await inScope(run);
         const messages = outbox.take();
         if (messages.length > 0) {
           this.ensureOutboxTable();

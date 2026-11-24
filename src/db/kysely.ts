@@ -10,6 +10,7 @@ import {
   type KyselyPlugin
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
+import { assertInScope } from './scope';
 import { DateSerializePlugin, SchemaPlugin, createDrizzlePlugins } from './plugins';
 import { createRelatedPlugins } from './related';
 
@@ -215,6 +216,7 @@ class CloudflareSqliteConnection implements DatabaseConnection {
   }
 
   async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
+    assertInScope('A query');
     let queryStr = compiledQuery.sql;
     let parameters: readonly unknown[] = compiledQuery.parameters.map(normalizeParameter);
 

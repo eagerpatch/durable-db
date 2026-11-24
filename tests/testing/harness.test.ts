@@ -452,6 +452,96 @@ describe('createTestDatabase: an action is one transaction', () => {
     t.destroy();
   });
 
+  describe('a query or a push that runs after its action ended', () => {
+    const late: string[] = [];
+    const afterwards = (what: () => Promise<unknown> | unknown) =>
+      void (async () => {
+        await sleep(5);
+        try {
+          await what();
+          late.push('ran');
+        } catch (error) {
+          late.push((error as Error).message);
+        }
+      })();
+    const settled = async () => {
+      await sleep(20);
+      return late.splice(0);
+    };
+    const refused = expect.stringMatching(/after its action ended/);
+
+    it('is refused when the action did not await it', async () => {
+      const notAwaited = ledgerAction({
+        args: {},
+        handler: async (db) => {
+          await db.insertInto('lines').values({ note: 'awaited' }).execute();
+          afterwards(() => db.insertInto('lines').values({ note: 'not awaited' }).execute());
+        },
+      });
+      const t = await createTestDatabase({ schema: ledger });
+      await t.run(notAwaited, {});
+      expect(await settled()).toEqual([refused]);
+      expect(notes(t)).toEqual(['awaited']);
+      t.destroy();
+    });
+
+    it('is refused when Promise.all() gave up at another failure', async () => {
+      const allFails = ledgerAction({
+        args: {},
+        handler: async (db): Promise<void> => {
+          await Promise.all([
+            Promise.reject(new Error('the first failed')),
+            (async () => {
+              await sleep(5);
+              await db.insertInto('lines').values({ note: 'the second' }).execute().catch((error: Error) => late.push(error.message));
+            })(),
+          ]);
+        },
+      });
+      const t = await createTestDatabase({ schema: ledger });
+      await expect(t.run(allFails, {})).rejects.toThrow('the first failed');
+      expect(await settled()).toEqual([refused]);
+      expect(notes(t)).toEqual([]);
+      t.destroy();
+    });
+
+    it('refuses a message pushed after the action returned, and a part started then', async () => {
+      const pushAfterwards = ledgerAction({
+        args: {},
+        handler: async (_db, _args, ctx) => {
+          afterwards(() => ctx.outbox.push('late'));
+          afterwards(() => ctx.transaction(async () => 'late'));
+        },
+      });
+      const t = await createTestDatabase({ schema: ledger, outbox: async () => {} });
+      await t.run(pushAfterwards, {});
+      expect(await settled()).toEqual([refused, refused]);
+      expect(t.outbox).toEqual([]);
+      t.destroy();
+    });
+
+    it("is refused after a part rolled back, not written into the action's transaction", async () => {
+      const partNotAwaited = ledgerAction({
+        args: {},
+        handler: async (db, _args, ctx) => {
+          await ctx
+            .transaction(async () => {
+              afterwards(() => db.insertInto('lines').values({ note: 'part, not awaited' }).execute());
+              throw new Error('the part failed');
+            })
+            .catch(() => {});
+          await sleep(15);
+          await db.insertInto('lines').values({ note: 'after the part' }).execute();
+        },
+      });
+      const t = await createTestDatabase({ schema: ledger });
+      await t.run(partNotAwaited, {});
+      expect(await settled()).toEqual([refused]);
+      expect(notes(t)).toEqual(['after the part']);
+      t.destroy();
+    });
+  });
+
   it('runs a handler with validated args: runHandler()', async () => {
     const t = await createTestDatabase({ schema: ledger, outbox: async () => {} });
     const value = await t.runHandler(async (db, args: { note: string }, ctx) => {

@@ -46,6 +46,19 @@ export interface DoContext {
    * as its key, `'global'` as no tenant, when no resolver is set.
    */
   tenantId?: string | null;
+  /**
+   * The objects waiting on this call, outermost first: each is inside an
+   * action that called the next one. An action holds its object until it
+   * resolves (a transaction), so a call into one of them would wait for
+   * itself — `batchedRpc` refuses it (`ActionCycleError`).
+   */
+  via?: ActionCaller[];
+}
+
+/** An object waiting on a call it made: its database and instance key. */
+export interface ActionCaller {
+  database: string;
+  instanceKey: string;
 }
 
 export interface RpcContext {
@@ -54,8 +67,33 @@ export interface RpcContext {
   dbBindingNames: Record<string, string>;
   dbTransports?: Record<string, 'rpc' | 'websocket'>;
   instanceKey: string;
-  /** The action run's outbox (`runWithOutbox`); an action called from another of the same database shares it. */
+  /** The action run's outbox (`runAction`); an action called from another of the same database shares it. */
   outbox?: import('./db/outbox').Outbox;
+  /**
+   * Runs `fn` as a part of the action that may fail on its own: its writes
+   * and the messages it pushed are rolled back when it throws, and the rest
+   * of the action goes on (`runAction`). An action called from another of
+   * the same database runs in one.
+   */
+  transaction?: <T>(fn: () => Promise<T>) => Promise<T>;
+}
+
+/**
+ * A call into an object that is waiting on it: an action holds its object
+ * until it resolves, so the call would wait for itself (for 30 s, after
+ * which the runtime resets the object).
+ */
+export class ActionCycleError extends Error {
+  constructor(via: readonly ActionCaller[], target: ActionCaller, action?: string) {
+    const name = ({ database, instanceKey }: ActionCaller) => `${database} (${instanceKey})`;
+    super(
+      `[db] ${action ? `${action}: a call` : 'A call'} into ${name(target)}, which is waiting on this call: ` +
+        `${[...via, target].map(name).join(' → ')}. An action holds its object until it resolves, ` +
+        'so the call would wait for itself. Make the calls from the worker, one after the other, ' +
+        'or have the first action push the work to its outbox.',
+    );
+    this.name = 'ActionCycleError';
+  }
 }
 
 // ============================================================================
@@ -205,9 +243,10 @@ export async function callAction(
     );
   }
 
-  // Same DB: direct call (no RPC hop)
+  // Same DB: direct call (no RPC hop), all or nothing like any action: a part
+  // of the caller's transaction that is rolled back on its own when it throws.
   if (ctx.dbName === targetDb) {
-    return entry.handler(db, validated, ctx);
+    return ctx.transaction ? ctx.transaction(() => entry.handler(db, validated, ctx)) : entry.handler(db, validated, ctx);
   }
 
   // Cross DB: RPC or WebSocket to the other DO
@@ -257,9 +296,15 @@ export type BatchedResult =
   | { ok: true; value: unknown }
   | { ok: false; error: { name: string; message: string } };
 
+/** What a call tells the object it reaches: its instance key, and the objects waiting on it. */
+export interface RpcOptions {
+  instanceKey: string;
+  via?: ActionCaller[];
+}
+
 interface ActionStub {
-  rpc(action: string, args: unknown, options: { instanceKey: string }): Promise<unknown>;
-  rpcBatch(calls: Array<{ action: string; args: unknown }>, options: { instanceKey: string }): Promise<BatchedResult[]>;
+  rpc(action: string, args: unknown, options: RpcOptions): Promise<unknown>;
+  rpcBatch(calls: Array<{ action: string; args: unknown }>, options: RpcOptions): Promise<BatchedResult[]>;
 }
 
 interface ActionNamespace {
@@ -335,14 +380,31 @@ export function batchScope<T>(fn: () => T): T {
  * own caller; a lone call, and every call outside a scope, is a plain `rpc`.
  * Results are plain values: the RPC's top-level `Symbol.dispose` is dropped
  * (React Server Components refuse symbol-keyed props).
+ *
+ * Made from an action (inside a Durable Object), the call names the objects
+ * waiting on it (`via`), and one into any of them is refused at once
+ * (`ActionCycleError`): `database` is the target's name, which the build
+ * passes.
  */
-export function batchedRpc(namespace: ActionNamespace, instanceKey: string, action: string, args: unknown): Promise<unknown> {
+export function batchedRpc(
+  namespace: ActionNamespace,
+  instanceKey: string,
+  action: string,
+  args: unknown,
+  database?: string,
+): Promise<unknown> {
+  const caller = als.getStore();
+  const via = caller ? [...(caller.via ?? []), { database: caller.dbName, instanceKey: caller.instanceKey }] : undefined;
+  if (via && database !== undefined && via.some((waiting) => waiting.database === database && waiting.instanceKey === instanceKey)) {
+    return Promise.reject(new ActionCycleError(via, { database, instanceKey }, action));
+  }
   const scope = batchScopes.getStore();
   return new Promise((resolve, reject) => {
     const call: PendingCall = { action, args, resolve, reject };
-    // No invocation to share a batch within: this call alone, now.
-    if (!scope) {
-      sendCalls(namespace, instanceKey, [call]);
+    // No invocation to share a batch within, or a call from an action (which
+    // names the objects waiting on it): this call alone, now.
+    if (!scope || via) {
+      sendCalls(namespace, via ? { instanceKey, via } : { instanceKey }, [call]);
       return;
     }
     let byKey = scope.pending.get(namespace);
@@ -360,19 +422,18 @@ export function batchedRpc(namespace: ActionNamespace, instanceKey: string, acti
 function flushCalls(namespace: ActionNamespace, instanceKey: string, byKey: Map<string, PendingCall[]>): void {
   const calls = byKey.get(instanceKey) ?? [];
   byKey.delete(instanceKey);
-  sendCalls(namespace, instanceKey, calls);
+  sendCalls(namespace, { instanceKey }, calls);
 }
 
-function sendCalls(namespace: ActionNamespace, instanceKey: string, calls: PendingCall[]): void {
+function sendCalls(namespace: ActionNamespace, options: RpcOptions, calls: PendingCall[]): void {
   if (calls.length === 0) return;
   let stub: ActionStub;
   try {
-    stub = namespace.get(namespace.idFromName(instanceKey));
+    stub = namespace.get(namespace.idFromName(options.instanceKey));
   } catch (error) {
     for (const call of calls) call.reject(error);
     return;
   }
-  const options = { instanceKey };
   if (calls.length === 1) {
     const [call] = calls as [PendingCall];
     stub.rpc(call.action, call.args, options).then((value) => call.resolve(structuredClone(value)), call.reject);

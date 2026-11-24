@@ -91,6 +91,18 @@ export interface ActionContext<TEnv = unknown> {
    * writes, at least once; a handler that throws records none.
    */
   outbox: Outbox;
+  /**
+   * Runs a part of the action that may fail on its own. The action itself is
+   * one transaction — all of its writes, or none when it throws —; a part run
+   * here is rolled back alone when it throws (its writes and the messages it
+   * pushed), and the action can go on:
+   *
+   *   try { await ctx.transaction(() => reserve(db, args)) } catch { await waitlist(db, args) }
+   *
+   * Two parts started at once run one after the other. An action called from
+   * another action of the same database runs as such a part.
+   */
+  transaction<T>(fn: () => Promise<T>): Promise<T>;
 }
 
 /**

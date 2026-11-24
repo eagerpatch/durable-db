@@ -416,30 +416,66 @@ export abstract class SqliteDurableObject<Env = unknown> extends DurableObject<E
   }
 
   /**
-   * Runs an action with `ctx.outbox`. The messages it pushed are written when
-   * it resolves — in the same synchronous block as its last writes, which the
-   * Durable Object commits together — and the alarm that delivers them is set
-   * with them: now, or, while the sink is taken for down, its next try, so a
-   * message recorded during an outage adds no alarm (the try still makes at
-   * most two sink calls). A handler that throws records nothing. An action
-   * called from another action of this database runs on the caller's context,
-   * and so on its outbox.
+   * Runs an action as one transaction (`ctx.storage.transaction()`): its
+   * writes, the messages it pushed to `ctx.outbox` and the alarm that delivers
+   * them are committed together when it resolves, and none of them when it
+   * throws. While it runs the object takes no other call — the runtime holds
+   * the next one until it resolves —, so two actions never interleave at an
+   * await, and an action that waits on I/O (another object, a fetch) holds
+   * its object for that long; after 30 s the runtime resets the object.
+   *
+   * `ctx.transaction(fn)` runs a part that may fail on its own: its writes and
+   * messages are rolled back when it throws, the rest of the action goes on
+   * (a savepoint). Two parts started at once run one after the other. An
+   * action called from another action of this database runs on the caller's
+   * context, in a part of its own.
+   *
+   * The messages are written to `__outbox` once the handler has resolved, and
+   * the alarm set to now — or, while the sink is taken for down, to its next
+   * try, so a message recorded during an outage adds no alarm (the try still
+   * makes at most two sink calls).
    */
-  protected async runWithOutbox<T>(ctx: { instanceKey: string; outbox?: Outbox }, run: () => Promise<T>): Promise<T> {
-    if (ctx.outbox) return run();
+  protected async runAction<T>(
+    ctx: { instanceKey: string; outbox?: Outbox; transaction?: <R>(fn: () => Promise<R>) => Promise<R> },
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const storage = this.ctx.storage;
+    // Already in an action (its context): a part of it.
+    if (ctx.outbox) return ctx.transaction ? ctx.transaction(run) : storage.transaction(() => run());
     const outbox = createActionOutbox(this.outboxSink !== null);
     ctx.outbox = outbox;
-    const result = await run();
-    const messages = outbox.take();
-    if (messages.length > 0) {
-      this.ensureOutboxTable();
-      const now = Date.now();
-      for (const message of messages) {
-        this.sql.exec(`INSERT INTO ${OUTBOX_TABLE} (instance_key, message, recorded_at) VALUES (?, ?, ?)`, ctx.instanceKey, message, now);
-      }
-      await this.ctx.storage.setAlarm(Math.max(now, this.outboxSinkState().down_until));
+    // A part of the action: what it pushed goes with it, from where it began
+    // (its siblings run one after the other: the mark is taken inside).
+    ctx.transaction = (fn) =>
+      storage.transaction(async () => {
+        const mark = outbox.mark();
+        try {
+          return await fn();
+        } catch (error) {
+          outbox.rewind(mark);
+          throw error;
+        }
+      });
+    const outboxWasReady = this.outboxReady;
+    try {
+      return await storage.transaction(async () => {
+        const result = await run();
+        const messages = outbox.take();
+        if (messages.length > 0) {
+          this.ensureOutboxTable();
+          const now = Date.now();
+          for (const message of messages) {
+            this.sql.exec(`INSERT INTO ${OUTBOX_TABLE} (instance_key, message, recorded_at) VALUES (?, ?, ?)`, ctx.instanceKey, message, now);
+          }
+          await storage.setAlarm(Math.max(now, this.outboxSinkState().down_until));
+        }
+        return result;
+      });
+    } catch (error) {
+      // The outbox's tables, if this run created them, were rolled back with it.
+      if (!outboxWasReady) this.outboxReady = false;
+      throw error;
     }
-    return result;
   }
 
   /**

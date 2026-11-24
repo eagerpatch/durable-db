@@ -79,7 +79,8 @@
     "dev": "tsdown --watch",
     "type-check": "tsc --noEmit -p . && tsc -p tests/type/tsconfig.json",
     "test": "vitest",
-    "test:run": "vitest run",
+    "test:run": "vitest run && vitest run -c vitest.workers.config.ts",
+    "test:workers": "vitest run -c vitest.workers.config.ts",
     "changeset": "changeset"
   },
   "dependencies": {

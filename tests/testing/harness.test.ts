@@ -302,3 +302,171 @@ describe('createTestDatabase: the outbox', () => {
     t.destroy();
   });
 });
+
+// An action is one transaction of its object in production (runAction, the
+// workers tests): the test database runs it the same way, so a test that
+// passes here does not pass on a guarantee production lacks.
+describe('createTestDatabase: an action is one transaction', () => {
+  const vouchers = table('vouchers', { id: integer().primaryKey({ autoIncrement: true }), number: integer().notNull().unique() });
+  const lines = table('lines', { id: integer().primaryKey({ autoIncrement: true }), note: text().notNull() });
+  const balances = table('balances', { id: integer().primaryKey(), amount: integer().notNull() });
+  const ledger = { vouchers, lines, balances };
+  const { action: ledgerAction } = defineDatabase({ schema: ledger });
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const post = ledgerAction({
+    args: { number: 'number', again: 'boolean' },
+    handler: async (db, args) => {
+      await db.insertInto('vouchers').values({ number: args.number }).execute();
+      await db.insertInto('lines').values({ note: `debit ${args.number}` }).execute();
+      await db.insertInto('lines').values({ note: `credit ${args.number}` }).execute();
+      if (args.again) await db.insertInto('vouchers').values({ number: args.number }).execute();
+    },
+  });
+  const addToBalance = ledgerAction({
+    args: { amount: 'number' },
+    handler: async (db, args) => {
+      const row = await db.selectFrom('balances').select('amount').where('id', '=', 1).executeTakeFirst();
+      await sleep(2);
+      const next = (row?.amount ?? 0) + args.amount;
+      await db.insertInto('balances').values({ id: 1, amount: next }).onConflict((oc) => oc.column('id').doUpdateSet({ amount: next })).execute();
+      return next;
+    },
+  });
+  const failing = ledgerAction({
+    args: {},
+    handler: async (db): Promise<void> => {
+      await db.insertInto('lines').values({ note: 'callee' }).execute();
+      throw new Error('the callee failed');
+    },
+  });
+  const callsFailing = ledgerAction({
+    args: {},
+    handler: async (db) => {
+      await db.insertInto('lines').values({ note: 'caller' }).execute();
+      await failing({}).catch(() => {});
+      return 'went on';
+    },
+  });
+  const withPart = ledgerAction({
+    args: { fail: 'boolean' },
+    handler: async (db, args, ctx) => {
+      ctx.outbox.push('outer');
+      await ctx
+        .transaction(async () => {
+          await db.insertInto('lines').values({ note: 'part' }).execute();
+          ctx.outbox.push('part');
+          if (args.fail) throw new Error('the part failed');
+        })
+        .catch(() => {});
+      await db.insertInto('lines').values({ note: 'after' }).execute();
+    },
+  });
+  const siblingParts = ledgerAction({
+    args: {},
+    handler: async (db, _args, ctx) => {
+      const log: string[] = [];
+      const first = ctx
+        .transaction(async () => {
+          log.push('first starts');
+          await db.insertInto('lines').values({ note: 'first' }).execute();
+          await sleep(10);
+          throw new Error('first');
+        })
+        .catch(() => log.push('first rolled back'));
+      const second = ctx.transaction(async () => {
+        log.push('second starts');
+        await db.insertInto('lines').values({ note: 'second' }).execute();
+      });
+      await Promise.all([first, second]);
+      return log;
+    },
+  });
+  const kyselyTransaction = ledgerAction({
+    args: {},
+    handler: async (db) => db.transaction().execute(async (trx) => trx.insertInto('lines').values({ note: 'kysely' }).execute()),
+  });
+
+  const notes = (t: { sqlite: { prepare(sql: string): { all(): unknown[] } } }) =>
+    (t.sqlite.prepare('SELECT note FROM lines ORDER BY id').all() as Array<{ note: string }>).map((row) => row.note);
+
+  it('keeps none of its writes when a statement fails part-way', async () => {
+    const t = await createTestDatabase({ schema: ledger, outbox: async () => {} });
+    await t.run(post, { number: 1, again: false });
+    await expect(t.run(post, { number: 2, again: true })).rejects.toThrow(/UNIQUE constraint failed/);
+    expect(notes(t)).toEqual(['debit 1', 'credit 1']);
+    t.destroy();
+  });
+
+  it('runs the calls of a database one after the other, across an await', async () => {
+    const t = await createTestDatabase({ schema: ledger });
+    const sums = await Promise.all(Array.from({ length: 5 }, () => addToBalance({ amount: 10 })));
+    expect(sums.sort((a, b) => a - b)).toEqual([10, 20, 30, 40, 50]);
+    t.destroy();
+  });
+
+  it('rolls back a part that fails on its own, its messages with it, and goes on', async () => {
+    const t = await createTestDatabase({ schema: ledger, outbox: async () => {} });
+    await t.run(withPart, { fail: true });
+    expect(notes(t)).toEqual(['after']);
+    expect(t.outbox.map((envelope) => envelope.message)).toEqual(['outer']);
+    await t.run(withPart, { fail: false });
+    expect(t.outbox.map((envelope) => envelope.message)).toEqual(['outer', 'outer', 'part']);
+    t.destroy();
+  });
+
+  it('runs two parts started at once one after the other', async () => {
+    const t = await createTestDatabase({ schema: ledger });
+    expect(await t.run(siblingParts, {})).toEqual(['first starts', 'first rolled back', 'second starts']);
+    expect(notes(t)).toEqual(['second']);
+    t.destroy();
+  });
+
+  it('rolls back an action of the same database called from one when it throws', async () => {
+    const t = await createTestDatabase({ schema: ledger });
+    expect(await t.run(callsFailing, {})).toBe('went on');
+    expect(notes(t)).toEqual(['caller']);
+    t.destroy();
+  });
+
+  it("refuses Kysely's db.transaction(), naming ctx.transaction()", async () => {
+    const t = await createTestDatabase({ schema: ledger });
+    await expect(t.run(kyselyTransaction, {})).rejects.toThrow(/ctx\.transaction\(/);
+    t.destroy();
+  });
+
+  it('refuses a call back into a database an action further out runs in', async () => {
+    const audit = table('audit', { id: integer().primaryKey({ autoIncrement: true }), note: text().notNull() });
+    const { action: auditAction } = defineDatabase({ schema: { audit } });
+    const ping = ledgerAction({ args: {}, handler: async () => 'pong' });
+    const logAndPing = auditAction({ args: {}, handler: async () => ping({}) });
+    const callsAudit = ledgerAction({ args: {}, handler: async () => logAndPing({}) });
+    const t = await createTestDatabase({ schema: ledger, database: 'ledger' });
+    const a = await createTestDatabase({ schema: { audit }, database: 'audit' });
+    await expect(t.run(callsAudit, {})).rejects.toThrow(
+      /A call into ledger \(test\), which is waiting on this call: ledger \(test\) → audit \(test\) → ledger \(test\)/,
+    );
+    // Not a cycle: the other database, alone.
+    expect(await logAndPing({}).catch((error: Error) => error.message)).toBe('pong');
+    a.destroy();
+    t.destroy();
+  });
+
+  it('runs a handler with validated args: runHandler()', async () => {
+    const t = await createTestDatabase({ schema: ledger, outbox: async () => {} });
+    const value = await t.runHandler(async (db, args: { note: string }, ctx) => {
+      await db.insertInto('lines').values({ note: args.note }).execute();
+      ctx.outbox.push('handled');
+      return ctx.instanceKey;
+    }, { note: 'handled' });
+    expect(value).toBe('test');
+    expect(notes(t)).toEqual(['handled']);
+    expect(t.outbox.map((envelope) => envelope.message)).toEqual(['handled']);
+    await expect(t.runHandler(async (db) => {
+      await db.insertInto('lines').values({ note: 'gone' }).execute();
+      throw new Error('handler failed');
+    }, {})).rejects.toThrow('handler failed');
+    expect(notes(t)).toEqual(['handled']);
+    t.destroy();
+  });
+});

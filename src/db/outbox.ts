@@ -385,13 +385,25 @@ export function tenantOfInstanceKey(instanceKey: string, origin: InstanceKeyOrig
   return instanceKey.replace(DEV_EPOCH_SUFFIX, '');
 }
 
+/** The outbox of one action run, as the object holds it: what was pushed, and where a part of the run began. */
+export interface ActionOutbox extends Outbox {
+  /** The messages pushed, handed over once the run has resolved (and emptied). */
+  take(): string[];
+  /** Where the messages stand now: a part of the run that may fail on its own begins here. */
+  mark(): number;
+  /** Drops what was pushed since `mark`: the part that pushed it failed, and its writes were rolled back. */
+  rewind(mark: number): void;
+}
+
 /**
  * The outbox of one action run: `push()` collects, and once the handler has
  * resolved `take()` hands the messages over to be written. A message must be
  * a JSON value; it is checked (serialized) when pushed, so a bad one fails
- * the action that pushed it rather than a delivery later.
+ * the action that pushed it rather than a delivery later. A part of the run
+ * that is rolled back on its own (`ctx.transaction()`, an action it calls)
+ * takes its messages with it: `rewind()` to the `mark()` it began at.
  */
-export function createActionOutbox(sinkConfigured: boolean): Outbox & { take(): string[] } {
+export function createActionOutbox(sinkConfigured: boolean): ActionOutbox {
   let messages: string[] = [];
   return {
     push(message) {
@@ -409,6 +421,10 @@ export function createActionOutbox(sinkConfigured: boolean): Outbox & { take(): 
       const taken = messages;
       messages = [];
       return taken;
+    },
+    mark: () => messages.length,
+    rewind(mark) {
+      messages.length = Math.min(messages.length, mark);
     },
   };
 }

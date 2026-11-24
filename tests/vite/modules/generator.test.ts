@@ -325,7 +325,7 @@ export const createUser = action({
     // to one object in the same turn share an RPC, and the result is
     // structuredClone'd there — Cloudflare's RPC attaches a top-level
     // Symbol.dispose that React Server Components refuse to serialize.
-    expect(result!.code).toContain('__ddRpc(env.MAIN_DATABASE_DO, instanceKey, "createUser", validatedArgs)');
+    expect(result!.code).toContain('__ddRpc(env.MAIN_DATABASE_DO, instanceKey, "createUser", validatedArgs, "main")');
     expect(result!.code).toMatch(/batchedRpc as __ddRpc/);
     expect(result!.code).not.toContain('stub.rpc(');
   });
@@ -853,7 +853,7 @@ export const createUser = action({
       expect(result!.code).toContain('export async function createUser(args)');
       expect(result!.code).toContain('registerAction("main", "createUser"');
       // One RPC per object per turn: the call goes through the registry's batchedRpc.
-      expect(result!.code).toContain('__ddRpc(env.MAIN_DATABASE_DO, instanceKey, "createUser", validatedArgs)');
+      expect(result!.code).toContain('__ddRpc(env.MAIN_DATABASE_DO, instanceKey, "createUser", validatedArgs, "main")');
       // The args schema is compiled at its first use, once per isolate, not per call.
       expect(result!.code).toMatch(/var __args_createUser;\s*function __validator_createUser\(\) \{\s*return __args_createUser \|\| \(__args_createUser = __ddType\(/);
       expect(result!.code).toContain('const argsSchema = __validator_createUser();');

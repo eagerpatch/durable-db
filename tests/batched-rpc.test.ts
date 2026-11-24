@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { batchedRpc, batchScope, cachedArgsSchema, type BatchedResult } from '../src/registry';
+import { ActionCycleError, batchedRpc, batchScope, cachedArgsSchema, runWithDoContext, type BatchedResult } from '../src/registry';
 // The Durable Object base class extends cloudflare:workers' DurableObject, which only workerd has.
 vi.mock('cloudflare:workers', () => ({ DurableObject: class {} }));
 const { SqliteDurableObject } = await import('../src/db/SqliteDurableObject');
@@ -130,6 +130,47 @@ describe('batchedRpc', () => {
     expect(results.map((result) => (result as { action: string }).action)).toEqual(['count', 'list']);
     // Plain values, as from a batch: the RPC's Symbol.dispose is dropped.
     expect(Object.getOwnPropertySymbols(results[0] as object)).toEqual([]);
+  });
+});
+
+// A call from an action: its object holds itself until the action resolves,
+// so the call names the objects waiting on it, and one back into any of them
+// is refused before it is sent.
+describe('batchedRpc from an action', () => {
+  const inAction = <T>(via: Array<{ database: string; instanceKey: string }> | undefined, fn: () => T): T =>
+    runWithDoContext({ db: null, ctx: { env: {}, dbName: 'ledger', dbBindingNames: {}, instanceKey: 'acme' }, dbName: 'ledger', instanceKey: 'acme', via }, fn);
+
+  it('names the objects waiting on it, and goes alone even inside an invocation', async () => {
+    const { ns, rpc, rpcBatch } = namespace();
+    await batchScope(() =>
+      inAction([{ database: 'billing', instanceKey: 'acme' }], () =>
+        Promise.all([batchedRpc(ns, 'acme', 'count', {}, 'stock'), batchedRpc(ns, 'acme', 'list', {}, 'stock')]),
+      ),
+    );
+    expect(rpcBatch).not.toHaveBeenCalled();
+    expect(rpc.mock.calls).toEqual([
+      ['count', {}, { instanceKey: 'acme', via: [{ database: 'billing', instanceKey: 'acme' }, { database: 'ledger', instanceKey: 'acme' }] }],
+      ['list', {}, { instanceKey: 'acme', via: [{ database: 'billing', instanceKey: 'acme' }, { database: 'ledger', instanceKey: 'acme' }] }],
+    ]);
+  });
+
+  it('refuses a call into an object waiting on it, before sending it', async () => {
+    const { ns, rpc } = namespace();
+    const back = inAction([{ database: 'billing', instanceKey: 'acme' }], () => batchedRpc(ns, 'acme', 'post', {}, 'billing'));
+    await expect(back).rejects.toBeInstanceOf(ActionCycleError);
+    await expect(back).rejects.toThrow('[db] post: a call into billing (acme), which is waiting on this call: billing (acme) → ledger (acme) → billing (acme).');
+    const self = inAction(undefined, () => batchedRpc(ns, 'acme', 'post', {}, 'ledger'));
+    await expect(self).rejects.toThrow('ledger (acme) → ledger (acme)');
+    expect(rpc).not.toHaveBeenCalled();
+    // Another tenant's object is another object.
+    await inAction(undefined, () => batchedRpc(ns, 'fika', 'post', {}, 'ledger'));
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends no chain from the worker', async () => {
+    const { ns, rpc } = namespace();
+    await batchedRpc(ns, 'acme', 'count', {}, 'ledger');
+    expect(rpc.mock.calls[0]?.[2]).toEqual({ instanceKey: 'acme' });
   });
 });
 

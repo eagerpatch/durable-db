@@ -451,7 +451,7 @@ export class TestOutboxDO extends SqliteDurableObject<{ OUTBOX_LOG: KVNamespace 
     await this.ensureMigrations();
     const ctx: { instanceKey: string; outbox?: { push(message: unknown): void } } = { instanceKey };
     try {
-      return await this.runWithOutbox(ctx, async () => {
+      return await this.runAction(ctx, async () => {
         this.sql.exec('INSERT INTO notes (text) VALUES (?)', 'note');
         for (const message of messages) ctx.outbox!.push(message);
         if (fail) throw new Error('the action failed');

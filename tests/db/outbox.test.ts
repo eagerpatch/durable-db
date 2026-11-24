@@ -236,9 +236,11 @@ describe('the generated Durable Objects and the outbox', () => {
     transport: 'rpc',
   };
 
-  it('runs every handler with ctx.outbox, and sets no sink without the option', () => {
+  it('runs every handler as one transaction with ctx.outbox, and sets no sink without the option', () => {
     const code = generateDurableObjectsModule([database], 'durable-db/registry');
-    expect(code).toContain('this.runWithOutbox(ctx, async () => entry.handler(this.db, validated, ctx))');
+    expect(code).toContain('this.runAction(ctx, async () => entry.handler(this.db, validated, ctx))');
+    // The objects waiting on the call, which a call the action makes may not go back into.
+    expect(code).toMatch(/tenantId: this\.tenantOf\(ctx\.instanceKey\),\s*via: rpcContext\?\.via\s*\}/);
     expect(code).not.toContain('outboxSink');
     expect(code).not.toContain('outboxMaxAttempts');
   });

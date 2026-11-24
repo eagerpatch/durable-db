@@ -274,7 +274,40 @@ Receives three arguments:
 |----------|------|-------------|
 | `db` | `Kysely<Schema>` | Type-safe Kysely query builder bound to your Drizzle schema |
 | `args` | inferred from `args` | Validated arguments |
-| `ctx` | `ActionContext` | Context with `env` (Cloudflare bindings) and `instanceKey` |
+| `ctx` | `ActionContext` | Context with `env` (Cloudflare bindings), `instanceKey`, `outbox` ([the outbox](#the-outbox)) and `transaction` (a part that may fail on its own, below) |
+
+### One transaction
+
+An action runs as one transaction of its Durable Object (`ctx.storage.transaction()`): when the handler resolves, its writes — and the messages it pushed to [the outbox](#the-outbox), with the alarm that delivers them — are committed together; when it throws, none of them are. A voucher and its lines, an invoice and its number: all or nothing.
+
+```ts
+export const postVoucher = action({
+  args: { series: 'string', lines: [{ account: 'string', amountOre: 'number.integer' }, '[]'] },
+  handler: async (db, args, ctx) => {
+    const last = await db.selectFrom('vouchers').select((eb) => eb.fn.max('number').as('n')).where('series', '=', args.series).executeTakeFirst();
+    const voucher = await db.insertInto('vouchers').values({ series: args.series, number: (last?.n ?? 0) + 1 }).returningAll().executeTakeFirstOrThrow();
+    await db.insertInto('lines').values(args.lines.map((line) => ({ voucherId: voucher.id, ...line }))).execute();
+    ctx.outbox.push({ type: 'voucher-posted', id: voucher.id });
+    return voucher;
+  },
+});
+```
+
+- **No other call in between.** While an action runs, its object takes no other call: the runtime holds the next one until the action has resolved. So two actions never interleave — not at an `await` on another object or a `fetch`, not when several calls arrive while the object migrates —, and a read followed by a write (`max(number) + 1`, a balance) is never lost to another call.
+- **A part that may fail on its own.** `ctx.transaction(async () => { … })` runs a part of the action as a savepoint: when it throws, its writes and the messages it pushed are rolled back, the error is the caller's to catch, and the action goes on. Two parts started at once run one after the other. An action called from another action of the same database runs as such a part, so it too is all or nothing.
+
+  ```ts
+  try {
+    await ctx.transaction(() => reserveSeat(db, args));
+  } catch {
+    await db.insertInto('waitlist').values(args).execute();
+  }
+  ```
+- **Kysely's `db.transaction()`** is refused, naming `ctx.transaction()`: the action already is one, and a Durable Object refuses SQL's `BEGIN` and `SAVEPOINT` anyway.
+- **An action holds its object.** An action that waits on I/O — another database's action, a `fetch` — holds its object for that long, every other call of it waiting. Keep slow work out of actions (call it from the worker, or [push it to the outbox](#the-outbox)). The runtime resets an object whose action runs for more than 30 s, and the action's writes are rolled back.
+- **Across objects nothing is atomic.** An action of another database (another object, or another tenant's) runs as a transaction of its own and commits on its own: when the calling action then throws, what the other one wrote stays. Use the outbox for the step that must follow a commit.
+- **Calls between objects, in one direction.** An action that calls another database's action holds its object while the other runs. A call back into an object waiting on it — `billing → ledger → billing`, at any depth — would wait for itself; it is refused at once with an `ActionCycleError` naming the chain (from `durable-db/registry`). Two requests that call two objects in opposite orders (`billing → ledger` and `ledger → billing` at the same moment) wait for each other until the runtime resets them: keep calls between databases in one direction, or make them from the worker.
+- **What it costs.** A transaction is about 0.07 ms of an action's time in the object (local workerd).
 
 ### File organization
 
@@ -1019,6 +1052,8 @@ t.destroy();
 
 While a test database is live, an action called directly — from a page, a procedure, a job under test — runs against the newest live test database created with every table of the action's database.
 
+An action runs there as [in its Durable Object](#one-transaction): one transaction (`BEGIN … COMMIT`, rolled back when it throws), one at a time per test database — a run started while another runs waits for it —, `ctx.transaction()` and an action of the same database called from one as a savepoint, Kysely's `db.transaction()` refused, and a call back into a test database an action further out runs in refused with the `ActionCycleError` production gives. `t.runHandler(handler, args)` runs a handler whose args are already validated the same way, for a library that finds an action's handler itself.
+
 ---
 
 ## Outerbase Studio Integration
@@ -1167,7 +1202,7 @@ export default async function deliver(envelopes: readonly OutboxEnvelope[], { en
 }
 ```
 
-- **With the action's writes.** The messages are written to the object's `__outbox` table when the handler resolves, in the same synchronous block as its last writes — the Durable Object commits them together — and the alarm that delivers them is set with them. A handler that throws records none. An action called from another action of the same database shares its outbox.
+- **With the action's writes.** The messages are written to the object's `__outbox` table when the handler resolves, in [the action's transaction](#one-transaction), and the alarm that delivers them is set in it: committed with the action's writes, or — when it throws — none of them. A part of the action that is rolled back on its own (`ctx.transaction()`) takes the messages it pushed with it. An action called from another action of the same database shares its outbox.
 - **At least once, oldest first.** The alarm hands the sink the oldest messages that are due, by id, up to 100 in a call, and deletes what it delivered. A message may arrive twice — make what consumes it idempotent. No order is kept across a failure: a message that failed waits on its own backoff while the ones behind it go on.
 - **A failure counts only in an alarm that delivered another message.** What a call did not deliver is halved, and both halves are tried next in the same alarm, so a message the sink cannot take ends up the one of its call not delivered, and the rest are delivered: of 100 messages with one bad, the other 99 go in that alarm — unless the bad one is the oldest of the read and the sink fails every call that holds it: then it fails alone before anything was delivered and takes the sink for down, and the 99 go at the next try, 5 s later (see below). A group that fails moves no clock and counts nothing. A message that fails alone — the one of its call not delivered — waits on its own backoff (5 s, doubling, at most 5 minutes), and the failure counts toward `maxAttempts` only when the sink delivered another message in the same alarm, in that call or earlier. So an alarm in which the sink delivers nothing counts nothing, and an outage counts at most one failure a message.
 - **When the sink is down.** A failure alone before anything was delivered in its alarm cannot be told from an outage: it counts nothing, and the sink is taken for down. Until its next try nothing is read or called, and a message recorded meanwhile sets no alarm of its own. The try (5 s, doubling, at most 5 minutes) hands the sink the newest message alone and, if the sink does not take it, the one tried or recorded longest ago alone; one it neither takes nor answers in `{ dead }` goes behind every message recorded or tried before it, its count and backoff as they were, and one it answers in `{ dead }` is moved to `__outbox_dead`. The first try at which the sink takes one ends it, and the alarm goes on. So, over tries at which the sink takes nothing, every waiting message is handed alone by the try after as many tries as there are messages ahead of it; a message recorded meanwhile goes behind it (and is handed first, as the newest).
@@ -1210,8 +1245,8 @@ export const createUser = action({
 
 ### Routing behavior
 
-- **Same database**: The call uses a direct fast path via AsyncLocalStorage (no RPC overhead). The registry detects that we're already inside the target DO and calls the handler directly.
-- **Cross database**: The call routes through RPC to the other database's Durable Object, using the appropriate instance key based on the target database's strategy.
+- **Same database**: The call uses a direct fast path via AsyncLocalStorage (no RPC overhead). The registry detects that we're already inside the target DO and calls the handler directly, as a part of the caller's transaction (`ctx.transaction()`): when it throws, its writes are rolled back and the caller may go on.
+- **Cross database**: The call routes through RPC to the other database's Durable Object, using the appropriate instance key based on the target database's strategy. It is a transaction of its own there, and the caller's object waits for it: a call back into an object waiting on it is refused (`ActionCycleError`, see [One transaction](#one-transaction)).
 
 ---
 

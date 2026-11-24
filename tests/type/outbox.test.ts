@@ -23,3 +23,16 @@ describe('the outbox sink', () => {
     void sink;
   });
 });
+
+// A part of an action that may fail on its own answers what its function does.
+describe('ctx.transaction', () => {
+  it('answers what the part answers', () => {
+    const handler = async (_db: unknown, _args: unknown, ctx: import('../../src/db/types').ActionContext) => {
+      const id = await ctx.transaction(async () => 42);
+      expectTypeOf(id).toEqualTypeOf<number>();
+      // @ts-expect-error a part is async: it is run inside the object's transaction, awaited
+      ctx.transaction(() => 42);
+    };
+    void handler;
+  });
+});

@@ -633,11 +633,12 @@ function buildDoContextTenantProperty(): t.ObjectProperty {
 }
 
 /**
- * `this.runWithOutbox(ctx, async () => entry.handler(this.db, validated, ctx))`:
- * the handler with `ctx.outbox`, its messages written when it resolves.
+ * `this.runAction(ctx, async () => entry.handler(this.db, validated, ctx))`:
+ * the handler as one transaction, with `ctx.outbox` and `ctx.transaction` —
+ * its writes and its messages committed together when it resolves.
  */
 function buildOutboxHandlerCall(): t.CallExpression {
-  return t.callExpression(t.memberExpression(t.thisExpression(), t.identifier('runWithOutbox')), [
+  return t.callExpression(t.memberExpression(t.thisExpression(), t.identifier('runAction')), [
     t.identifier('ctx'),
     t.arrowFunctionExpression(
       [],
@@ -754,7 +755,8 @@ function buildRpcMethod(
       ),
     ]),
 
-    // return runWithDoContext({ db: this.db, ctx, dbName: "...", instanceKey: ctx.instanceKey, tenantId: this.tenantOf(ctx.instanceKey) }, async () => ...)
+    // return runWithDoContext({ db: this.db, ctx, dbName: "...", instanceKey: ctx.instanceKey, tenantId: this.tenantOf(ctx.instanceKey), via: rpcContext?.via }, async () => ...)
+    // `via`: the objects waiting on this call, which a call the action makes may not go back into.
     t.returnStatement(
       t.callExpression(t.identifier('runWithDoContext'), [
         t.objectExpression([
@@ -769,6 +771,10 @@ function buildRpcMethod(
             t.memberExpression(t.identifier('ctx'), t.identifier('instanceKey'))
           ),
           buildDoContextTenantProperty(),
+          t.objectProperty(
+            t.identifier('via'),
+            t.optionalMemberExpression(t.identifier('rpcContext'), t.identifier('via'), false, true)
+          ),
         ]),
         t.arrowFunctionExpression(
           [],
@@ -1215,7 +1221,7 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
 
   return [
     ...commonStatements,
-    // return __ddRpc(env.BINDING, instanceKey, "action", validatedArgs);
+    // return __ddRpc(env.BINDING, instanceKey, "action", validatedArgs, "dbName");
     //
     // batchedRpc: the calls to the same object started before the code waits
     // on I/O go in ONE RPC (rpcBatch), a lone call is a plain rpc; results are plain values
@@ -1227,6 +1233,8 @@ function buildStubBodyStatements(config: StubConfig): t.Statement[] {
         t.identifier('instanceKey'),
         t.stringLiteral(action.exportName),
         t.identifier('validatedArgs'),
+        // the target's name: a call from an action into an object waiting on it is refused (ActionCycleError)
+        t.stringLiteral(database.name),
       ])
     ),
   ];

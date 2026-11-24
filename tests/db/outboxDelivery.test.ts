@@ -52,6 +52,9 @@ function createState() {
       },
       getCurrentBookmark: vi.fn().mockRejectedValue(new Error('PITR not available')),
       onNextSessionRestoreBookmark: vi.fn(),
+      // An action's transaction, as a pass-through: what these tests drive is the delivery; a
+      // rollback, and the runtime holding other calls meanwhile, are the workers tests'.
+      transaction: async <T>(fn: () => Promise<T>): Promise<T> => fn(),
       setAlarm: vi.fn(async (at: number) => {
         alarm = at;
       }),
@@ -99,7 +102,7 @@ function outboxDatabase(options: {
     };
     async record(instanceKey: string, messages: unknown[]): Promise<void> {
       const ctx: { instanceKey: string; outbox?: { push(message: unknown): void } } = { instanceKey };
-      await this.runWithOutbox(ctx, async () => {
+      await this.runAction(ctx, async () => {
         for (const message of messages) ctx.outbox!.push(message as never);
       });
     }
@@ -531,14 +534,14 @@ describe('the outbox delivery', () => {
         await t.alarm();
         now = t.alarmAt()!;
         await t.database.record('acme', ['old-good 2']);
-        const db = t.database as unknown as { runWithOutbox(ctx: unknown, run: () => Promise<void>): Promise<void> };
+        const db = t.database as unknown as { runAction(ctx: unknown, run: () => Promise<void>): Promise<void> };
         let action: Promise<void> | null = null;
         t.sink(async (envelopes) => {
           // The sink's last turn schedules a wipe and an action on the new storage, which gets id 1 again.
           void Promise.resolve().then(() => {
             void Promise.resolve().then(() => destroy(t));
             const ctx: { instanceKey: string; outbox?: { push(message: unknown): void } } = { instanceKey: 'acme' };
-            action = db.runWithOutbox(ctx, async () => {
+            action = db.runAction(ctx, async () => {
               ctx.outbox!.push('new' as never);
             });
           });

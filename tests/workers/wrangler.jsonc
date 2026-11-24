@@ -46,6 +46,14 @@
       {
         "name": "TEST_RELATED_DO",
         "class_name": "TestRelatedDO"
+      },
+      {
+        "name": "TEST_ATOMIC_DO",
+        "class_name": "TestAtomicDO"
+      },
+      {
+        "name": "TEST_ATOMIC_OTHER_DO",
+        "class_name": "TestAtomicOtherDO"
       }
     ]
   },
@@ -83,6 +91,13 @@
       "tag": "v5",
       "new_sqlite_classes": [
         "TestGlobalOutboxDO"
+      ]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": [
+        "TestAtomicDO",
+        "TestAtomicOtherDO"
       ]
     }
   ],

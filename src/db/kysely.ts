@@ -7,7 +7,6 @@ import {
   type DatabaseConnection,
   type Driver,
   type QueryResult,
-  type TransactionSettings,
   type KyselyPlugin
 } from 'kysely';
 import type { SQLiteTableWithColumns } from 'drizzle-orm/sqlite-core';
@@ -184,35 +183,25 @@ class CloudflareSqliteDriver implements Driver {
     return new CloudflareSqliteConnection(this.sql);
   }
 
-  async beginTransaction(connection: DatabaseConnection, settings: TransactionSettings): Promise<void> {
-    if (settings.isolationLevel) {
-      throw new Error('SQLite does not support isolation levels');
-    }
-    await connection.executeQuery(createCompiledQuery('BEGIN'));
+  // A Durable Object refuses SQL's BEGIN and SAVEPOINT (its storage's own
+  // transaction() is the way), and an action already runs as one transaction:
+  // Kysely's db.transaction() is refused here, saying what to use instead —
+  // the same in the test harness, whose SQLite would take it.
+  async beginTransaction(): Promise<void> {
+    throw new Error(
+      "[db] db.transaction() is not available: every action already runs as one transaction — all of its writes, " +
+        "or none when it throws. For a part that may fail on its own, use ctx.transaction(async () => { … }) " +
+        "(the handler's third argument): its writes are rolled back when it throws, and the action goes on.",
+    );
   }
 
-  async commitTransaction(connection: DatabaseConnection): Promise<void> {
-    await connection.executeQuery(createCompiledQuery('COMMIT'));
-  }
+  async commitTransaction(): Promise<void> {}
 
-  async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
-    await connection.executeQuery(createCompiledQuery('ROLLBACK'));
-  }
+  async rollbackTransaction(): Promise<void> {}
 
   async releaseConnection(): Promise<void> {}
 
   async destroy(): Promise<void> {}
-}
-
-/**
- * Helper to create a CompiledQuery object
- */
-function createCompiledQuery(sql: string, parameters: readonly unknown[] = []): CompiledQuery {
-  return {
-    sql,
-    parameters,
-    query: { kind: 'RawNode', sqlFragments: [sql], parameters: [] },
-  } as unknown as CompiledQuery;
 }
 
 /**
